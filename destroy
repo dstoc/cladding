@@ -1,0 +1,2 @@
+#!/bin/sh
+podman rm -f cli-pod sandbox-pod proxy-pod

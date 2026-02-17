@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+NETWORK=secure_net
+
+if ! podman network exists "$NETWORK"; then
+  podman network create "$NETWORK"
+fi
+
+sed "s|PROJECT_ROOT|$(pwd)|g" pods.yaml | podman play kube --network "$NETWORK" -

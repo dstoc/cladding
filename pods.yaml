@@ -1,0 +1,106 @@
+# ==========================================
+# POD 1: THE PROXY
+# ==========================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: proxy-pod
+  labels:
+    app: proxy
+spec:
+  containers:
+  - name: proxy
+    image: docker.io/library/haproxy:alpine
+    # Run our new startup script
+    command: ["/bin/sh", "/opt/haproxy/startup.sh"]
+    
+    volumeMounts:
+    - name: haproxy-dir
+      mountPath: /opt/haproxy
+      
+    ports:
+    - containerPort: 8080
+      hostPort: 5050
+
+  volumes:
+  - name: haproxy-dir
+    hostPath:
+      path: PROJECT_ROOT/haproxy
+      type: Directory
+
+---
+# ==========================================
+# POD 2: THE SANDBOX
+# ==========================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sandbox-pod
+  labels:
+    app: sandbox
+spec:
+  containers:
+  # 1. Jailer
+  - name: sandbox-node
+    image: alpine:latest
+    securityContext:
+      capabilities:
+        add: ["NET_ADMIN"]
+    volumeMounts:
+    - name: scripts-dir
+      mountPath: /opt/scripts
+    command: ["/bin/sh", "/opt/scripts/jail_sandbox.sh"]
+
+  # 2. App
+  - name: sandbox-app
+    image: alpine:latest
+    command: ["sleep", "infinity"]
+
+  volumes:
+  - name: scripts-dir
+    hostPath:
+      # USE A PLACEHOLDER HERE
+      path: PROJECT_ROOT/scripts
+      type: Directory
+
+---
+# ==========================================
+# POD 3: THE CLI
+# ==========================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cli-pod
+  labels:
+    app: cli
+spec:
+  containers:
+  # 1. Jailer
+  - name: cli-node
+    image: alpine:latest
+    securityContext:
+      capabilities:
+        add: ["NET_ADMIN"]
+    volumeMounts:
+    - name: scripts-dir
+      mountPath: /opt/scripts
+    command: ["/bin/sh", "/opt/scripts/jail_cli.sh"]
+
+  # 2. App
+  - name: cli-app
+    image: alpine:latest
+    command: ["sleep", "infinity"]
+    env:
+    - name: http_proxy
+      value: "http://proxy-pod:8080"
+    - name: https_proxy
+      value: "http://proxy-pod:8080"
+    - name: no_proxy
+      value: "sandbox-pod,localhost,127.0.0.1"
+
+  volumes:
+  - name: scripts-dir
+    hostPath:
+      # USE A PLACEHOLDER HERE
+      path: PROJECT_ROOT/scripts
+      type: Directory
