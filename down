@@ -1,2 +1,3 @@
 #!/bin/sh
-sed "s|PROJECT_ROOT|$(pwd)|g" pods.yaml | podman play kube --down -
+sed -e "s|PROJECT_ROOT|$(pwd)|g" \
+    pods.yaml | podman play kube --down -

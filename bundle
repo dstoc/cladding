@@ -2,8 +2,6 @@
 set -e
 
 podman build \
-  --build-arg UID="$(id -u)" \
-  --build-arg GID="$(id -g)" \
   -t localhost/gemini-cli:latest \
   -f Containerfile.gemini \
   .

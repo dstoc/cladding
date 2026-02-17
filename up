@@ -2,14 +2,10 @@
 set -e
 
 NETWORK=secure_net
-IMAGE=localhost/gemini-cli:latest
 
 if ! podman network exists "$NETWORK"; then
   podman network create "$NETWORK"
 fi
 
-if ! podman image exists "$IMAGE"; then
-  ./bundle
-fi
-
-sed "s|PROJECT_ROOT|$(pwd)|g" pods.yaml | podman play kube --network "$NETWORK" -
+sed -e "s|PROJECT_ROOT|$(pwd)|g" \
+    pods.yaml | podman play kube --network "$NETWORK" -

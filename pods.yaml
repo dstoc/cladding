@@ -73,6 +73,8 @@ metadata:
   name: cli-pod
   labels:
     app: cli
+  annotations:
+    io.podman.annotations.userns: "keep-id"
 spec:
   containers:
   # 1. Jailer
