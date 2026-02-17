@@ -10,22 +10,22 @@ metadata:
 spec:
   containers:
   - name: proxy
-    image: docker.io/library/haproxy:alpine
+    image: docker.io/ubuntu/squid:latest
     # Run our new startup script
-    command: ["/bin/sh", "/opt/haproxy/startup.sh"]
+    command: ["/bin/sh", "/opt/proxy/startup.sh"]
     
     volumeMounts:
-    - name: haproxy-dir
-      mountPath: /opt/haproxy
+    - name: proxy-dir
+      mountPath: /opt/proxy
       
     ports:
     - containerPort: 8080
       hostPort: 5050
 
   volumes:
-  - name: haproxy-dir
+  - name: proxy-dir
     hostPath:
-      path: PROJECT_ROOT/haproxy
+      path: PROJECT_ROOT/proxy
       type: Directory
 
 ---

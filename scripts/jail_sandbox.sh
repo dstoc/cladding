@@ -11,7 +11,7 @@ apk add --no-cache nftables iproute2
 PROXY_IP=""
 while [ -z "$PROXY_IP" ]; do
   echo "Waiting for proxy..."
-  PROXY_IP=$(getent hosts proxy-pod | awk '{ print $1 }' | head -n 1)
+  PROXY_IP=$(getent hosts proxy-pod | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
   sleep 1
 done
 
