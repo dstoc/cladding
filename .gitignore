@@ -1,2 +1,6 @@
 dot-gemini/*
+dot-gemini
 !dot-gemini/.gitkeep
+workspace/*
+!workspace/.gitkeep
+workspace
