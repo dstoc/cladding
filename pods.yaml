@@ -88,8 +88,17 @@ spec:
 
   # 2. App
   - name: cli-app
-    image: alpine:latest
+    image: localhost/gemini-cli:latest
+    imagePullPolicy: Never
     command: ["sleep", "infinity"]
+    workingDir: /home/gemini/workspace
+    stdin: true
+    tty: true
+    volumeMounts:
+    - name: gemini-config-dir
+      mountPath: /home/gemini/.gemini
+    - name: gemini-workspace-dir
+      mountPath: /home/gemini/workspace
     env:
     - name: http_proxy
       value: "http://proxy-pod:8080"
@@ -103,4 +112,12 @@ spec:
     hostPath:
       # USE A PLACEHOLDER HERE
       path: PROJECT_ROOT/scripts
+      type: Directory
+  - name: gemini-config-dir
+    hostPath:
+      path: PROJECT_ROOT/dot-gemini
+      type: Directory
+  - name: gemini-workspace-dir
+    hostPath:
+      path: PROJECT_ROOT/workspace
       type: Directory

@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+exec podman exec -it \
+  --user 0 \
+  --env HOME=/home/gemini \
+  cli-pod-cli-app \
+  gemini "$@"

@@ -1,0 +1,16 @@
+FROM archlinux
+
+ARG USERNAME=gemini
+ARG UID=1000
+ARG GID=1000
+
+RUN pacman -Syu --noconfirm --needed \
+    base-devel git bash zsh less jq python uv nodejs npm pnpm rust ripgrep \
+    && npm install -g @google/gemini-cli@latest \
+    && groupadd -g $GID $USERNAME \
+    && useradd -m -u $UID -g $GID -s /bin/bash $USERNAME \
+    && chsh -s /bin/zsh $USERNAME
+
+USER $USERNAME
+WORKDIR /home/$USERNAME/workspace
+CMD ["gemini"]
