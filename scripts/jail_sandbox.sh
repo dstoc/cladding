@@ -30,10 +30,6 @@ nft add chain ip filter OUTPUT { type filter hook output priority 0 \; policy ac
 # Allow Loopback (Localhost) - Critical for internal app processes
 nft add rule ip filter OUTPUT oifname "lo" accept
 
-# Allow DNS (UDP/TCP 53)
-nft add rule ip filter OUTPUT udp dport 53 accept
-nft add rule ip filter OUTPUT tcp dport 53 accept
-
 # Allow Return Traffic (Stateful firewall)
 nft add rule ip filter OUTPUT ct state established,related accept
 

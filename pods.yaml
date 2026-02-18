@@ -8,6 +8,13 @@ metadata:
   labels:
     app: proxy
 spec:
+  hostAliases:
+  - ip: "REPLACE_CLI_IP"
+    hostnames:
+    - cli-pod
+  - ip: "REPLACE_SANDBOX_IP"
+    hostnames:
+    - sandbox-pod
   containers:
   - name: proxy
     image: docker.io/ubuntu/squid:latest
@@ -47,6 +54,10 @@ metadata:
   annotations:
     io.podman.annotations.userns: "keep-id"
 spec:
+  hostAliases:
+  - ip: "REPLACE_PROXY_IP"
+    hostnames:
+    - proxy-pod
   containers:
   # 1. Jailer
   - name: sandbox-node
@@ -111,6 +122,13 @@ metadata:
   annotations:
     io.podman.annotations.userns: "keep-id"
 spec:
+  hostAliases:
+  - ip: "REPLACE_PROXY_IP"
+    hostnames:
+    - proxy-pod
+  - ip: "REPLACE_SANDBOX_IP"
+    hostnames:
+    - sandbox-pod
   containers:
   # 1. Jailer
   - name: cli-node

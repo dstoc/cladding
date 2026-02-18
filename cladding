@@ -124,23 +124,48 @@ cmd_check() {
   echo "check: ok"
 }
 
+resolve_network_settings() {
+  NETWORK="${CLADDING_NETWORK:-secure_net}"
+  NETWORK_SUBNET="${CLADDING_NETWORK_SUBNET:-10.90.0.0/24}"
+  PROXY_IP="${CLADDING_PROXY_IP:-10.90.0.10}"
+  SANDBOX_IP="${CLADDING_SANDBOX_IP:-10.90.0.11}"
+  CLI_IP="${CLADDING_CLI_IP:-10.90.0.12}"
+}
+
+render_pods_yaml() {
+  sed \
+    -e "s|PROJECT_ROOT|$ROOT_DIR|g" \
+    -e "s|REPLACE_PROXY_IP|$PROXY_IP|g" \
+    -e "s|REPLACE_SANDBOX_IP|$SANDBOX_IP|g" \
+    -e "s|REPLACE_CLI_IP|$CLI_IP|g" \
+    "$ROOT_DIR/pods.yaml"
+}
+
 cmd_up() {
   check_required_paths
   check_required_images
 
-  NETWORK=secure_net
+  resolve_network_settings
 
   if ! podman network exists "$NETWORK"; then
-    podman network create "$NETWORK"
+    podman network create --subnet "$NETWORK_SUBNET" "$NETWORK"
+  elif ! podman network inspect "$NETWORK" | grep -q "\"subnet\": \"$NETWORK_SUBNET\""; then
+    echo "error: network $NETWORK exists but is not on $NETWORK_SUBNET" >&2
+    echo "hint: set CLADDING_NETWORK_SUBNET to match, or run 'podman network rm $NETWORK' and retry './cladding up'" >&2
+    return 1
   fi
 
-  sed -e "s|PROJECT_ROOT|$ROOT_DIR|g" \
-      "$ROOT_DIR/pods.yaml" | podman play kube --network "$NETWORK" -
+  render_pods_yaml | podman play kube \
+      --network "$NETWORK" \
+      --ip "$PROXY_IP" \
+      --ip "$SANDBOX_IP" \
+      --ip "$CLI_IP" \
+      -
 }
 
 cmd_down() {
-  sed -e "s|PROJECT_ROOT|$ROOT_DIR|g" \
-      "$ROOT_DIR/pods.yaml" | podman play kube --down -
+  resolve_network_settings
+  render_pods_yaml | podman play kube --down -
 }
 
 cmd_destroy() {

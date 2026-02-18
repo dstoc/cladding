@@ -36,19 +36,14 @@ nft add rule ip filter OUTPUT oifname "lo" accept
 # Allow replies to come back to us
 nft add rule ip filter OUTPUT ct state established,related accept
 
-# C. Allow DNS (UDP/TCP 53)
-# We still need this so the CLI app can resolve "proxy" or "sandbox_node"
-nft add rule ip filter OUTPUT udp dport 53 accept
-nft add rule ip filter OUTPUT tcp dport 53 accept
-
-# D. Allow Outbound to Sandbox (Direct Access)
+# C. Allow Outbound to Sandbox (Direct Access)
 nft add rule ip filter OUTPUT ip daddr $SANDBOX_IP tcp dport 3000 accept
 
-# E. Allow Outbound to Proxy (Internet Access)
+# D. Allow Outbound to Proxy (Internet Access)
 # The CLI will send all Google traffic here
 nft add rule ip filter OUTPUT ip daddr $PROXY_IP tcp dport 8080 accept
 
-# F. Drop Everything Else
+# E. Drop Everything Else
 # If it's not Sandbox or Proxy, it's blocked.
 nft add rule ip filter OUTPUT log prefix \"BLOCKED_CLI: \" drop
 nft add rule ip filter OUTPUT drop
