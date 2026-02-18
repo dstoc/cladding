@@ -23,7 +23,9 @@ print_help() {
 Usage: cladding <command> [args...]
 
 Commands:
-  bundle               Build local container images
+  build                Build local container images
+  init                 Create config from config-template
+  check                Check requirements
   up                   Start the system
   down                 Stop the system
   destroy              Force-remove running containers
@@ -33,7 +35,7 @@ Commands:
 EOF
 }
 
-cmd_bundle() {
+cmd_build() {
   HOST_UID="$(id -u)"
   HOST_GID="$(id -g)"
 
@@ -52,7 +54,80 @@ cmd_bundle() {
     "$ROOT_DIR"
 }
 
+check_required_paths() {
+  missing=0
+
+  for name in workspace config dot-gemini; do
+    path="$ROOT_DIR/$name"
+
+    if [ -L "$path" ]; then
+      if [ ! -e "$path" ]; then
+        echo "missing: $name (broken symlink at $path)" >&2
+        if [ "$name" = "config" ]; then
+          echo "hint: run cladding init" >&2
+        fi
+        missing=1
+      fi
+      continue
+    fi
+
+    if [ ! -e "$path" ]; then
+      echo "missing: $name ($path)" >&2
+      if [ "$name" = "config" ]; then
+        echo "hint: run cladding init" >&2
+      fi
+      missing=1
+    fi
+  done
+
+  if [ "$missing" -ne 0 ]; then
+    return 1
+  fi
+}
+
+check_required_images() {
+  missing=0
+
+  for image in localhost/gemini-cli:latest localhost/mcp-run-sandbox:latest; do
+    if ! podman image exists "$image"; then
+      echo "missing: image $image (run: cladding build)" >&2
+      missing=1
+    fi
+  done
+
+  if [ "$missing" -ne 0 ]; then
+    return 1
+  fi
+}
+
+cmd_init() {
+  src="$ROOT_DIR/config-template"
+  dst="$ROOT_DIR/config"
+
+  if [ ! -d "$src" ]; then
+    echo "missing: config-template ($src)" >&2
+    return 1
+  fi
+
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    echo "config already exists: $dst"
+    return 0
+  fi
+
+  cp -a "$src" "$dst"
+  echo "initialized: $dst"
+}
+
+cmd_check() {
+  check_required_paths
+  check_required_images
+  echo "check: ok"
+}
+
 cmd_up() {
+  check_required_paths
+  check_required_images
+
   NETWORK=secure_net
 
   if ! podman network exists "$NETWORK"; then
@@ -91,8 +166,14 @@ cmd="$1"
 shift
 
 case "$cmd" in
-  bundle)
-    cmd_bundle "$@"
+  build)
+    cmd_build "$@"
+    ;;
+  init)
+    cmd_init "$@"
+    ;;
+  check)
+    cmd_check "$@"
     ;;
   up)
     cmd_up "$@"
