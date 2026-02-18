@@ -43,7 +43,7 @@ This feature delivers a Rust-native MCP server that:
    - do not introduce a new default server-side timeout in this feature.
 
 ### 4. Policy Configuration and Validation
-1. Policy is loaded from `POLICY_FILE` path (or documented default path if unset).
+1. Policy is loaded from `POLICY_FILE` path (required).
 2. Policy schema supports command rule features equivalent to TS:
    - `command` string matching,
    - arg checks with `exact`, `regex`, and `hash` types,

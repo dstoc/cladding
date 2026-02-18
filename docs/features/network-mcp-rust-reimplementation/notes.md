@@ -23,7 +23,7 @@
 ### Existing networking/proxy architecture (outside Rust scope per request)
 - TS server includes internal proxy server (`clawmini/mcp-servers/network/src/proxy/*`) and `start-proxy.ts`.
 - Startup scripts orchestrate proxy + MCP socket (`clawmini/scripts/start-network-mcp.sh`).
-- Current infra uses separate Squid proxy pod (`pods.yaml`, `proxy/squid.conf`, `proxy/startup.sh`).
+- Current infra uses separate Squid proxy pod (`pods.yaml`, `config/squid.conf`, `scripts/proxy_startup.sh`).
 - Request explicitly excludes proxy setup/configuration for Rust rewrite.
 
 ### Runtime/container integration context

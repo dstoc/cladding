@@ -17,16 +17,16 @@
 
 ## What Changed
 1. Proxy engine switched from HAProxy to Squid in `pods.yaml`.
-2. Added Squid config template at `proxy/squid.conf`.
-3. Updated `proxy/startup.sh` to:
+2. Added Squid config template at `config/squid.conf`.
+3. Updated `scripts/proxy_startup.sh` to:
 - discover CLI/Sandbox IPv4 addresses
 - write `/tmp/cli_ips.lst` and `/tmp/sandbox_ips.lst`
 - inject runtime DNS into generated config
 - start Squid in foreground with `/tmp/squid_generated.conf`
 4. Updated `reload-proxy-config` to use Squid reconfigure command.
 5. Kept domain allow-lists in:
-- `proxy/cli_domains.lst`
-- `proxy/sandbox_domains.lst`
+- `config/cli_domains.lst`
+- `config/sandbox_domains.lst`
 
 ## Notes
 1. Squid logs may include ICMP pinger warnings in this containerized environment.

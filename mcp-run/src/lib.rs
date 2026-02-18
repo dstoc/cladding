@@ -20,7 +20,6 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-pub const DEFAULT_POLICY_FILE: &str = "network-policy.json";
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8000";
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const TRUNCATION_MARKER: &str = "\n...truncated...";
@@ -43,7 +42,10 @@ impl AppConfig {
                     source,
                 })?;
         let policy_file =
-            std::env::var("POLICY_FILE").unwrap_or_else(|_| DEFAULT_POLICY_FILE.to_string());
+            std::env::var("POLICY_FILE").map_err(|_| ConfigError::MissingPolicyFile)?;
+        if policy_file.trim().is_empty() {
+            return Err(ConfigError::EmptyPolicyFile);
+        }
         let default_cwd =
             std::env::current_dir().map_err(|source| ConfigError::CurrentDir { source })?;
 
@@ -62,6 +64,10 @@ pub enum ConfigError {
         value: String,
         source: AddrParseError,
     },
+    #[error("POLICY_FILE must be set")]
+    MissingPolicyFile,
+    #[error("POLICY_FILE must not be empty")]
+    EmptyPolicyFile,
     #[error("failed to get current working directory: {source}")]
     CurrentDir { source: std::io::Error },
 }

@@ -16,10 +16,9 @@ RUN apt-get update \
 
 WORKDIR /opt/mcp-run
 COPY --from=builder /src/mcp-run/target/release/mcp-run /usr/local/bin/mcp-run
-COPY mcp-run/network-policy.json /opt/mcp-run/network-policy.json
 
 ENV MCP_BIND_ADDR=0.0.0.0:3000
-ENV POLICY_FILE=/opt/mcp-run/network-policy.json
+ENV POLICY_FILE=/opt/config/mcp-run-policy.json
 ENV RUST_LOG=info
 
 EXPOSE 3000

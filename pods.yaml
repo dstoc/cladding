@@ -11,21 +11,28 @@ spec:
   containers:
   - name: proxy
     image: docker.io/ubuntu/squid:latest
-    # Run our new startup script
-    command: ["/bin/sh", "/opt/proxy/startup.sh"]
+    command: ["/bin/sh", "/opt/scripts/proxy_startup.sh"]
     
     volumeMounts:
-    - name: proxy-dir
-      mountPath: /opt/proxy
+    - name: config-dir
+      mountPath: /opt/config
+      readOnly: true
+    - name: scripts-dir
+      mountPath: /opt/scripts
+      readOnly: true
       
     ports:
     - containerPort: 8080
       hostPort: 5050
 
   volumes:
-  - name: proxy-dir
+  - name: config-dir
     hostPath:
-      path: PROJECT_ROOT/proxy
+      path: PROJECT_ROOT/config
+      type: Directory
+  - name: scripts-dir
+    hostPath:
+      path: PROJECT_ROOT/scripts
       type: Directory
 
 ---
@@ -49,6 +56,7 @@ spec:
     volumeMounts:
     - name: scripts-dir
       mountPath: /opt/scripts
+      readOnly: true
     command: ["/bin/sh", "/opt/scripts/jail_sandbox.sh"]
 
   # 2. App
@@ -57,11 +65,15 @@ spec:
     imagePullPolicy: Never
     ports:
     - containerPort: 3000
+    volumeMounts:
+    - name: config-dir
+      mountPath: /opt/config
+      readOnly: true
     env:
     - name: MCP_BIND_ADDR
       value: "0.0.0.0:3000"
     - name: POLICY_FILE
-      value: "/opt/mcp-run/network-policy.json"
+      value: "/opt/config/mcp-run-policy.json"
     - name: http_proxy
       value: "http://proxy-pod:8080"
     - name: https_proxy
@@ -72,8 +84,11 @@ spec:
   volumes:
   - name: scripts-dir
     hostPath:
-      # USE A PLACEHOLDER HERE
       path: PROJECT_ROOT/scripts
+      type: Directory
+  - name: config-dir
+    hostPath:
+      path: PROJECT_ROOT/config
       type: Directory
 
 ---
@@ -99,6 +114,7 @@ spec:
     volumeMounts:
     - name: scripts-dir
       mountPath: /opt/scripts
+      readOnly: true
     command: ["/bin/sh", "/opt/scripts/jail_cli.sh"]
 
   # 2. App
@@ -125,7 +141,6 @@ spec:
   volumes:
   - name: scripts-dir
     hostPath:
-      # USE A PLACEHOLDER HERE
       path: PROJECT_ROOT/scripts
       type: Directory
   - name: gemini-config-dir

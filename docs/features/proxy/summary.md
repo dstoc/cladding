@@ -6,11 +6,11 @@
 
 ## Current Implementation
 1. Proxy engine: Squid (`docker.io/ubuntu/squid:latest`) in `proxy-pod`.
-2. Startup entrypoint: `proxy/startup.sh`.
-3. Runtime config template: `proxy/squid.conf`.
+2. Startup entrypoint: `scripts/proxy_startup.sh`.
+3. Runtime config template: `config/squid.conf`.
 4. Domain allow-lists:
-- `proxy/cli_domains.lst`
-- `proxy/sandbox_domains.lst`
+- `config/cli_domains.lst`
+- `config/sandbox_domains.lst`
 5. Reload command:
 - `./reload-proxy-config`
 
@@ -29,8 +29,8 @@
 - `cli_src` matches `/tmp/cli_ips.lst`
 - `sandbox_src` matches `/tmp/sandbox_ips.lst`
 2. Destination control:
-- `cli_domains` from `proxy/cli_domains.lst`
-- `sandbox_domains` from `proxy/sandbox_domains.lst`
+- `cli_domains` from `config/cli_domains.lst`
+- `sandbox_domains` from `config/sandbox_domains.lst`
 3. Port/method guardrails:
 - CONNECT only allowed to SSL ports (443)
 - Safe ports restricted to 80/443

@@ -5,7 +5,7 @@ echo "--- Proxy Startup (Squid) ---"
 
 # 1. Define paths
 # SOURCE: The template file mounted from your host (Read-Only)
-CFG_SRC="/opt/proxy/squid.conf"
+CFG_SRC="/opt/config/squid.conf"
 # DESTINATION: The generated runtime config
 CFG_DST="/tmp/squid_generated.conf"
 CLI_IPS_FILE="/tmp/cli_ips.lst"
