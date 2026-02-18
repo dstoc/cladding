@@ -1,0 +1,121 @@
+#!/bin/sh
+set -e
+
+resolve_script_path() {
+  case "$1" in
+    */*) printf '%s\n' "$1" ;;
+    *) command -v -- "$1" ;;
+  esac
+}
+
+SCRIPT_PATH="$(resolve_script_path "$0")"
+if command -v readlink >/dev/null 2>&1; then
+  SCRIPT_PATH="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || printf '%s' "$SCRIPT_PATH")"
+fi
+case "$SCRIPT_PATH" in
+  /*) ;;
+  *) SCRIPT_PATH="$(pwd)/$SCRIPT_PATH" ;;
+esac
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+
+print_help() {
+  cat <<'EOF'
+Usage: cladding <command> [args...]
+
+Commands:
+  bundle               Build local container images
+  up                   Start the system
+  down                 Stop the system
+  destroy              Force-remove running containers
+  gemini               Launch gemini-cli in the cli container
+  reload-proxy         Reload the squid proxy configuration
+  help                 Show this help
+EOF
+}
+
+cmd_bundle() {
+  HOST_UID="$(id -u)"
+  HOST_GID="$(id -g)"
+
+  podman build \
+    --build-arg UID="$HOST_UID" \
+    --build-arg GID="$HOST_GID" \
+    -t localhost/gemini-cli:latest \
+    -f "$ROOT_DIR/Containerfile.gemini" \
+    "$ROOT_DIR"
+
+  podman build \
+    --build-arg UID="$HOST_UID" \
+    --build-arg GID="$HOST_GID" \
+    -t localhost/mcp-run-sandbox:latest \
+    -f "$ROOT_DIR/Containerfile.sandbox" \
+    "$ROOT_DIR"
+}
+
+cmd_up() {
+  NETWORK=secure_net
+
+  if ! podman network exists "$NETWORK"; then
+    podman network create "$NETWORK"
+  fi
+
+  sed -e "s|PROJECT_ROOT|$ROOT_DIR|g" \
+      "$ROOT_DIR/pods.yaml" | podman play kube --network "$NETWORK" -
+}
+
+cmd_down() {
+  sed -e "s|PROJECT_ROOT|$ROOT_DIR|g" \
+      "$ROOT_DIR/pods.yaml" | podman play kube --down -
+}
+
+cmd_destroy() {
+  podman rm -f cli-pod sandbox-pod proxy-pod
+}
+
+cmd_gemini() {
+  exec podman exec -it \
+    cli-pod-cli-app \
+    gemini "$@"
+}
+
+cmd_reload_proxy() {
+  podman exec proxy-pod-proxy squid -k reconfigure -f /tmp/squid_generated.conf
+}
+
+if [ $# -eq 0 ]; then
+  print_help
+  exit 0
+fi
+
+cmd="$1"
+shift
+
+case "$cmd" in
+  bundle)
+    cmd_bundle "$@"
+    ;;
+  up)
+    cmd_up "$@"
+    ;;
+  down)
+    cmd_down "$@"
+    ;;
+  destroy)
+    cmd_destroy "$@"
+    ;;
+  gemini)
+    cmd_gemini "$@"
+    ;;
+  reload-proxy)
+    cmd_reload_proxy "$@"
+    ;;
+  help|-h|--help)
+    print_help
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo >&2
+    print_help >&2
+    exit 1
+    ;;
+esac

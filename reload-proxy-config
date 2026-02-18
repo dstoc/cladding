@@ -1,2 +1,0 @@
-#!/bin/sh
-podman exec proxy-pod-proxy squid -k reconfigure -f /tmp/squid_generated.conf

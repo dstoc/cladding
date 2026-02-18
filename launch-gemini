@@ -1,6 +1,0 @@
-#!/bin/sh
-set -e
-
-exec podman exec -it \
-  cli-pod-cli-app \
-  gemini "$@"
