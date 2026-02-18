@@ -53,8 +53,21 @@ spec:
 
   # 2. App
   - name: sandbox-app
-    image: alpine:latest
-    command: ["sleep", "infinity"]
+    image: localhost/mcp-run-sandbox:latest
+    imagePullPolicy: Never
+    ports:
+    - containerPort: 3000
+    env:
+    - name: MCP_BIND_ADDR
+      value: "0.0.0.0:3000"
+    - name: POLICY_FILE
+      value: "/opt/mcp-run/network-policy.json"
+    - name: http_proxy
+      value: "http://proxy-pod:8080"
+    - name: https_proxy
+      value: "http://proxy-pod:8080"
+    - name: no_proxy
+      value: "sandbox-pod,localhost,127.0.0.1"
 
   volumes:
   - name: scripts-dir

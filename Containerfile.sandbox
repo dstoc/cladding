@@ -1,0 +1,26 @@
+FROM docker.io/library/rust:1.88-bookworm AS builder
+
+WORKDIR /src
+COPY mcp-run/Cargo.toml mcp-run/Cargo.lock ./mcp-run/
+RUN mkdir -p /src/mcp-run/src && printf 'fn main() {}\n' > /src/mcp-run/src/main.rs
+RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
+
+COPY mcp-run /src/mcp-run
+RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
+
+FROM docker.io/library/debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/mcp-run
+COPY --from=builder /src/mcp-run/target/release/mcp-run /usr/local/bin/mcp-run
+COPY mcp-run/network-policy.json /opt/mcp-run/network-policy.json
+
+ENV MCP_BIND_ADDR=0.0.0.0:3000
+ENV POLICY_FILE=/opt/mcp-run/network-policy.json
+ENV RUST_LOG=info
+
+EXPOSE 3000
+CMD ["mcp-run"]

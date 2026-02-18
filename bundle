@@ -5,3 +5,8 @@ podman build \
   -t localhost/gemini-cli:latest \
   -f Containerfile.gemini \
   .
+
+podman build \
+  -t localhost/mcp-run-sandbox:latest \
+  -f Containerfile.sandbox \
+  .
