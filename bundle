@@ -1,12 +1,19 @@
 #!/bin/sh
 set -e
 
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+
 podman build \
+  --build-arg UID="$HOST_UID" \
+  --build-arg GID="$HOST_GID" \
   -t localhost/gemini-cli:latest \
   -f Containerfile.gemini \
   .
 
 podman build \
+  --build-arg UID="$HOST_UID" \
+  --build-arg GID="$HOST_GID" \
   -t localhost/mcp-run-sandbox:latest \
   -f Containerfile.sandbox \
   .

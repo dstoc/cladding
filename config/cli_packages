@@ -1,0 +1,10 @@
+base-devel
+git
+less
+jq
+python
+uv
+nodejs
+npm
+rust
+ripgrep

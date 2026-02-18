@@ -45,6 +45,8 @@ metadata:
   name: sandbox-pod
   labels:
     app: sandbox
+  annotations:
+    io.podman.annotations.userns: "keep-id"
 spec:
   containers:
   # 1. Jailer
@@ -69,6 +71,8 @@ spec:
     - name: config-dir
       mountPath: /opt/config
       readOnly: true
+    - name: workspace-dir
+      mountPath: /home/sandbox/workspace
     env:
     - name: MCP_BIND_ADDR
       value: "0.0.0.0:3000"
@@ -89,6 +93,10 @@ spec:
   - name: config-dir
     hostPath:
       path: PROJECT_ROOT/config
+      type: Directory
+  - name: workspace-dir
+    hostPath:
+      path: PROJECT_ROOT/workspace
       type: Directory
 
 ---

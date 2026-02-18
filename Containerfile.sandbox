@@ -8,18 +8,27 @@ RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
 COPY mcp-run /src/mcp-run
 RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
 
-FROM docker.io/library/debian:bookworm-slim
+FROM docker.io/library/archlinux:latest
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+ARG USERNAME=sandbox
+ARG UID=1000
+ARG GID=1000
 
-WORKDIR /opt/mcp-run
+COPY config/sandbox_packages /tmp/sandbox_packages
+
+RUN pacman -Syu --noconfirm --needed ca-certificates $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/sandbox_packages) \
+    && groupadd -g $GID $USERNAME \
+    && useradd -m -u $UID -g $GID -s /bin/bash $USERNAME \
+    && pacman -Scc --noconfirm
+
 COPY --from=builder /src/mcp-run/target/release/mcp-run /usr/local/bin/mcp-run
 
 ENV MCP_BIND_ADDR=0.0.0.0:3000
 ENV POLICY_FILE=/opt/config/mcp-run-policy.json
 ENV RUST_LOG=info
+
+USER $USERNAME
+WORKDIR /home/$USERNAME/workspace
 
 EXPOSE 3000
 CMD ["mcp-run"]
