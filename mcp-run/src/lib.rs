@@ -85,11 +85,7 @@ pub enum AppError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Policy {
-    pub commands: Vec<CommandRule>,
-}
+pub type Policy = Vec<CommandRule>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,7 +197,7 @@ pub fn load_policy(policy_path: &Path) -> Result<Policy, PolicyLoadError> {
     let policy: Policy = serde_json::from_value(value)
         .map_err(|source| PolicyLoadError::InvalidSchema { source })?;
 
-    for rule in &policy.commands {
+    for rule in &policy {
         for check in &rule.args {
             if let ArgCheck::Regex { pattern, .. } = check {
                 Regex::new(pattern).map_err(|source| PolicyLoadError::InvalidRegex {
@@ -234,7 +230,6 @@ pub fn validate_invocation(
     env: &BTreeMap<String, String>,
 ) -> Result<(), ValidationError> {
     let rules: Vec<&CommandRule> = policy
-        .commands
         .iter()
         .filter(|rule| rule.command == command)
         .collect();
@@ -575,7 +570,7 @@ pub async fn serve(config: AppConfig) -> Result<(), AppError> {
     tracing::info!(
         bind_addr = %config.bind_addr,
         policy_file = %config.policy_file.display(),
-        commands = policy.commands.len(),
+        commands = policy.len(),
         "starting network MCP server",
     );
 
@@ -629,31 +624,29 @@ mod tests {
         std::fs::write(hashed_file.path(), b"hello-hash").expect("write hash file");
         let expected_hash = sha256_hex(b"hello-hash");
 
-        let policy = Policy {
-            commands: vec![CommandRule {
-                command: "cmd".to_string(),
-                args: vec![
-                    ArgCheck::Exact {
-                        value: "install".to_string(),
-                        position: Some(0),
-                        required: Some(true),
-                    },
-                    ArgCheck::Regex {
-                        pattern: "^pkg-[a-z]+$".to_string(),
-                        position: Some(1),
-                        required: Some(true),
-                    },
-                    ArgCheck::Hash {
-                        value: expected_hash,
-                        algorithm: Some(HashAlgorithm::Sha256),
-                        position: Some(2),
-                        required: Some(true),
-                    },
-                ],
-                env: vec!["TOKEN".to_string()],
-                description: None,
-            }],
-        };
+        let policy: Policy = vec![CommandRule {
+            command: "cmd".to_string(),
+            args: vec![
+                ArgCheck::Exact {
+                    value: "install".to_string(),
+                    position: Some(0),
+                    required: Some(true),
+                },
+                ArgCheck::Regex {
+                    pattern: "^pkg-[a-z]+$".to_string(),
+                    position: Some(1),
+                    required: Some(true),
+                },
+                ArgCheck::Hash {
+                    value: expected_hash,
+                    algorithm: Some(HashAlgorithm::Sha256),
+                    position: Some(2),
+                    required: Some(true),
+                },
+            ],
+            env: vec!["TOKEN".to_string()],
+            description: None,
+        }];
 
         let args = vec![
             "install".to_string(),
@@ -667,30 +660,28 @@ mod tests {
 
     #[test]
     fn policy_enforces_position_and_required_rules() {
-        let policy = Policy {
-            commands: vec![CommandRule {
-                command: "git".to_string(),
-                args: vec![
-                    ArgCheck::Exact {
-                        value: "commit".to_string(),
-                        position: Some(0),
-                        required: Some(true),
-                    },
-                    ArgCheck::Exact {
-                        value: "-m".to_string(),
-                        position: None,
-                        required: Some(true),
-                    },
-                    ArgCheck::Regex {
-                        pattern: ".*".to_string(),
-                        position: None,
-                        required: Some(false),
-                    },
-                ],
-                env: vec![],
-                description: None,
-            }],
-        };
+        let policy: Policy = vec![CommandRule {
+            command: "git".to_string(),
+            args: vec![
+                ArgCheck::Exact {
+                    value: "commit".to_string(),
+                    position: Some(0),
+                    required: Some(true),
+                },
+                ArgCheck::Exact {
+                    value: "-m".to_string(),
+                    position: None,
+                    required: Some(true),
+                },
+                ArgCheck::Regex {
+                    pattern: ".*".to_string(),
+                    position: None,
+                    required: Some(false),
+                },
+            ],
+            env: vec![],
+            description: None,
+        }];
 
         let missing_required = vec!["commit".to_string(), "message".to_string()];
         let err = validate_invocation(&policy, "git", &missing_required, &BTreeMap::new())
@@ -710,18 +701,16 @@ mod tests {
 
     #[test]
     fn policy_enforces_env_allowlist() {
-        let policy = Policy {
-            commands: vec![CommandRule {
-                command: "npm".to_string(),
-                args: vec![ArgCheck::Regex {
-                    pattern: ".*".to_string(),
-                    position: None,
-                    required: Some(false),
-                }],
-                env: vec!["TOKEN".to_string()],
-                description: None,
+        let policy: Policy = vec![CommandRule {
+            command: "npm".to_string(),
+            args: vec![ArgCheck::Regex {
+                pattern: ".*".to_string(),
+                position: None,
+                required: Some(false),
             }],
-        };
+            env: vec!["TOKEN".to_string()],
+            description: None,
+        }];
 
         let env = BTreeMap::from([(String::from("UNSAFE"), String::from("1"))]);
         let err = validate_invocation(&policy, "npm", &["test".into()], &env)
@@ -734,30 +723,28 @@ mod tests {
 
     #[test]
     fn policy_applies_or_across_multiple_rules() {
-        let policy = Policy {
-            commands: vec![
-                CommandRule {
-                    command: "npm".to_string(),
-                    args: vec![ArgCheck::Exact {
-                        value: "install".to_string(),
-                        position: Some(0),
-                        required: Some(true),
-                    }],
-                    env: vec![],
-                    description: None,
-                },
-                CommandRule {
-                    command: "npm".to_string(),
-                    args: vec![ArgCheck::Exact {
-                        value: "test".to_string(),
-                        position: Some(0),
-                        required: Some(true),
-                    }],
-                    env: vec![],
-                    description: None,
-                },
-            ],
-        };
+        let policy: Policy = vec![
+            CommandRule {
+                command: "npm".to_string(),
+                args: vec![ArgCheck::Exact {
+                    value: "install".to_string(),
+                    position: Some(0),
+                    required: Some(true),
+                }],
+                env: vec![],
+                description: None,
+            },
+            CommandRule {
+                command: "npm".to_string(),
+                args: vec![ArgCheck::Exact {
+                    value: "test".to_string(),
+                    position: Some(0),
+                    required: Some(true),
+                }],
+                env: vec![],
+                description: None,
+            },
+        ];
 
         assert!(
             validate_invocation(&policy, "npm", &["test".to_string()], &BTreeMap::new()).is_ok()
@@ -771,11 +758,19 @@ mod tests {
     #[test]
     fn policy_rejects_allowed_hosts_field() {
         let file = write_policy_file(serde_json::json!({
-            "allowedHosts": ["example.com"],
-            "commands": []
+            "allowedHosts": ["example.com"]
         }));
         let err = load_policy(file.path()).expect_err("allowedHosts should be rejected");
         assert!(err.to_string().contains("allowedHosts"));
+    }
+
+    #[test]
+    fn policy_rejects_commands_wrapper_object() {
+        let file = write_policy_file(serde_json::json!({
+            "commands": []
+        }));
+        let err = load_policy(file.path()).expect_err("commands wrapper should be rejected");
+        assert!(matches!(err, PolicyLoadError::InvalidSchema { .. }));
     }
 
     #[tokio::test]
@@ -785,25 +780,23 @@ mod tests {
             None => return,
         };
 
-        let policy = Policy {
-            commands: vec![CommandRule {
-                command: env_path.clone(),
-                args: vec![
-                    ArgCheck::Exact {
-                        value: "printf".to_string(),
-                        position: Some(0),
-                        required: Some(true),
-                    },
-                    ArgCheck::Exact {
-                        value: "ok".to_string(),
-                        position: Some(1),
-                        required: Some(true),
-                    },
-                ],
-                env: vec![],
-                description: None,
-            }],
-        };
+        let policy: Policy = vec![CommandRule {
+            command: env_path.clone(),
+            args: vec![
+                ArgCheck::Exact {
+                    value: "printf".to_string(),
+                    position: Some(0),
+                    required: Some(true),
+                },
+                ArgCheck::Exact {
+                    value: "ok".to_string(),
+                    position: Some(1),
+                    required: Some(true),
+                },
+            ],
+            env: vec![],
+            description: None,
+        }];
 
         let output = run_network_tool_impl(
             &policy,
@@ -830,14 +823,12 @@ mod tests {
             None => return,
         };
 
-        let policy = Policy {
-            commands: vec![CommandRule {
-                command: env_path,
-                args: vec![],
-                env: vec![],
-                description: None,
-            }],
-        };
+        let policy: Policy = vec![CommandRule {
+            command: env_path,
+            args: vec![],
+            env: vec![],
+            description: None,
+        }];
 
         let error = run_network_tool_impl(
             &policy,
@@ -862,30 +853,28 @@ mod tests {
             None => return,
         };
 
-        let policy = Policy {
-            commands: vec![CommandRule {
-                command: head_path.clone(),
-                args: vec![
-                    ArgCheck::Exact {
-                        value: "-c".to_string(),
-                        position: Some(0),
-                        required: Some(true),
-                    },
-                    ArgCheck::Exact {
-                        value: (MAX_OUTPUT_BYTES + 5).to_string(),
-                        position: Some(1),
-                        required: Some(true),
-                    },
-                    ArgCheck::Exact {
-                        value: "/dev/zero".to_string(),
-                        position: Some(2),
-                        required: Some(true),
-                    },
-                ],
-                env: vec![],
-                description: None,
-            }],
-        };
+        let policy: Policy = vec![CommandRule {
+            command: head_path.clone(),
+            args: vec![
+                ArgCheck::Exact {
+                    value: "-c".to_string(),
+                    position: Some(0),
+                    required: Some(true),
+                },
+                ArgCheck::Exact {
+                    value: (MAX_OUTPUT_BYTES + 5).to_string(),
+                    position: Some(1),
+                    required: Some(true),
+                },
+                ArgCheck::Exact {
+                    value: "/dev/zero".to_string(),
+                    position: Some(2),
+                    required: Some(true),
+                },
+            ],
+            env: vec![],
+            description: None,
+        }];
 
         let output = run_network_tool_impl(
             &policy,
@@ -915,25 +904,23 @@ mod tests {
             None => return,
         };
 
-        let policy = Policy {
-            commands: vec![CommandRule {
-                command: env_path.clone(),
-                args: vec![
-                    ArgCheck::Exact {
-                        value: "printf".to_string(),
-                        position: Some(0),
-                        required: Some(true),
-                    },
-                    ArgCheck::Exact {
-                        value: "smoke".to_string(),
-                        position: Some(1),
-                        required: Some(true),
-                    },
-                ],
-                env: vec![],
-                description: None,
-            }],
-        };
+        let policy: Policy = vec![CommandRule {
+            command: env_path.clone(),
+            args: vec![
+                ArgCheck::Exact {
+                    value: "printf".to_string(),
+                    position: Some(0),
+                    required: Some(true),
+                },
+                ArgCheck::Exact {
+                    value: "smoke".to_string(),
+                    position: Some(1),
+                    required: Some(true),
+                },
+            ],
+            env: vec![],
+            description: None,
+        }];
 
         let app = build_app(
             Arc::new(policy),

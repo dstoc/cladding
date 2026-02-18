@@ -1,16 +1,14 @@
-{
-  "commands": [
-    {
-      "command": "ls"
-    },
-    {
-      "command": "curl",
-      "args": [
-        {
-          "type": "regex",
-          "pattern": ".*"
-        }
-      ]
-    }
-  ]
-}
+[
+  {
+    "command": "ls"
+  },
+  {
+    "command": "curl",
+    "args": [
+      {
+        "type": "regex",
+        "pattern": ".*"
+      }
+    ]
+  }
+]
