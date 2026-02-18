@@ -4,10 +4,10 @@ Run an agent in a constrained container environment where network access is inte
 - Direct egress from the agent container is blocked except to:
   - `sandbox-pod` (`mcp-run` on port `3000`)
   - `proxy-pod` (Squid on port `8080`)
-- `mcp-run` only executes commands allowed by [`config/mcp-run-policy.json`](config/mcp-run-policy.json) (command + arg checks, optional env allowlist).
+- `mcp-run` only executes commands allowed by [`config/mcp-run-policy.json`](config-template/mcp-run-policy.json) (command + arg checks, optional env allowlist).
 - Outbound HTTP(S) from both CLI and sandbox is forced through Squid, which only permits domains from:
-  - [`config/cli_domains.lst`](config/cli_domains.lst)
-  - [`config/sandbox_domains.lst`](config/sandbox_domains.lst)
+  - [`config/cli_domains.lst`](config-template/cli_domains.lst)
+  - [`config/sandbox_domains.lst`](config-template/sandbox_domains.lst)
 
 In short: the agent cannot freely access the network; it can call MCP tools, and any external network path is gated by command policy plus domain allowlists.
 
@@ -19,10 +19,10 @@ In short: the agent cannot freely access the network; it can call MCP tools, and
 ./cladding init
 ```
 
-2. Edit files under [`config/`](config/) (at minimum):
-- [`config/mcp-run-policy.json`](config/mcp-run-policy.json)
-- [`config/cli_domains.lst`](config/cli_domains.lst)
-- [`config/sandbox_domains.lst`](config/sandbox_domains.lst)
+2. Edit files under [`config/`](config-template/) (at minimum):
+- [`config/mcp-run-policy.json`](config-template/mcp-run-policy.json)
+- [`config/cli_domains.lst`](config-template/cli_domains.lst)
+- [`config/sandbox_domains.lst`](config-template/sandbox_domains.lst)
 
 3. Link persistent Gemini state to [`dot-gemini`](dot-gemini):
 
