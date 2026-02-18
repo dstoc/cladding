@@ -1,13 +1,18 @@
 [
   {
-    "command": "ls"
-  },
-  {
     "command": "curl",
     "args": [
       {
-        "type": "regex",
-        "pattern": ".*"
+        "type": "exact",
+        "value": "-v",
+        "position": 0,
+        "required": true
+      },
+      {
+        "type": "exact",
+        "value": "example.com",
+        "position": 1,
+        "required": true
       }
     ]
   }
