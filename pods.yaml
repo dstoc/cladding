@@ -172,6 +172,8 @@ spec:
       value: "http://proxy-pod:8080"
     - name: no_proxy
       value: "sandbox-pod,localhost,127.0.0.1"
+    - name: RUN_REMOTE_SERVER
+      value: "http://sandbox-pod:3000/raw"
 
   volumes:
   - name: scripts-dir

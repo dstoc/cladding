@@ -11,7 +11,7 @@ ARG UID=1000
 ARG GID=1000
 
 COPY config/cli_packages /tmp/cli_packages
-COPY --from=builder /src/mcp-run/target/release/run-remote /usr/local/bin/run-remote
+COPY --from=builder /src/mcp-run/target/release/run-remote /usr/local/bin/run-with-network
 
 RUN pacman -Syu --noconfirm --needed zsh $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/cli_packages) \
     && npm install -g @google/gemini-cli@latest \
