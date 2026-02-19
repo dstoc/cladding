@@ -24,16 +24,16 @@ In short: the agent cannot freely access the network; it can call MCP tools, and
 - [`config/cli_domains.lst`](config-template/cli_domains.lst)
 - [`config/sandbox_domains.lst`](config-template/sandbox_domains.lst)
 
-3. Link persistent Gemini state to [`dot-gemini`](dot-gemini):
+3. Link or create the mounted home directory at [`mounts/home`](mounts/home):
 
 ```bash
-ln -s /somewhere/gemini-storage ./dot-gemini
+ln -s /somewhere/home ./mounts/home
 ```
 
-4. Link the workspace you want mounted into the containers at [`workspace`](workspace):
+4. Link the workspace you want mounted into the containers at [`mounts/workspace`](mounts/workspace):
 
 ```bash
-ln -s /somewhere/mystuff ./workspace
+ln -s /somewhere/mystuff ./mounts/workspace
 ```
 
 5. Build images (first run, or after image-related changes):
@@ -64,8 +64,8 @@ flowchart TB
   end
 
   subgraph H[volumes]
-    WS[./workspace]
-    GCFG[./dot-gemini]
+    WS[./mounts/workspace]
+    HOME[./mounts/home]
   end
 
 
@@ -80,7 +80,8 @@ flowchart TB
 
   WS --> CA
   WS --> SA
-  GCFG --> CA
+  HOME --> CA
+  HOME --> SA
 
   CA -- MCP tool calls --> SA
   CA -- HTTP(S) via proxy --> PX

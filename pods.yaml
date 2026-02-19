@@ -82,6 +82,8 @@ spec:
     - name: config-dir
       mountPath: /opt/config
       readOnly: true
+    - name: home-dir
+      mountPath: /home/user
     - name: workspace-dir
       mountPath: /home/user/workspace
     env:
@@ -105,9 +107,13 @@ spec:
     hostPath:
       path: PROJECT_ROOT/config
       type: Directory
+  - name: home-dir
+    hostPath:
+      path: PROJECT_ROOT/mounts/home
+      type: Directory
   - name: workspace-dir
     hostPath:
-      path: PROJECT_ROOT/workspace
+      path: PROJECT_ROOT/mounts/workspace
       type: Directory
 
 ---
@@ -152,9 +158,12 @@ spec:
     stdin: true
     tty: true
     volumeMounts:
-    - name: gemini-config-dir
-      mountPath: /home/user/.gemini
-    - name: gemini-workspace-dir
+    - name: config-dir
+      mountPath: /opt/config
+      readOnly: true
+    - name: home-dir
+      mountPath: /home/user
+    - name: workspace-dir
       mountPath: /home/user/workspace
     env:
     - name: http_proxy
@@ -169,11 +178,15 @@ spec:
     hostPath:
       path: PROJECT_ROOT/scripts
       type: Directory
-  - name: gemini-config-dir
+  - name: config-dir
     hostPath:
-      path: PROJECT_ROOT/dot-gemini
+      path: PROJECT_ROOT/config
       type: Directory
-  - name: gemini-workspace-dir
+  - name: home-dir
     hostPath:
-      path: PROJECT_ROOT/workspace
+      path: PROJECT_ROOT/mounts/home
+      type: Directory
+  - name: workspace-dir
+    hostPath:
+      path: PROJECT_ROOT/mounts/workspace
       type: Directory

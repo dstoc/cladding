@@ -24,7 +24,7 @@ Usage: cladding <command> [args...]
 
 Commands:
   build                Build local container images
-  init                 Create config from config-template
+  init                 Create config and default mount directories
   check                Check requirements
   up                   Start the system
   down                 Stop the system
@@ -57,7 +57,7 @@ cmd_build() {
 check_required_paths() {
   missing=0
 
-  for name in workspace config dot-gemini; do
+  for name in config mounts/home mounts/workspace; do
     path="$ROOT_DIR/$name"
 
     if [ -L "$path" ]; then
@@ -65,6 +65,8 @@ check_required_paths() {
         echo "missing: $name (broken symlink at $path)" >&2
         if [ "$name" = "config" ]; then
           echo "hint: run cladding init" >&2
+        else
+          echo "hint: create or relink $path" >&2
         fi
         missing=1
       fi
@@ -75,6 +77,8 @@ check_required_paths() {
       echo "missing: $name ($path)" >&2
       if [ "$name" = "config" ]; then
         echo "hint: run cladding init" >&2
+      else
+        echo "hint: mkdir -p $path (or symlink it)" >&2
       fi
       missing=1
     fi
@@ -111,11 +115,10 @@ cmd_init() {
 
   if [ -e "$dst" ] || [ -L "$dst" ]; then
     echo "config already exists: $dst"
-    return 0
+  else
+    cp -a "$src" "$dst"
+    echo "initialized: $dst"
   fi
-
-  cp -a "$src" "$dst"
-  echo "initialized: $dst"
 }
 
 cmd_check() {
