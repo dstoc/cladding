@@ -9,7 +9,7 @@ Run an agent in a constrained container environment where network access is inte
   - [`config/cli_domains.lst`](config-template/cli_domains.lst)
   - [`config/sandbox_domains.lst`](config-template/sandbox_domains.lst)
 
-In short: the agent cannot freely access the network; it can call MCP tools, and any external network path is gated by command policy plus domain allowlists.
+In short: the agent cannot freely access the network; it can delegate commands to `mcp-run` via MCP or the [`run-remote` binary](mcp-run/src/bin/run-remote.rs), where any external network path is gated by command policy plus domain allowlists.
 
 ## Getting Started
 
