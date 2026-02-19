@@ -10,7 +10,7 @@ RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
 
 FROM docker.io/library/archlinux:latest
 
-ARG USERNAME=sandbox
+ARG USERNAME=user
 ARG UID=1000
 ARG GID=1000
 

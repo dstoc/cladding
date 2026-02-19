@@ -82,7 +82,7 @@ spec:
       mountPath: /opt/config
       readOnly: true
     - name: workspace-dir
-      mountPath: /home/sandbox/workspace
+      mountPath: /home/user/workspace
     env:
     - name: MCP_BIND_ADDR
       value: "0.0.0.0:3000"
@@ -147,7 +147,7 @@ spec:
     image: localhost/gemini-cli:latest
     imagePullPolicy: Never
     command: ["sleep", "infinity"]
-    workingDir: /home/gemini/workspace
+    workingDir: /home/user/workspace
     stdin: true
     tty: true
     volumeMounts:

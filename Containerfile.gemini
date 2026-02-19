@@ -6,7 +6,7 @@ RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release --bin run-remo
 
 FROM archlinux
 
-ARG USERNAME=gemini
+ARG USERNAME=user
 ARG UID=1000
 ARG GID=1000
 
