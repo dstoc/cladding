@@ -77,6 +77,7 @@ spec:
     imagePullPolicy: Never
     ports:
     - containerPort: 3000
+    workingDir: /home/user/workspace
     volumeMounts:
     - name: config-dir
       mountPath: /opt/config
@@ -152,9 +153,9 @@ spec:
     tty: true
     volumeMounts:
     - name: gemini-config-dir
-      mountPath: /home/gemini/.gemini
+      mountPath: /home/user/.gemini
     - name: gemini-workspace-dir
-      mountPath: /home/gemini/workspace
+      mountPath: /home/user/workspace
     env:
     - name: http_proxy
       value: "http://proxy-pod:8080"
