@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
 use crate::policy::{Policy, ValidationError, validate_invocation};
 
@@ -57,33 +57,7 @@ pub async fn run_network_tool_impl(
     default_cwd: &Path,
     input: RunNetworkToolInput,
 ) -> Result<RunNetworkToolOutput, ToolError> {
-    let user_env = input.env.unwrap_or_default();
-    validate_invocation(policy, &input.executable, &input.args, &user_env)?;
-
-    let mut command = Command::new(&input.executable);
-    command
-        .args(&input.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    if let Some(cwd) = input.cwd.as_deref() {
-        command.current_dir(cwd);
-    } else {
-        command.current_dir(default_cwd);
-    }
-
-    let command_env = build_command_env(&user_env);
-    command.env_clear();
-    command.envs(
-        command_env
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-    );
-
-    let mut child = command
-        .spawn()
-        .map_err(|source| ToolError::Spawn { source })?;
+    let mut child = spawn_network_tool_process(policy, default_cwd, input)?;
 
     let stdout = child.stdout.take().ok_or_else(|| ToolError::StdoutRead {
         source: std::io::Error::other("stdout pipe missing"),
@@ -117,6 +91,41 @@ pub async fn run_network_tool_impl(
         stderr: finalize_capture(stderr_bytes, stderr_truncated),
         exit_code: status.code(),
     })
+}
+
+pub fn spawn_network_tool_process(
+    policy: &Policy,
+    default_cwd: &Path,
+    input: RunNetworkToolInput,
+) -> Result<Child, ToolError> {
+    let user_env = input.env.unwrap_or_default();
+    validate_invocation(policy, &input.executable, &input.args, &user_env)?;
+
+    let mut command = Command::new(&input.executable);
+    command
+        .args(&input.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    if let Some(cwd) = input.cwd.as_deref() {
+        command.current_dir(cwd);
+    } else {
+        command.current_dir(default_cwd);
+    }
+
+    let command_env = build_command_env(&user_env);
+    command.env_clear();
+    command.envs(
+        command_env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+
+    command
+        .spawn()
+        .map_err(|source| ToolError::Spawn { source })
 }
 
 pub(crate) fn build_command_env(user_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {

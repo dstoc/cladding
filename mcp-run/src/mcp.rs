@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::any_service;
+use axum::routing::{any_service, post};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::executor::{RunNetworkToolInput, RunNetworkToolOutput, run_network_tool_impl};
 use crate::policy::{Policy, PolicyLoadError, load_policy};
+use crate::raw::{RawEndpointState, raw_handler};
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8000";
 
@@ -139,6 +140,10 @@ pub fn build_app(policy: Arc<Policy>, default_cwd: PathBuf) -> Router {
     let session_manager = Arc::new(LocalSessionManager::default());
     let policy_for_factory = policy.clone();
     let cwd_for_factory = default_cwd.clone();
+    let raw_state = RawEndpointState {
+        policy,
+        default_cwd,
+    };
 
     let mcp_service = StreamableHttpService::new(
         move || {
@@ -151,7 +156,10 @@ pub fn build_app(policy: Arc<Policy>, default_cwd: PathBuf) -> Router {
         StreamableHttpServerConfig::default(),
     );
 
-    Router::new().route_service("/mcp", any_service(mcp_service))
+    Router::new()
+        .route_service("/mcp", any_service(mcp_service))
+        .route("/raw", post(raw_handler))
+        .with_state(raw_state)
 }
 
 pub async fn serve(config: AppConfig) -> Result<(), AppError> {
@@ -182,7 +190,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::executor::RunNetworkToolOutput;
+    use crate::executor::{MAX_OUTPUT_BYTES, RunNetworkToolOutput, TRUNCATION_MARKER};
     use crate::policy::{ArgCheck, CommandRule, Policy};
     use rmcp::ServiceExt;
     use rmcp::model::CallToolRequestParams;
@@ -270,6 +278,81 @@ mod tests {
 
         let typed: RunNetworkToolOutput = call_result.into_typed().expect("typed response");
         assert_eq!(typed.stdout, "smoke");
+        assert_eq!(typed.exit_code, Some(0));
+
+        client.cancel().await.expect("cancel client");
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_output_still_truncates_at_one_mb() {
+        let head_path = match find_executable("head") {
+            Some(path) => path,
+            None => return,
+        };
+
+        let requested = MAX_OUTPUT_BYTES + 5;
+        let policy: Policy = vec![CommandRule {
+            command: head_path.clone(),
+            args: vec![
+                ArgCheck::Exact {
+                    value: "-c".to_string(),
+                    position: Some(0),
+                    required: Some(true),
+                },
+                ArgCheck::Exact {
+                    value: requested.to_string(),
+                    position: Some(1),
+                    required: Some(true),
+                },
+                ArgCheck::Exact {
+                    value: "/dev/zero".to_string(),
+                    position: Some(2),
+                    required: Some(true),
+                },
+            ],
+            env: vec![],
+            description: None,
+        }];
+
+        let app = build_app(
+            Arc::new(policy),
+            std::env::current_dir().expect("current dir"),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!("http://{addr}/mcp");
+        let client =
+            ().serve(StreamableHttpClientTransport::from_uri(url))
+                .await
+                .expect("connect MCP client");
+
+        let arguments = serde_json::json!({
+            "executable": head_path,
+            "args": ["-c", requested.to_string(), "/dev/zero"]
+        })
+        .as_object()
+        .cloned();
+
+        let call_result = client
+            .call_tool(CallToolRequestParams {
+                meta: None,
+                name: "run_network_tool".to_string().into(),
+                arguments,
+                task: None,
+            })
+            .await
+            .expect("invoke run_network_tool");
+
+        let typed: RunNetworkToolOutput = call_result.into_typed().expect("typed response");
+        assert!(typed.stdout.ends_with(TRUNCATION_MARKER));
         assert_eq!(typed.exit_code, Some(0));
 
         client.cancel().await.expect("cancel client");
