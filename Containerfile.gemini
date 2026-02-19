@@ -1,3 +1,9 @@
+FROM docker.io/library/rust:1.88-bookworm AS builder
+
+WORKDIR /src
+COPY mcp-run /src/mcp-run
+RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release --bin run-remote
+
 FROM archlinux
 
 ARG USERNAME=gemini
@@ -5,6 +11,7 @@ ARG UID=1000
 ARG GID=1000
 
 COPY config/cli_packages /tmp/cli_packages
+COPY --from=builder /src/mcp-run/target/release/run-remote /usr/local/bin/run-remote
 
 RUN pacman -Syu --noconfirm --needed zsh $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/cli_packages) \
     && npm install -g @google/gemini-cli@latest \
