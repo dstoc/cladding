@@ -387,8 +387,8 @@ pub async fn run_network_tool_impl(
     default_cwd: &Path,
     input: RunNetworkToolInput,
 ) -> Result<RunNetworkToolOutput, ToolError> {
-    let env = input.env.unwrap_or_default();
-    validate_invocation(policy, &input.executable, &input.args, &env)?;
+    let user_env = input.env.unwrap_or_default();
+    validate_invocation(policy, &input.executable, &input.args, &user_env)?;
 
     let mut command = Command::new(&input.executable);
     command
@@ -403,8 +403,11 @@ pub async fn run_network_tool_impl(
         command.current_dir(default_cwd);
     }
 
+    let command_env = build_command_env(&user_env);
+    command.env_clear();
     command.envs(
-        env.iter()
+        command_env
+            .iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
 
@@ -444,6 +447,64 @@ pub async fn run_network_tool_impl(
         stderr: finalize_capture(stderr_bytes, stderr_truncated),
         exit_code: status.code(),
     })
+}
+
+fn build_command_env(user_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut command_env = BTreeMap::new();
+
+    for key in ["HOME", "LANG"] {
+        if let Ok(value) = std::env::var(key) {
+            command_env.insert(key.to_string(), value);
+        }
+    }
+
+    command_env.extend(
+        user_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+
+    for key in [
+        "PATH",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    ] {
+        command_env.remove(key);
+    }
+
+    if let Ok(path) = std::env::var("PATH") {
+        command_env.insert("PATH".to_string(), path);
+    }
+
+    let http_proxy = std::env::var("http_proxy").ok();
+    let https_proxy = std::env::var("https_proxy").ok();
+    let no_proxy = std::env::var("no_proxy").ok();
+
+    if let Some(value) = http_proxy.clone() {
+        command_env.insert("http_proxy".to_string(), value);
+    }
+    if let Some(value) = https_proxy.clone() {
+        command_env.insert("https_proxy".to_string(), value);
+    }
+    if let Some(value) = no_proxy.clone() {
+        command_env.insert("no_proxy".to_string(), value);
+    }
+
+    if let Some(value) = http_proxy {
+        command_env.insert("HTTP_PROXY".to_string(), value);
+    }
+    if let Some(value) = https_proxy {
+        command_env.insert("HTTPS_PROXY".to_string(), value);
+    }
+    if let Some(value) = no_proxy {
+        command_env.insert("NO_PROXY".to_string(), value);
+    }
+
+    command_env
 }
 
 async fn read_limited<R: tokio::io::AsyncRead + Unpin>(
@@ -618,6 +679,16 @@ mod tests {
         None
     }
 
+    fn parse_env_output(output: &str) -> BTreeMap<String, String> {
+        output
+            .lines()
+            .filter_map(|line| {
+                line.split_once('=')
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+            })
+            .collect()
+    }
+
     #[test]
     fn policy_parses_exact_regex_hash_and_env() {
         let hashed_file = NamedTempFile::new().expect("temp file");
@@ -773,6 +844,69 @@ mod tests {
         assert!(matches!(err, PolicyLoadError::InvalidSchema { .. }));
     }
 
+    #[test]
+    fn build_command_env_merges_user_and_enforces_critical_values() {
+        let user_env = BTreeMap::from([
+            ("CUSTOM_USER_ENV".to_string(), "allowed".to_string()),
+            ("HOME".to_string(), "user-home".to_string()),
+            ("LANG".to_string(), "user-lang".to_string()),
+            ("PATH".to_string(), "user-path".to_string()),
+            ("http_proxy".to_string(), "user-http".to_string()),
+            ("https_proxy".to_string(), "user-https".to_string()),
+            ("no_proxy".to_string(), "user-no".to_string()),
+            ("HTTP_PROXY".to_string(), "user-http-upper".to_string()),
+            ("HTTPS_PROXY".to_string(), "user-https-upper".to_string()),
+            ("NO_PROXY".to_string(), "user-no-upper".to_string()),
+        ]);
+
+        let merged = build_command_env(&user_env);
+
+        assert_eq!(
+            merged.get("CUSTOM_USER_ENV").map(String::as_str),
+            Some("allowed")
+        );
+        assert_eq!(merged.get("HOME").map(String::as_str), Some("user-home"));
+        assert_eq!(merged.get("LANG").map(String::as_str), Some("user-lang"));
+
+        match std::env::var("PATH") {
+            Ok(path) => assert_eq!(merged.get("PATH"), Some(&path)),
+            Err(_) => assert!(!merged.contains_key("PATH")),
+        }
+
+        match std::env::var("http_proxy").ok() {
+            Some(value) => {
+                assert_eq!(merged.get("http_proxy"), Some(&value));
+                assert_eq!(merged.get("HTTP_PROXY"), Some(&value));
+            }
+            None => {
+                assert!(!merged.contains_key("http_proxy"));
+                assert!(!merged.contains_key("HTTP_PROXY"));
+            }
+        }
+
+        match std::env::var("https_proxy").ok() {
+            Some(value) => {
+                assert_eq!(merged.get("https_proxy"), Some(&value));
+                assert_eq!(merged.get("HTTPS_PROXY"), Some(&value));
+            }
+            None => {
+                assert!(!merged.contains_key("https_proxy"));
+                assert!(!merged.contains_key("HTTPS_PROXY"));
+            }
+        }
+
+        match std::env::var("no_proxy").ok() {
+            Some(value) => {
+                assert_eq!(merged.get("no_proxy"), Some(&value));
+                assert_eq!(merged.get("NO_PROXY"), Some(&value));
+            }
+            None => {
+                assert!(!merged.contains_key("no_proxy"));
+                assert!(!merged.contains_key("NO_PROXY"));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn executes_allowed_command_successfully() {
         let env_path = match find_executable("env") {
@@ -814,6 +948,110 @@ mod tests {
         assert_eq!(output.exit_code, Some(0));
         assert_eq!(output.stdout, "ok");
         assert_eq!(output.stderr, "");
+    }
+
+    #[tokio::test]
+    async fn command_runs_with_sanitized_environment() {
+        let env_path = match find_executable("env") {
+            Some(path) => path,
+            None => return,
+        };
+
+        let policy: Policy = vec![CommandRule {
+            command: env_path.clone(),
+            args: vec![],
+            env: vec![
+                "CUSTOM_USER_ENV".to_string(),
+                "HOME".to_string(),
+                "LANG".to_string(),
+                "PATH".to_string(),
+                "http_proxy".to_string(),
+                "https_proxy".to_string(),
+                "no_proxy".to_string(),
+                "HTTP_PROXY".to_string(),
+                "HTTPS_PROXY".to_string(),
+                "NO_PROXY".to_string(),
+            ],
+            description: None,
+        }];
+
+        let output = run_network_tool_impl(
+            &policy,
+            Path::new("."),
+            RunNetworkToolInput {
+                executable: env_path,
+                args: vec![],
+                cwd: None,
+                env: Some(BTreeMap::from([
+                    ("CUSTOM_USER_ENV".to_string(), "allowed".to_string()),
+                    ("HOME".to_string(), "user-home".to_string()),
+                    ("LANG".to_string(), "user-lang".to_string()),
+                    ("PATH".to_string(), "user-path".to_string()),
+                    ("http_proxy".to_string(), "user-http".to_string()),
+                    ("https_proxy".to_string(), "user-https".to_string()),
+                    ("no_proxy".to_string(), "user-no".to_string()),
+                    ("HTTP_PROXY".to_string(), "user-http-upper".to_string()),
+                    ("HTTPS_PROXY".to_string(), "user-https-upper".to_string()),
+                    ("NO_PROXY".to_string(), "user-no-upper".to_string()),
+                ])),
+            },
+        )
+        .await
+        .expect("env should run");
+
+        let command_env = parse_env_output(&output.stdout);
+
+        assert_eq!(
+            command_env.get("CUSTOM_USER_ENV").map(String::as_str),
+            Some("allowed")
+        );
+        assert_eq!(
+            command_env.get("HOME").map(String::as_str),
+            Some("user-home")
+        );
+        assert_eq!(
+            command_env.get("LANG").map(String::as_str),
+            Some("user-lang")
+        );
+        assert!(!command_env.contains_key("PWD"));
+
+        match std::env::var("PATH") {
+            Ok(path) => assert_eq!(command_env.get("PATH"), Some(&path)),
+            Err(_) => assert!(!command_env.contains_key("PATH")),
+        }
+
+        match std::env::var("http_proxy").ok() {
+            Some(value) => {
+                assert_eq!(command_env.get("http_proxy"), Some(&value));
+                assert_eq!(command_env.get("HTTP_PROXY"), Some(&value));
+            }
+            None => {
+                assert!(!command_env.contains_key("http_proxy"));
+                assert!(!command_env.contains_key("HTTP_PROXY"));
+            }
+        }
+
+        match std::env::var("https_proxy").ok() {
+            Some(value) => {
+                assert_eq!(command_env.get("https_proxy"), Some(&value));
+                assert_eq!(command_env.get("HTTPS_PROXY"), Some(&value));
+            }
+            None => {
+                assert!(!command_env.contains_key("https_proxy"));
+                assert!(!command_env.contains_key("HTTPS_PROXY"));
+            }
+        }
+
+        match std::env::var("no_proxy").ok() {
+            Some(value) => {
+                assert_eq!(command_env.get("no_proxy"), Some(&value));
+                assert_eq!(command_env.get("NO_PROXY"), Some(&value));
+            }
+            None => {
+                assert!(!command_env.contains_key("no_proxy"));
+                assert!(!command_env.contains_key("NO_PROXY"));
+            }
+        }
     }
 
     #[tokio::test]
