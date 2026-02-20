@@ -13,46 +13,58 @@ In short: the agent cannot freely access the network; it can delegate commands t
 
 ## Getting Started
 
-1. Initialize local config from template:
+* Initialize local config from template:
 
-```bash
-./cladding init
-```
+  ```bash
+  ./cladding init
+  ```
 
-2. Edit files under [`config/`](config-template/) (at minimum):
-- [`config/mcp-run-policy.json`](config-template/mcp-run-policy.json)
-- [`config/cli_domains.lst`](config-template/cli_domains.lst)
-- [`config/sandbox_domains.lst`](config-template/sandbox_domains.lst)
+* Edit files under [`config/`](config-template/):
 
-3. Link or create the mounted home directory at [`mounts/home`](mounts/home):
+  - [`config/mcp-run-policy.json`](config-template/mcp-run-policy.json)
+  - [`config/cli_domains.lst`](config-template/cli_domains.lst)
+  - [`config/sandbox_domains.lst`](config-template/sandbox_domains.lst)
 
-```bash
-ln -s /somewhere/home ./mounts/home
-```
+* Link or create:
 
-4. Link the workspace you want mounted into the containers at [`mounts/workspace`](mounts/workspace):
+  * storage for the home directory at [`mounts/home`](mounts/home) - `/home/user`
+  * a workspace folder at [`mounts/workspace`](mounts/workspace) - `/home/user/workspace`
+  * read-only binaries, etc. at [`mounts/bin`](mounts/bin) - `/usr/local/bin`
 
-```bash
-ln -s /somewhere/mystuff ./mounts/workspace
-```
+  ```bash
+  ln -s /somewhere/home ./mounts/home
+  ln -s /somewhere/mystuff ./mounts/workspace
+  ln -s /somewhere/mytools ./mounts/bin
+  ```
 
-5. Build images (first run, or after image-related changes):
 
-```bash
-./cladding build
-```
+* Build images (first run, or after image-related changes):
 
-6. Start the environment:
+  ```bash
+  ./cladding build
+  ```
 
-```bash
-./cladding up
-```
+* Start the environment:
 
-7. Launch Gemini in the CLI container:
+  ```bash
+  ./cladding up
+  ```
 
-```bash
-./cladding gemini
-```
+* Launch Gemini in the CLI container:
+
+  ```bash
+  ./cladding gemini
+  ```
+
+## Mounts
+
+| Host path | Container path | Used by | Mode | Purpose |
+| --- | --- | --- | --- | --- |
+| `./config` | `/opt/config` | `proxy`, `sandbox-app`, `cli-app` | Read-only | Shared runtime config (policy, domain allowlists, Squid inputs). |
+| `./mounts/home` | `/home/user` | `sandbox-app`, `cli-app` | Read-write | User home directory shared by CLI and sandbox app containers. |
+| `./mounts/workspace` | `/home/user/workspace` | `sandbox-app`, `cli-app` | Read-write | Working tree shared between CLI and sandbox app containers. |
+| `./mounts/bin` | `/usr/local/bin` | `sandbox-app`, `cli-app` | Read-only | Optional host-provided helper binaries available in both app containers. |
+| `./scripts` | `/opt/scripts` | `proxy`, `sandbox-node`, `cli-node` | Read-only | Startup and jail scripts run by the helper containers. |
 
 ## Architecture + Network Controls
 
@@ -99,4 +111,7 @@ flowchart TB
 ./cladding reload-proxy # reconfigure squid after domain-list edits
 ./cladding down         # stop pods from the pod manifest
 ./cladding destroy      # force-remove running containers
+podman exec -t -i cli-pod-cli-app /bin/zsh      # get a shell in cli-app
+podman logs -f proxy-pod-proxy                  # view proxy logs
+podman logs -f sandbox-pod-sandbox-app          # sandbox (mcp-run) logs
 ```
