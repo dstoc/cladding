@@ -14,10 +14,7 @@ COPY config/cli_packages /tmp/cli_packages
 COPY --from=builder /src/mcp-run/target/release/run-remote /usr/local/bin/run-with-network
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends zsh curl ca-certificates $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/cli_packages) \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && mv /root/.local/bin/uv /usr/local/bin/uv \
-    && mv /root/.local/bin/uvx /usr/local/bin/uvx \
+    && apt-get install -y --no-install-recommends zsh ca-certificates npm $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/cli_packages) \
     && npm install -g @google/gemini-cli@latest \
     && if getent group $GID; then \
          group_name=$(getent group $GID | cut -d: -f1); \
