@@ -4,7 +4,7 @@ WORKDIR /src
 COPY mcp-run /src/mcp-run
 RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release --bin run-remote
 
-FROM archlinux
+FROM debian:trixie-slim
 
 ARG USERNAME=user
 ARG UID=1000
@@ -13,12 +13,21 @@ ARG GID=1000
 COPY config/cli_packages /tmp/cli_packages
 COPY --from=builder /src/mcp-run/target/release/run-remote /usr/local/bin/run-with-network
 
-RUN pacman -Syu --noconfirm --needed zsh $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/cli_packages) \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends zsh curl ca-certificates $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/cli_packages) \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv /root/.local/bin/uv /usr/local/bin/uv \
+    && mv /root/.local/bin/uvx /usr/local/bin/uvx \
     && npm install -g @google/gemini-cli@latest \
-    && groupadd -g $GID $USERNAME \
-    && useradd -m -u $UID -g $GID -s /bin/bash $USERNAME \
+    && if getent group $GID; then \
+         group_name=$(getent group $GID | cut -d: -f1); \
+         useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
+       else \
+         groupadd -g $GID $USERNAME && \
+         useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
+       fi \
     && chsh -s /bin/zsh $USERNAME \
-    && pacman -Scc --noconfirm
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 USER $USERNAME
 WORKDIR /home/$USERNAME/workspace

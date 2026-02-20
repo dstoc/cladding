@@ -8,7 +8,7 @@ RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
 COPY mcp-run /src/mcp-run
 RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
 
-FROM docker.io/library/archlinux:latest
+FROM debian:trixie-slim
 
 ARG USERNAME=user
 ARG UID=1000
@@ -16,10 +16,16 @@ ARG GID=1000
 
 COPY config/sandbox_packages /tmp/sandbox_packages
 
-RUN pacman -Syu --noconfirm --needed ca-certificates $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/sandbox_packages) \
-    && groupadd -g $GID $USERNAME \
-    && useradd -m -u $UID -g $GID -s /bin/bash $USERNAME \
-    && pacman -Scc --noconfirm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/sandbox_packages) \
+    && if getent group $GID; then \
+         group_name=$(getent group $GID | cut -d: -f1); \
+         useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
+       else \
+         groupadd -g $GID $USERNAME && \
+         useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
+       fi \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/mcp-run/target/release/mcp-run /usr/local/bin/mcp-run
 
