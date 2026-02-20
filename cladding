@@ -57,7 +57,7 @@ cmd_build() {
 check_required_paths() {
   missing=0
 
-  for name in config mounts/home mounts/workspace; do
+  for name in config mounts/home mounts/workspace mounts/bin; do
     path="$ROOT_DIR/$name"
 
     if [ -L "$path" ]; then
