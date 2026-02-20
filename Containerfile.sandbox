@@ -1,13 +1,3 @@
-FROM docker.io/library/rust:1.88-bookworm AS builder
-
-WORKDIR /src
-COPY mcp-run/Cargo.toml mcp-run/Cargo.lock ./mcp-run/
-RUN mkdir -p /src/mcp-run/src && printf 'fn main() {}\n' > /src/mcp-run/src/main.rs
-RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
-
-COPY mcp-run /src/mcp-run
-RUN cargo build --manifest-path /src/mcp-run/Cargo.toml --release
-
 FROM debian:trixie-slim
 
 ARG USERNAME=user
@@ -26,8 +16,6 @@ RUN apt-get update \
          useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
        fi \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /src/mcp-run/target/release/mcp-run /usr/local/bin/mcp-run
 
 ENV MCP_BIND_ADDR=0.0.0.0:3000
 ENV POLICY_FILE=/opt/config/mcp-run-policy.json

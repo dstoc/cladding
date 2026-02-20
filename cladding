@@ -38,6 +38,25 @@ EOF
 cmd_build() {
   HOST_UID="$(id -u)"
   HOST_GID="$(id -g)"
+  MOUNTS_BIN="$ROOT_DIR/mounts/bin"
+
+  if [ -L "$MOUNTS_BIN" ] && [ ! -e "$MOUNTS_BIN" ]; then
+    echo "missing: mounts/bin (broken symlink at $MOUNTS_BIN)" >&2
+    echo "hint: create or relink $MOUNTS_BIN" >&2
+    return 1
+  fi
+
+  mkdir -p "$MOUNTS_BIN"
+
+  podman run --rm \
+    -e CARGO_TARGET_DIR=/work/mcp-run/target \
+    -v "$ROOT_DIR/mcp-run:/work/mcp-run" \
+    -w /work/mcp-run \
+    docker.io/library/rust:latest \
+    cargo build --manifest-path /work/mcp-run/Cargo.toml --release --locked --bin mcp-run --bin run-remote
+
+  install -m 0755 "$ROOT_DIR/mcp-run/target/release/mcp-run" "$MOUNTS_BIN/mcp-run"
+  install -m 0755 "$ROOT_DIR/mcp-run/target/release/run-remote" "$MOUNTS_BIN/run-with-network"
 
   podman build \
     --build-arg UID="$HOST_UID" \
@@ -89,6 +108,24 @@ check_required_paths() {
   fi
 }
 
+check_required_binaries() {
+  missing=0
+
+  for name in mcp-run run-with-network; do
+    path="$ROOT_DIR/mounts/bin/$name"
+
+    if [ ! -x "$path" ]; then
+      echo "missing: mounts/bin/$name ($path)" >&2
+      echo "hint: run cladding build" >&2
+      missing=1
+    fi
+  done
+
+  if [ "$missing" -ne 0 ]; then
+    return 1
+  fi
+}
+
 check_required_images() {
   missing=0
 
@@ -123,6 +160,7 @@ cmd_init() {
 
 cmd_check() {
   check_required_paths
+  check_required_binaries
   check_required_images
   echo "check: ok"
 }
@@ -146,6 +184,7 @@ render_pods_yaml() {
 
 cmd_up() {
   check_required_paths
+  check_required_binaries
   check_required_images
 
   resolve_network_settings
@@ -231,3 +270,4 @@ case "$cmd" in
     exit 1
     ;;
 esac
+

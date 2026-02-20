@@ -38,7 +38,7 @@ In short: the agent cannot freely access the network; it can delegate commands t
   ```
 
 
-* Build images (first run, or after image-related changes):
+* Build images and refresh host-mounted binaries (`mcp-run`, `run-with-network`) in `mounts/bin`:
 
   ```bash
   ./cladding build
@@ -63,7 +63,7 @@ In short: the agent cannot freely access the network; it can delegate commands t
 | `./config` | `/opt/config` | `proxy`, `sandbox-app`, `cli-app` | Read-only | Shared runtime config (policy, domain allowlists, Squid inputs). |
 | `./mounts/home` | `/home/user` | `sandbox-app`, `cli-app` | Read-write | User home directory shared by CLI and sandbox app containers. |
 | `./mounts/workspace` | `/home/user/workspace` | `sandbox-app`, `cli-app` | Read-write | Working tree shared between CLI and sandbox app containers. |
-| `./mounts/bin` | `/usr/local/bin` | `sandbox-app`, `cli-app` | Read-only | Optional host-provided helper binaries available in both app containers. |
+| `./mounts/bin` | `/usr/local/bin` | `sandbox-app`, `cli-app` | Read-only | Host-provided helper binaries available in both app containers. |
 | `./scripts` | `/opt/scripts` | `proxy`, `sandbox-node`, `cli-node` | Read-only | Startup and jail scripts run by the helper containers. |
 
 ## Architecture + Network Controls
