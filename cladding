@@ -38,15 +38,16 @@ EOF
 cmd_build() {
   HOST_UID="$(id -u)"
   HOST_GID="$(id -g)"
-  MOUNTS_BIN="$ROOT_DIR/mounts/bin"
+  MOUNTS_TOOLS="$ROOT_DIR/mounts/tools"
+  MOUNTS_TOOLS_BIN="$MOUNTS_TOOLS/bin"
 
-  if [ -L "$MOUNTS_BIN" ] && [ ! -e "$MOUNTS_BIN" ]; then
-    echo "missing: mounts/bin (broken symlink at $MOUNTS_BIN)" >&2
-    echo "hint: create or relink $MOUNTS_BIN" >&2
+  if [ -L "$MOUNTS_TOOLS" ] && [ ! -e "$MOUNTS_TOOLS" ]; then
+    echo "missing: mounts/tools (broken symlink at $MOUNTS_TOOLS)" >&2
+    echo "hint: create or relink $MOUNTS_TOOLS" >&2
     return 1
   fi
 
-  mkdir -p "$MOUNTS_BIN"
+  mkdir -p "$MOUNTS_TOOLS_BIN"
 
   podman run --rm \
     -e CARGO_TARGET_DIR=/work/mcp-run/target \
@@ -55,8 +56,8 @@ cmd_build() {
     docker.io/library/rust:latest \
     cargo build --manifest-path /work/mcp-run/Cargo.toml --release --locked --bin mcp-run --bin run-remote
 
-  install -m 0755 "$ROOT_DIR/mcp-run/target/release/mcp-run" "$MOUNTS_BIN/mcp-run"
-  install -m 0755 "$ROOT_DIR/mcp-run/target/release/run-remote" "$MOUNTS_BIN/run-with-network"
+  install -m 0755 "$ROOT_DIR/mcp-run/target/release/mcp-run" "$MOUNTS_TOOLS_BIN/mcp-run"
+  install -m 0755 "$ROOT_DIR/mcp-run/target/release/run-remote" "$MOUNTS_TOOLS_BIN/run-with-network"
 
   podman build \
     --build-arg UID="$HOST_UID" \
@@ -76,7 +77,7 @@ cmd_build() {
 check_required_paths() {
   missing=0
 
-  for name in config mounts/home mounts/workspace mounts/bin; do
+  for name in config mounts/home mounts/workspace mounts/tools; do
     path="$ROOT_DIR/$name"
 
     if [ -L "$path" ]; then
@@ -112,10 +113,10 @@ check_required_binaries() {
   missing=0
 
   for name in mcp-run run-with-network; do
-    path="$ROOT_DIR/mounts/bin/$name"
+    path="$ROOT_DIR/mounts/tools/bin/$name"
 
     if [ ! -x "$path" ]; then
-      echo "missing: mounts/bin/$name ($path)" >&2
+      echo "missing: mounts/tools/bin/$name ($path)" >&2
       echo "hint: run cladding build" >&2
       missing=1
     fi
@@ -270,4 +271,3 @@ case "$cmd" in
     exit 1
     ;;
 esac
-

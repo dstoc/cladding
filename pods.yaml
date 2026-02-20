@@ -86,10 +86,12 @@ spec:
       mountPath: /home/user
     - name: workspace-dir
       mountPath: /home/user/workspace
-    - name: bin-dir
-      mountPath: /usr/local/bin
+    - name: tools-dir
+      mountPath: /opt/tools
       readOnly: true
     env:
+    - name: PATH
+      value: "/opt/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     - name: MCP_BIND_ADDR
       value: "0.0.0.0:3000"
     - name: POLICY_FILE
@@ -118,9 +120,9 @@ spec:
     hostPath:
       path: PROJECT_ROOT/mounts/workspace
       type: Directory
-  - name: bin-dir
+  - name: tools-dir
     hostPath:
-      path: PROJECT_ROOT/mounts/bin
+      path: PROJECT_ROOT/mounts/tools
       type: Directory
 
 ---
@@ -172,10 +174,12 @@ spec:
       mountPath: /home/user
     - name: workspace-dir
       mountPath: /home/user/workspace
-    - name: bin-dir
-      mountPath: /usr/local/bin
+    - name: tools-dir
+      mountPath: /opt/tools
       readOnly: true
     env:
+    - name: PATH
+      value: "/opt/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     - name: http_proxy
       value: "http://proxy-pod:8080"
     - name: https_proxy
@@ -202,7 +206,7 @@ spec:
     hostPath:
       path: PROJECT_ROOT/mounts/workspace
       type: Directory
-  - name: bin-dir
+  - name: tools-dir
     hostPath:
-      path: PROJECT_ROOT/mounts/bin
+      path: PROJECT_ROOT/mounts/tools
       type: Directory
