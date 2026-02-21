@@ -41,5 +41,9 @@ nft add rule ip filter OUTPUT ip daddr $PROXY_IP accept
 nft add rule ip filter OUTPUT log prefix \"DROP_SANDBOX: \" drop
 nft add rule ip filter OUTPUT drop
 
-echo "Sandbox Firewall Locked. Sleeping infinity..."
-exec sleep infinity
+if [ "${JAILER_HOLD:-0}" = "1" ]; then
+  echo "Sandbox Firewall Locked. Sleeping infinity..."
+  exec sleep infinity
+fi
+
+echo "Sandbox Firewall Locked. Exiting."

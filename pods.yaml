@@ -58,11 +58,13 @@ spec:
   - ip: "REPLACE_PROXY_IP"
     hostnames:
     - proxy-pod
-  containers:
+  initContainers:
   # 1. Jailer
   - name: sandbox-node
     image: alpine:latest
     securityContext:
+      runAsUser: 0
+      runAsGroup: 0
       capabilities:
         add: ["NET_ADMIN"]
     volumeMounts:
@@ -71,6 +73,7 @@ spec:
       readOnly: true
     command: ["/bin/sh", "/opt/scripts/jail_sandbox.sh"]
 
+  containers:
   # 2. App
   - name: sandbox-app
     image: localhost/mcp-run-sandbox:latest
@@ -145,11 +148,13 @@ spec:
   - ip: "REPLACE_SANDBOX_IP"
     hostnames:
     - sandbox-pod
-  containers:
+  initContainers:
   # 1. Jailer
   - name: cli-node
     image: alpine:latest
     securityContext:
+      runAsUser: 0
+      runAsGroup: 0
       capabilities:
         add: ["NET_ADMIN"]
     volumeMounts:
@@ -158,6 +163,7 @@ spec:
       readOnly: true
     command: ["/bin/sh", "/opt/scripts/jail_cli.sh"]
 
+  containers:
   # 2. App
   - name: cli-app
     image: localhost/gemini-cli:latest

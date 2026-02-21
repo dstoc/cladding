@@ -48,5 +48,9 @@ nft add rule ip filter OUTPUT ip daddr $PROXY_IP tcp dport 8080 accept
 nft add rule ip filter OUTPUT log prefix \"BLOCKED_CLI: \" drop
 nft add rule ip filter OUTPUT drop
 
-echo "CLI Firewall Locked. Traffic restricted to Sandbox & Proxy."
-exec sleep infinity
+if [ "${JAILER_HOLD:-0}" = "1" ]; then
+  echo "CLI Firewall Locked. Traffic restricted to Sandbox & Proxy. Sleeping infinity..."
+  exec sleep infinity
+fi
+
+echo "CLI Firewall Locked. Traffic restricted to Sandbox & Proxy. Exiting."
