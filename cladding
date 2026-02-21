@@ -434,7 +434,9 @@ cmd_init() {
   src="$CLADDING_ROOT/config-template"
   dst="$PROJECT_ROOT/config"
   cladding_config="$dst/cladding.json"
+  cladding_gitignore="$PROJECT_ROOT/.gitignore"
   generated_config_tmp=""
+  project_root_created=0
 
   if [ -e "$PROJECT_ROOT" ] && [ ! -d "$PROJECT_ROOT" ]; then
     echo "error: .cladding path exists but is not a directory: $PROJECT_ROOT" >&2
@@ -458,7 +460,13 @@ cmd_init() {
     fi
   fi
 
+  if [ ! -e "$PROJECT_ROOT" ]; then
+    project_root_created=1
+  fi
   mkdir -p "$PROJECT_ROOT"
+  if [ "$project_root_created" -eq 1 ]; then
+    printf '*\n' > "$cladding_gitignore"
+  fi
 
   if [ -e "$dst" ] || [ -L "$dst" ]; then
     echo "config already exists: $dst"
