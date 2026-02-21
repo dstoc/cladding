@@ -4,10 +4,21 @@ ARG USERNAME=user
 ARG UID=1000
 ARG GID=1000
 
-COPY config/cli_packages /tmp/cli_packages
-
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends zsh ca-certificates npm $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/cli_packages) \
+    && apt-get install -y --no-install-recommends \
+       zsh \
+       ca-certificates \
+       npm \
+       curl \
+       build-essential \
+       pkg-config \
+       git \
+       less \
+       jq \
+       python3 \
+       python3-pip \
+       python3-venv \
+       ripgrep \
     && npm install -g @google/gemini-cli@latest \
     && if getent group $GID; then \
          group_name=$(getent group $GID | cut -d: -f1); \

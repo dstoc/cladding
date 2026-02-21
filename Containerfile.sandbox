@@ -4,10 +4,10 @@ ARG USERNAME=user
 ARG UID=1000
 ARG GID=1000
 
-COPY config/sandbox_packages /tmp/sandbox_packages
-
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates $(sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' /tmp/sandbox_packages) \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates \
+       curl \
     && if getent group $GID; then \
          group_name=$(getent group $GID | cut -d: -f1); \
          useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
