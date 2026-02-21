@@ -18,7 +18,7 @@ RUN apt-get update \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV MCP_BIND_ADDR=0.0.0.0:3000
-ENV POLICY_FILE=/opt/config/mcp-run-policy.json
+ENV POLICY_FILE=/opt/config/sandbox_commands.json
 ENV RUST_LOG=info
 
 USER $USERNAME

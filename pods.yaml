@@ -101,7 +101,7 @@ spec:
     - name: MCP_BIND_ADDR
       value: "0.0.0.0:3000"
     - name: POLICY_FILE
-      value: "/opt/config/mcp-run-policy.json"
+      value: "/opt/config/sandbox_commands.json"
     - name: http_proxy
       value: "http://proxy-pod:8080"
     - name: https_proxy
