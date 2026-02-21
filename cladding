@@ -16,7 +16,7 @@ case "$SCRIPT_PATH" in
   /*) ;;
   *) SCRIPT_PATH="$(pwd)/$SCRIPT_PATH" ;;
 esac
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+CLADDING_ROOT="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 
 print_help() {
   cat <<'EOF'
@@ -35,50 +35,67 @@ Commands:
 EOF
 }
 
+find_project_root() {
+  search_dir="$PWD"
+
+  while :; do
+    if [ -d "$search_dir/.cladding" ]; then
+      printf '%s\n' "$search_dir/.cladding"
+      return 0
+    fi
+
+    if [ "$search_dir" = "/" ]; then
+      return 1
+    fi
+
+    search_dir="$(dirname -- "$search_dir")"
+  done
+}
+
 cmd_build() {
   HOST_UID="$(id -u)"
   HOST_GID="$(id -g)"
-  MOUNTS_TOOLS="$ROOT_DIR/mounts/tools"
-  MOUNTS_TOOLS_BIN="$MOUNTS_TOOLS/bin"
+  TOOLS_DIR="$PROJECT_ROOT/tools"
+  TOOLS_BIN_DIR="$TOOLS_DIR/bin"
 
-  if [ -L "$MOUNTS_TOOLS" ] && [ ! -e "$MOUNTS_TOOLS" ]; then
-    echo "missing: mounts/tools (broken symlink at $MOUNTS_TOOLS)" >&2
-    echo "hint: create or relink $MOUNTS_TOOLS" >&2
+  if [ -L "$TOOLS_DIR" ] && [ ! -e "$TOOLS_DIR" ]; then
+    echo "missing: tools (broken symlink at $TOOLS_DIR)" >&2
+    echo "hint: create or relink $TOOLS_DIR" >&2
     return 1
   fi
 
-  mkdir -p "$MOUNTS_TOOLS_BIN"
+  mkdir -p "$TOOLS_BIN_DIR"
 
   podman run --rm \
     -e CARGO_TARGET_DIR=/work/mcp-run/target \
-    -v "$ROOT_DIR/mcp-run:/work/mcp-run" \
+    -v "$CLADDING_ROOT/mcp-run:/work/mcp-run" \
     -w /work/mcp-run \
     docker.io/library/rust:latest \
     cargo build --manifest-path /work/mcp-run/Cargo.toml --release --locked --bin mcp-run --bin run-remote
 
-  install -m 0755 "$ROOT_DIR/mcp-run/target/release/mcp-run" "$MOUNTS_TOOLS_BIN/mcp-run"
-  install -m 0755 "$ROOT_DIR/mcp-run/target/release/run-remote" "$MOUNTS_TOOLS_BIN/run-with-network"
+  install -m 0755 "$CLADDING_ROOT/mcp-run/target/release/mcp-run" "$TOOLS_BIN_DIR/mcp-run"
+  install -m 0755 "$CLADDING_ROOT/mcp-run/target/release/run-remote" "$TOOLS_BIN_DIR/run-with-network"
 
   podman build \
     --build-arg UID="$HOST_UID" \
     --build-arg GID="$HOST_GID" \
     -t localhost/gemini-cli:latest \
-    -f "$ROOT_DIR/Containerfile.gemini" \
-    "$ROOT_DIR"
+    -f "$CLADDING_ROOT/Containerfile.gemini" \
+    "$CLADDING_ROOT"
 
   podman build \
     --build-arg UID="$HOST_UID" \
     --build-arg GID="$HOST_GID" \
     -t localhost/mcp-run-sandbox:latest \
-    -f "$ROOT_DIR/Containerfile.sandbox" \
-    "$ROOT_DIR"
+    -f "$CLADDING_ROOT/Containerfile.sandbox" \
+    "$CLADDING_ROOT"
 }
 
 check_required_paths() {
   missing=0
 
-  for name in config mounts/home mounts/workspace mounts/tools; do
-    path="$ROOT_DIR/$name"
+  for name in config home tools; do
+    path="$PROJECT_ROOT/$name"
 
     if [ -L "$path" ]; then
       if [ ! -e "$path" ]; then
@@ -113,10 +130,10 @@ check_required_binaries() {
   missing=0
 
   for name in mcp-run run-with-network; do
-    path="$ROOT_DIR/mounts/tools/bin/$name"
+    path="$PROJECT_ROOT/tools/bin/$name"
 
     if [ ! -x "$path" ]; then
-      echo "missing: mounts/tools/bin/$name ($path)" >&2
+      echo "missing: tools/bin/$name ($path)" >&2
       echo "hint: run cladding build" >&2
       missing=1
     fi
@@ -143,8 +160,15 @@ check_required_images() {
 }
 
 cmd_init() {
-  src="$ROOT_DIR/config-template"
-  dst="$ROOT_DIR/config"
+  src="$CLADDING_ROOT/config-template"
+  dst="$PROJECT_ROOT/config"
+
+  if [ -e "$PROJECT_ROOT" ] && [ ! -d "$PROJECT_ROOT" ]; then
+    echo "error: .cladding path exists but is not a directory: $PROJECT_ROOT" >&2
+    return 1
+  fi
+
+  mkdir -p "$PROJECT_ROOT"
 
   if [ ! -d "$src" ]; then
     echo "missing: config-template ($src)" >&2
@@ -176,11 +200,12 @@ resolve_network_settings() {
 
 render_pods_yaml() {
   sed \
-    -e "s|PROJECT_ROOT|$ROOT_DIR|g" \
+    -e "s|PROJECT_ROOT|$PROJECT_ROOT|g" \
+    -e "s|CLADDING_ROOT|$CLADDING_ROOT|g" \
     -e "s|REPLACE_PROXY_IP|$PROXY_IP|g" \
     -e "s|REPLACE_SANDBOX_IP|$SANDBOX_IP|g" \
     -e "s|REPLACE_CLI_IP|$CLI_IP|g" \
-    "$ROOT_DIR/pods.yaml"
+    "$CLADDING_ROOT/pods.yaml"
 }
 
 cmd_up() {
@@ -229,12 +254,28 @@ cmd_reload_proxy() {
 }
 
 if [ $# -eq 0 ]; then
-  print_help
-  exit 0
+  cmd="help"
+else
+  cmd="$1"
+  shift
 fi
 
-cmd="$1"
-shift
+if PROJECT_ROOT="$(find_project_root)"; then
+  :
+else
+  case "$cmd" in
+    help|-h|--help)
+      ;;
+    init)
+      PROJECT_ROOT="$PWD/.cladding"
+      ;;
+    *)
+      echo "error: no .cladding directory found in $PWD or any parent directory" >&2
+      echo "hint: run 'cladding init' from the project directory to create one" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 case "$cmd" in
   build)

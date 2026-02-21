@@ -38,7 +38,7 @@ spec:
       type: Directory
   - name: scripts-dir
     hostPath:
-      path: PROJECT_ROOT/scripts
+      path: CLADDING_ROOT/scripts
       type: Directory
 
 ---
@@ -89,6 +89,9 @@ spec:
       mountPath: /home/user
     - name: workspace-dir
       mountPath: /home/user/workspace
+    - name: masked-cladding-dir
+      mountPath: /home/user/workspace/.cladding
+      readOnly: true
     - name: tools-dir
       mountPath: /opt/tools
       readOnly: true
@@ -109,7 +112,7 @@ spec:
   volumes:
   - name: scripts-dir
     hostPath:
-      path: PROJECT_ROOT/scripts
+      path: CLADDING_ROOT/scripts
       type: Directory
   - name: config-dir
     hostPath:
@@ -117,15 +120,17 @@ spec:
       type: Directory
   - name: home-dir
     hostPath:
-      path: PROJECT_ROOT/mounts/home
+      path: PROJECT_ROOT/home
       type: Directory
   - name: workspace-dir
     hostPath:
-      path: PROJECT_ROOT/mounts/workspace
+      path: PROJECT_ROOT/..
       type: Directory
+  - name: masked-cladding-dir
+    emptyDir: {}
   - name: tools-dir
     hostPath:
-      path: PROJECT_ROOT/mounts/tools
+      path: PROJECT_ROOT/tools
       type: Directory
 
 ---
@@ -180,6 +185,9 @@ spec:
       mountPath: /home/user
     - name: workspace-dir
       mountPath: /home/user/workspace
+    - name: masked-cladding-dir
+      mountPath: /home/user/workspace/.cladding
+      readOnly: true
     - name: tools-dir
       mountPath: /opt/tools
       readOnly: true
@@ -198,7 +206,7 @@ spec:
   volumes:
   - name: scripts-dir
     hostPath:
-      path: PROJECT_ROOT/scripts
+      path: CLADDING_ROOT/scripts
       type: Directory
   - name: config-dir
     hostPath:
@@ -206,13 +214,15 @@ spec:
       type: Directory
   - name: home-dir
     hostPath:
-      path: PROJECT_ROOT/mounts/home
+      path: PROJECT_ROOT/home
       type: Directory
   - name: workspace-dir
     hostPath:
-      path: PROJECT_ROOT/mounts/workspace
+      path: PROJECT_ROOT/..
       type: Directory
+  - name: masked-cladding-dir
+    emptyDir: {}
   - name: tools-dir
     hostPath:
-      path: PROJECT_ROOT/mounts/tools
+      path: PROJECT_ROOT/tools
       type: Directory
