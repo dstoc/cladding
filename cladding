@@ -521,12 +521,13 @@ resolve_network_settings() {
   subnet_network_int=$((subnet_ip_int & subnet_mask_int))
   subnet_broadcast_int=$((subnet_network_int | (4294967295 ^ subnet_mask_int)))
 
-  proxy_ip_int=$((subnet_network_int + 1))
-  sandbox_ip_int=$((subnet_network_int + 2))
-  cli_ip_int=$((subnet_network_int + 3))
+  # +1 is typically the bridge gateway on Podman networks; skip it.
+  proxy_ip_int=$((subnet_network_int + 2))
+  sandbox_ip_int=$((subnet_network_int + 3))
+  cli_ip_int=$((subnet_network_int + 4))
 
   if [ "$cli_ip_int" -ge "$subnet_broadcast_int" ]; then
-    echo "error: subnet too small, need at least 3 usable IPs: $CLADDING_SUBNET" >&2
+    echo "error: subnet too small, need usable IPs for gateway + 3 pods: $CLADDING_SUBNET" >&2
     return 1
   fi
 
