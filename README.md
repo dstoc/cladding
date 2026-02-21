@@ -56,10 +56,10 @@ In short: the agent cannot freely access the network; it can delegate commands t
   ./cladding up
   ```
 
-* Launch Gemini in the CLI container:
+* Run commands in the CLI container (workdir follows your host `cwd` relative to the directory containing `.cladding`):
 
   ```bash
-  ./cladding gemini
+  ./cladding run gemini
   ```
 
 ## Mounts
@@ -115,10 +115,10 @@ flowchart TB
 
 ```bash
 ./cladding check        # verify required paths/images
+./cladding run [cmd]    # run any command in cli-app
 ./cladding reload-proxy # reconfigure squid after domain-list edits
 ./cladding down         # stop pods from the pod manifest
 ./cladding destroy      # force-remove running containers
-podman exec -t -i cli-pod-cli-app /bin/zsh      # get a shell in cli-app
 podman logs -f proxy-pod-proxy                  # view proxy logs
 podman logs -f sandbox-pod-sandbox-app          # sandbox (mcp-run) logs
 ```

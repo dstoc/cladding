@@ -29,7 +29,7 @@ Commands:
   up                   Start the system
   down                 Stop the system
   destroy              Force-remove running containers
-  gemini               Launch gemini-cli in the cli container
+  run                  Run a command in the cli container
   reload-proxy         Reload the squid proxy configuration
   help                 Show this help
 EOF
@@ -240,13 +240,52 @@ cmd_destroy() {
   podman rm -f cli-pod sandbox-pod proxy-pod
 }
 
-cmd_gemini() {
+cwd_relative_to_project_root() {
+  project_dir="$(dirname -- "$PROJECT_ROOT")"
+
+  if command -v realpath >/dev/null 2>&1; then
+    realpath --relative-to="$project_dir" "$PWD"
+    return 0
+  fi
+
+  case "$PWD" in
+    "$project_dir")
+      printf '%s\n' "."
+      ;;
+    "$project_dir"/*)
+      printf '%s\n' "${PWD#$project_dir/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+cmd_run() {
+  if [ $# -eq 0 ]; then
+    echo "usage: cladding run <command> [args...]" >&2
+    return 1
+  fi
+
+  if workdir_rel="$(cwd_relative_to_project_root)"; then
+    container_workdir="/home/user/workspace"
+    if [ "$workdir_rel" != "." ]; then
+      container_workdir="$container_workdir/$workdir_rel"
+    fi
+  else
+    project_dir="$(dirname -- "$PROJECT_ROOT")"
+    echo "error: could not determine current path relative to project dir ($project_dir): $PWD" >&2
+    echo "hint: run cladding from $project_dir or one of its subdirectories" >&2
+    return 1
+  fi
+
   exec podman exec -it \
+    -w "$container_workdir" \
     --env TERM="${TERM:-xterm-256color}" \
     --env COLORTERM="${COLORTERM:-truecolor}" \
     --env FORCE_COLOR="${FORCE_COLOR:-3}" \
     cli-pod-cli-app \
-    gemini "$@"
+    "$@"
 }
 
 cmd_reload_proxy() {
@@ -296,8 +335,8 @@ case "$cmd" in
   destroy)
     cmd_destroy "$@"
     ;;
-  gemini)
-    cmd_gemini "$@"
+  run)
+    cmd_run "$@"
     ;;
   reload-proxy)
     cmd_reload_proxy "$@"
