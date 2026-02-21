@@ -17,7 +17,9 @@ case "$SCRIPT_PATH" in
   *) SCRIPT_PATH="$(pwd)/$SCRIPT_PATH" ;;
 esac
 CLADDING_ROOT="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
-DEFAULT_CLI_BUILD_IMAGE="localhost/gemini-cli:latest"
+CLI_GEMINI_BUILD_IMAGE="localhost/gemini-cli:latest"
+CLI_CODEX_BUILD_IMAGE="localhost/codex:latest"
+DEFAULT_CLI_BUILD_IMAGE="$CLI_GEMINI_BUILD_IMAGE"
 DEFAULT_SANDBOX_BUILD_IMAGE="localhost/mcp-run-sandbox:latest"
 
 print_help() {
@@ -80,15 +82,20 @@ cmd_build() {
   install -m 0755 "$CLADDING_ROOT/mcp-run/target/release/mcp-run" "$TOOLS_BIN_DIR/mcp-run"
   install -m 0755 "$CLADDING_ROOT/mcp-run/target/release/run-remote" "$TOOLS_BIN_DIR/run-with-network"
 
-  if [ "$CLI_IMAGE" = "$DEFAULT_CLI_BUILD_IMAGE" ]; then
+  if cli_containerfile="$(cli_containerfile_for_image "$CLI_IMAGE")"; then
+    if [ ! -f "$cli_containerfile" ]; then
+      echo "missing: $(basename -- "$cli_containerfile") ($cli_containerfile)" >&2
+      return 1
+    fi
+
     podman build \
       --build-arg UID="$HOST_UID" \
       --build-arg GID="$HOST_GID" \
       -t "$CLI_IMAGE" \
-      -f "$CLADDING_ROOT/Containerfile.gemini" \
+      -f "$cli_containerfile" \
       "$CLADDING_ROOT"
   else
-    echo "skip: not building cli image (config cli_image is $CLI_IMAGE, build target is $DEFAULT_CLI_BUILD_IMAGE)"
+    echo "skip: not building cli image (config cli_image is $CLI_IMAGE, build targets are $CLI_GEMINI_BUILD_IMAGE and $CLI_CODEX_BUILD_IMAGE)"
   fi
 
   if [ "$SANDBOX_IMAGE" = "$DEFAULT_SANDBOX_BUILD_IMAGE" ]; then
@@ -101,6 +108,33 @@ cmd_build() {
   else
     echo "skip: not building sandbox image (config sandbox_image is $SANDBOX_IMAGE, build target is $DEFAULT_SANDBOX_BUILD_IMAGE)"
   fi
+}
+
+cli_containerfile_for_image() {
+  case "$1" in
+    "$CLI_GEMINI_BUILD_IMAGE")
+      printf '%s\n' "$CLADDING_ROOT/Containerfile.gemini"
+      return 0
+      ;;
+    "$CLI_CODEX_BUILD_IMAGE")
+      printf '%s\n' "$CLADDING_ROOT/Containerfile.codex"
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+image_is_buildable_by_cladding() {
+  case "$1" in
+    "$CLI_GEMINI_BUILD_IMAGE"|"$CLI_CODEX_BUILD_IMAGE"|"$DEFAULT_SANDBOX_BUILD_IMAGE")
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 check_required_paths() {
@@ -162,10 +196,10 @@ check_required_images() {
   for image in "$CLI_IMAGE" "$SANDBOX_IMAGE"; do
     if ! podman image exists "$image"; then
       echo "missing: image $image" >&2
-      if [ "$image" = "$DEFAULT_CLI_BUILD_IMAGE" ] || [ "$image" = "$DEFAULT_SANDBOX_BUILD_IMAGE" ]; then
+      if image_is_buildable_by_cladding "$image"; then
         echo "hint: run cladding build" >&2
       else
-        echo "hint: pull/tag image '$image', or set cladding.json image to a default build target and run cladding build" >&2
+        echo "hint: pull/tag image '$image', or set cladding.json image to a supported build target and run cladding build" >&2
       fi
       missing=1
     fi
