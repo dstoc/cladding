@@ -170,6 +170,31 @@ check_required_paths() {
   if [ "$missing" -ne 0 ]; then
     return 1
   fi
+
+  check_required_config_files
+}
+
+check_required_config_files() {
+  src="$CLADDING_ROOT/config-template"
+  dst="$PROJECT_ROOT/config"
+  missing=0
+
+  if [ ! -d "$src" ]; then
+    echo "missing: config-template ($src)" >&2
+    return 1
+  fi
+
+  for rel in $(cd "$src" && find . -type f -print | sed 's|^\./||'); do
+    if [ ! -e "$dst/$rel" ]; then
+      echo "missing: config/$rel ($dst/$rel)" >&2
+      missing=1
+    fi
+  done
+
+  if [ "$missing" -ne 0 ]; then
+    echo "hint: run cladding init, or add missing files from $src into $dst" >&2
+    return 1
+  fi
 }
 
 check_required_binaries() {
