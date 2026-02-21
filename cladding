@@ -657,11 +657,20 @@ cmd_run() {
     return 1
   fi
 
-  exec podman exec -it \
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec podman exec -it \
+      -w "$container_workdir" \
+      --env LANG="C.UTF-8" \
+      --env TERM="xterm-256color" \
+      --env COLORTERM="${COLORTERM:-truecolor}" \
+      --env FORCE_COLOR="${FORCE_COLOR:-3}" \
+      "$CLI_POD_NAME-cli-app" \
+      "$@"
+  fi
+
+  exec podman exec -i \
     -w "$container_workdir" \
-    --env TERM="${TERM:-xterm-256color}" \
-    --env COLORTERM="${COLORTERM:-truecolor}" \
-    --env FORCE_COLOR="${FORCE_COLOR:-3}" \
+    --env LANG="C.UTF-8" \
     "$CLI_POD_NAME-cli-app" \
     "$@"
 }
