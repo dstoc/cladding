@@ -619,11 +619,19 @@ cmd_destroy() {
 cwd_relative_to_project_root() {
   project_dir="$(dirname -- "$PROJECT_ROOT")"
 
-  if command -v realpath >/dev/null 2>&1; then
+  # 1. Try GNU realpath (Linux / Homebrew coreutils)
+  if realpath --relative-to=. . >/dev/null 2>&1; then
     realpath --relative-to="$project_dir" "$PWD"
     return 0
   fi
 
+  # 2. Try Python (Standard on macOS)
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import os.path, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$PWD" "$project_dir"
+    return 0
+  fi
+
+  # 3. Pure shell fallback (Simple subdirectory matching only)
   case "$PWD" in
     "$project_dir")
       printf '%s\n' "."
