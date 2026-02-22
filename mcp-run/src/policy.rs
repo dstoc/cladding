@@ -146,16 +146,10 @@ impl PolicyEngine {
     pub fn validate_invocation(
         &self,
         command: &str,
+        path: &str,
         args: &[String],
         env: &BTreeMap<String, String>,
     ) -> Result<(), ValidationError> {
-        let resolved_path = resolve_executable_path(command).map_err(|details| {
-            ValidationError::PathResolutionFailed {
-                command: command.to_string(),
-                details,
-            }
-        })?;
-
         let snapshot = self
             .state
             .read()
@@ -164,7 +158,7 @@ impl PolicyEngine {
 
         let evaluation_input = PolicyEvaluationInput {
             command,
-            path: &resolved_path,
+            path,
             args,
             env,
         };
@@ -363,39 +357,6 @@ fn collect_rego_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), std::io:
     Ok(())
 }
 
-fn resolve_executable_path(command: &str) -> Result<String, String> {
-    if command.contains('/') {
-        let canonical = std::fs::canonicalize(command)
-            .map_err(|error| format!("{} ({error})", command))?;
-        return Ok(canonical.to_string_lossy().into_owned());
-    }
-
-    let path = std::env::var_os("PATH").ok_or_else(|| "PATH is not set".to_string())?;
-    for directory in std::env::split_paths(&path) {
-        let candidate = directory.join(command);
-        if !candidate.is_file() {
-            continue;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = candidate.metadata().map_err(|error| {
-                format!("failed reading metadata for '{}': {error}", candidate.display())
-            })?;
-            if metadata.permissions().mode() & 0o111 == 0 {
-                continue;
-            }
-        }
-
-        let canonical = std::fs::canonicalize(&candidate)
-            .map_err(|error| format!("failed resolving '{}': {error}", candidate.display()))?;
-        return Ok(canonical.to_string_lossy().into_owned());
-    }
-
-    Err(format!("'{}' was not found on PATH", command))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -427,17 +388,6 @@ allow if {
         .expect("write command rego");
     }
 
-    fn find_executable(name: &str) -> Option<String> {
-        let path = std::env::var_os("PATH")?;
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate.to_string_lossy().into_owned());
-            }
-        }
-        None
-    }
-
     #[test]
     fn rego_mode_selected_when_policy_dir_is_set() {
         let dir = tempdir().expect("temp rego dir");
@@ -456,18 +406,13 @@ allow if {
         let engine = PolicyEngine::from_sources(Some(dir.path().to_path_buf()));
         assert_eq!(engine.mode(), PolicyMode::DenyAll);
         let err = engine
-            .validate_invocation("echo", &[], &BTreeMap::new())
+            .validate_invocation("echo", "/usr/bin/echo", &[], &BTreeMap::new())
             .expect_err("deny-all expected");
         assert!(matches!(err, ValidationError::PolicyUnavailable { .. }));
     }
 
     #[test]
     fn rego_input_contains_command_path_args_env() {
-        let echo = match find_executable("echo") {
-            Some(path) => path,
-            None => return,
-        };
-
         let modules = [
             (
                 "main.rego",
@@ -499,10 +444,14 @@ allow if {
         let engine = PolicyEngine::from_rego_for_tests(&modules);
         let env = BTreeMap::from([(String::from("FLAG"), String::from("1"))]);
         let args = vec!["ok".to_string()];
-        assert!(engine.validate_invocation("echo", &args, &env).is_ok());
+        assert!(
+            engine
+                .validate_invocation("echo", "/usr/bin/echo", &args, &env)
+                .is_ok()
+        );
 
         let err = engine
-            .validate_invocation(&echo, &args, &env)
+            .validate_invocation("/usr/bin/echo", "/usr/bin/echo", &args, &env)
             .expect_err("command token should not match when full path is sent");
         assert!(err.to_string().contains("Command not allowed"));
     }
@@ -515,7 +464,7 @@ allow if {
         let engine = PolicyEngine::from_sources(Some(dir.path().to_path_buf()));
         assert_eq!(engine.mode(), PolicyMode::Rego);
         assert!(engine
-            .validate_invocation("echo", &[], &BTreeMap::new())
+            .validate_invocation("echo", "/usr/bin/echo", &[], &BTreeMap::new())
             .is_ok());
 
         std::fs::write(
@@ -528,7 +477,7 @@ allow if {
         assert_eq!(engine.mode(), PolicyMode::DenyAll);
         assert!(matches!(
             engine
-                .validate_invocation("echo", &[], &BTreeMap::new())
+                .validate_invocation("echo", "/usr/bin/echo", &[], &BTreeMap::new())
                 .expect_err("deny-all expected"),
             ValidationError::PolicyUnavailable { .. }
         ));
@@ -537,7 +486,7 @@ allow if {
         engine.reload();
         assert_eq!(engine.mode(), PolicyMode::Rego);
         assert!(engine
-            .validate_invocation("echo", &[], &BTreeMap::new())
+            .validate_invocation("echo", "/usr/bin/echo", &[], &BTreeMap::new())
             .is_ok());
     }
 
