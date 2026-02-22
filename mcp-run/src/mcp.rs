@@ -13,7 +13,7 @@ use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
 use thiserror::Error;
 
 use crate::executor::{RunNetworkToolInput, RunNetworkToolOutput, run_network_tool_impl};
-use crate::policy::{Policy, PolicyLoadError, load_policy};
+use crate::policy::{PolicyEngine, PolicyMode};
 use crate::raw::{RawEndpointState, raw_handler};
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8000";
@@ -21,7 +21,8 @@ pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8000";
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub bind_addr: SocketAddr,
-    pub policy_file: PathBuf,
+    pub policy_dir: Option<PathBuf>,
+    pub policy_file: Option<PathBuf>,
     pub default_cwd: PathBuf,
 }
 
@@ -35,17 +36,23 @@ impl AppConfig {
                     value: bind_raw,
                     source,
                 })?;
-        let policy_file =
-            std::env::var("POLICY_FILE").map_err(|_| ConfigError::MissingPolicyFile)?;
-        if policy_file.trim().is_empty() {
-            return Err(ConfigError::EmptyPolicyFile);
-        }
+        let policy_dir = std::env::var("POLICY_DIR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let policy_file = std::env::var("POLICY_FILE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
         let default_cwd =
             std::env::current_dir().map_err(|source| ConfigError::CurrentDir { source })?;
 
         Ok(Self {
             bind_addr,
-            policy_file: PathBuf::from(policy_file),
+            policy_dir,
+            policy_file,
             default_cwd,
         })
     }
@@ -58,10 +65,6 @@ pub enum ConfigError {
         value: String,
         source: AddrParseError,
     },
-    #[error("POLICY_FILE must be set")]
-    MissingPolicyFile,
-    #[error("POLICY_FILE must not be empty")]
-    EmptyPolicyFile,
     #[error("failed to get current working directory: {source}")]
     CurrentDir { source: std::io::Error },
 }
@@ -70,27 +73,22 @@ pub enum ConfigError {
 pub enum AppError {
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error("failed to load policy file '{path}': {source}")]
-    PolicyLoad {
-        path: PathBuf,
-        source: PolicyLoadError,
-    },
     #[error("server I/O failure: {0}")]
     Io(#[from] std::io::Error),
 }
 
 #[derive(Clone)]
 pub struct NetworkMcpServer {
-    policy: Arc<Policy>,
+    policy_engine: Arc<PolicyEngine>,
     default_cwd: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl NetworkMcpServer {
-    pub fn new(policy: Arc<Policy>, default_cwd: PathBuf) -> Self {
+    pub fn new(policy_engine: Arc<PolicyEngine>, default_cwd: PathBuf) -> Self {
         Self {
-            policy,
+            policy_engine,
             default_cwd,
             tool_router: Self::tool_router(),
         }
@@ -104,7 +102,7 @@ impl NetworkMcpServer {
         &self,
         Parameters(input): Parameters<RunNetworkToolInput>,
     ) -> Result<Json<RunNetworkToolOutput>, String> {
-        run_network_tool_impl(&self.policy, &self.default_cwd, input)
+        run_network_tool_impl(&self.policy_engine, &self.default_cwd, input)
             .await
             .map(Json)
             .map_err(|error| error.to_string())
@@ -128,7 +126,7 @@ impl ServerHandler for NetworkMcpServer {
                 website_url: None,
             },
             instructions: Some(
-                "Use run_network_tool with executable/args/cwd/env. Requests are validated against POLICY_FILE."
+                "Use run_network_tool with executable/args/cwd/env. Requests are validated against POLICY_DIR (Rego) or POLICY_FILE (legacy JSON)."
                     .to_string(),
             ),
             ..Default::default()
@@ -136,12 +134,12 @@ impl ServerHandler for NetworkMcpServer {
     }
 }
 
-pub fn build_app(policy: Arc<Policy>, default_cwd: PathBuf) -> Router {
+pub fn build_app(policy_engine: Arc<PolicyEngine>, default_cwd: PathBuf) -> Router {
     let session_manager = Arc::new(LocalSessionManager::default());
-    let policy_for_factory = policy.clone();
+    let policy_for_factory = policy_engine.clone();
     let cwd_for_factory = default_cwd.clone();
     let raw_state = RawEndpointState {
-        policy,
+        policy_engine,
         default_cwd,
     };
 
@@ -163,19 +161,25 @@ pub fn build_app(policy: Arc<Policy>, default_cwd: PathBuf) -> Router {
 }
 
 pub async fn serve(config: AppConfig) -> Result<(), AppError> {
-    let policy = load_policy(&config.policy_file).map_err(|source| AppError::PolicyLoad {
-        path: config.policy_file.clone(),
-        source,
-    })?;
+    let policy_engine = Arc::new(PolicyEngine::from_sources(
+        config.policy_dir.clone(),
+        config.policy_file.clone(),
+    ));
+    policy_engine.start_watcher();
 
     tracing::info!(
         bind_addr = %config.bind_addr,
-        policy_file = %config.policy_file.display(),
-        commands = policy.len(),
+        policy_mode = match policy_engine.mode() {
+            PolicyMode::Rego => "rego",
+            PolicyMode::LegacyJson => "legacy-json",
+            PolicyMode::DenyAll => "deny-all",
+        },
+        policy_dir = ?config.policy_dir.as_ref().map(|path| path.display().to_string()),
+        policy_file = ?config.policy_file.as_ref().map(|path| path.display().to_string()),
         "starting network MCP server",
     );
 
-    let app = build_app(Arc::new(policy), config.default_cwd.clone());
+    let app = build_app(policy_engine, config.default_cwd.clone());
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -191,7 +195,7 @@ mod tests {
 
     use super::*;
     use crate::executor::{MAX_OUTPUT_BYTES, RunNetworkToolOutput, TRUNCATION_MARKER};
-    use crate::policy::{ArgCheck, CommandRule, Policy};
+    use crate::policy::{ArgCheck, CommandRule, Policy, PolicyEngine};
     use rmcp::ServiceExt;
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::StreamableHttpClientTransport;
@@ -232,8 +236,9 @@ mod tests {
             description: None,
         }];
 
+        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
         let app = build_app(
-            Arc::new(policy),
+            Arc::new(policy_engine),
             std::env::current_dir().expect("current dir"),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -315,8 +320,9 @@ mod tests {
             description: None,
         }];
 
+        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
         let app = build_app(
-            Arc::new(policy),
+            Arc::new(policy_engine),
             std::env::current_dir().expect("current dir"),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
