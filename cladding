@@ -276,7 +276,7 @@ load_cladding_config() {
     return 0
   fi
 
-  CONFIG_PATH="$PROJECT_ROOT/config/cladding.json"
+  CONFIG_PATH="$PROJECT_ROOT/cladding.json"
 
   if ! command -v jq >/dev/null 2>&1; then
     echo "missing: jq (required to parse $CONFIG_PATH)" >&2
@@ -284,25 +284,25 @@ load_cladding_config() {
   fi
 
   if [ ! -f "$CONFIG_PATH" ]; then
-    echo "missing: config/cladding.json ($CONFIG_PATH)" >&2
+    echo "missing: cladding.json ($CONFIG_PATH)" >&2
     echo "hint: run cladding init" >&2
     return 1
   fi
 
   if ! CLADDING_NAME="$(jq -er '.name | strings' "$CONFIG_PATH" 2>/dev/null)"; then
-    echo "error: config/cladding.json must include string key: name" >&2
+    echo "error: cladding.json must include string key: name" >&2
     return 1
   fi
   if ! CLADDING_SUBNET="$(jq -er '.subnet | strings' "$CONFIG_PATH" 2>/dev/null)"; then
-    echo "error: config/cladding.json must include string key: subnet" >&2
+    echo "error: cladding.json must include string key: subnet" >&2
     return 1
   fi
   if ! SANDBOX_IMAGE="$(jq -er '.sandbox_image | strings' "$CONFIG_PATH" 2>/dev/null)"; then
-    echo "error: config/cladding.json must include string key: sandbox_image" >&2
+    echo "error: cladding.json must include string key: sandbox_image" >&2
     return 1
   fi
   if ! CLI_IMAGE="$(jq -er '.cli_image | strings' "$CONFIG_PATH" 2>/dev/null)"; then
-    echo "error: config/cladding.json must include string key: cli_image" >&2
+    echo "error: cladding.json must include string key: cli_image" >&2
     return 1
   fi
 
@@ -444,7 +444,7 @@ ensure_network_settings() {
     podman network create --subnet "$NETWORK_SUBNET" "$NETWORK"
   elif ! podman network inspect "$NETWORK" | grep -q "\"subnet\": \"$NETWORK_SUBNET\""; then
     echo "error: network $NETWORK exists but is not on $NETWORK_SUBNET" >&2
-    echo "hint: update config/cladding.json subnet to match, or run 'podman network rm $NETWORK' and retry" >&2
+    echo "hint: update cladding.json subnet to match, or run 'podman network rm $NETWORK' and retry" >&2
     return 1
   fi
 }
@@ -458,7 +458,7 @@ cmd_init() {
   name_override="${1:-}"
   src="$CLADDING_ROOT/config-template"
   dst="$PROJECT_ROOT/config"
-  cladding_config="$dst/cladding.json"
+  cladding_config="$PROJECT_ROOT/cladding.json"
   cladding_gitignore="$PROJECT_ROOT/.gitignore"
   generated_config_tmp=""
   project_root_created=0
