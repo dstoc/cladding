@@ -19,7 +19,6 @@ RUN apt-get update \
 
 ENV MCP_BIND_ADDR=0.0.0.0:3000
 ENV POLICY_DIR=/opt/config/sandbox_commands
-ENV POLICY_FILE=/opt/config/sandbox_commands.json
 ENV RUST_LOG=info
 
 USER $USERNAME
