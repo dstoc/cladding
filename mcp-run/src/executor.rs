@@ -231,7 +231,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::policy::{ArgCheck, CommandRule, Policy, PolicyEngine};
+    use crate::policy::PolicyEngine;
 
     fn find_executable(name: &str) -> Option<String> {
         let path = std::env::var_os("PATH")?;
@@ -252,6 +252,20 @@ mod tests {
                     .map(|(key, value)| (key.to_string(), value.to_string()))
             })
             .collect()
+    }
+
+    fn rego_engine_allow_commands(commands: &[&str]) -> PolicyEngine {
+        let mut allowed_map = String::new();
+        for command in commands {
+            let escaped = command.replace('\\', "\\\\").replace('\"', "\\\"");
+            allowed_map.push_str(&format!("  \"{escaped}\": true,\n"));
+        }
+
+        let main = format!(
+            "package sandbox.main\n\ndefault allow = false\n\nallowed_commands := {{\n{allowed_map}}}\n\nallow if {{\n  allowed_commands[input.command]\n}}\n"
+        );
+
+        PolicyEngine::from_rego_for_tests(&[("main.rego", &main)])
     }
 
     #[test]
@@ -324,25 +338,7 @@ mod tests {
             None => return,
         };
 
-        let policy: Policy = vec![CommandRule {
-            command: env_path.clone(),
-            args: vec![
-                ArgCheck::Exact {
-                    value: "printf".to_string(),
-                    position: Some(0),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: "ok".to_string(),
-                    position: Some(1),
-                    required: Some(true),
-                },
-            ],
-            env: vec![],
-            description: None,
-        }];
-
-        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
+        let policy_engine = rego_engine_allow_commands(&[&env_path]);
         let output = run_network_tool_impl(
             &policy_engine,
             Path::new("."),
@@ -368,25 +364,7 @@ mod tests {
             None => return,
         };
 
-        let policy: Policy = vec![CommandRule {
-            command: env_path.clone(),
-            args: vec![],
-            env: vec![
-                "CUSTOM_USER_ENV".to_string(),
-                "HOME".to_string(),
-                "LANG".to_string(),
-                "PATH".to_string(),
-                "http_proxy".to_string(),
-                "https_proxy".to_string(),
-                "no_proxy".to_string(),
-                "HTTP_PROXY".to_string(),
-                "HTTPS_PROXY".to_string(),
-                "NO_PROXY".to_string(),
-            ],
-            description: None,
-        }];
-
-        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
+        let policy_engine = rego_engine_allow_commands(&[&env_path]);
         let output = run_network_tool_impl(
             &policy_engine,
             Path::new("."),
@@ -473,14 +451,7 @@ mod tests {
             None => return,
         };
 
-        let policy: Policy = vec![CommandRule {
-            command: env_path,
-            args: vec![],
-            env: vec![],
-            description: None,
-        }];
-
-        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
+        let policy_engine = rego_engine_allow_commands(&[&env_path]);
         let error = run_network_tool_impl(
             &policy_engine,
             Path::new("."),
@@ -504,30 +475,7 @@ mod tests {
             None => return,
         };
 
-        let policy: Policy = vec![CommandRule {
-            command: head_path.clone(),
-            args: vec![
-                ArgCheck::Exact {
-                    value: "-c".to_string(),
-                    position: Some(0),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: (MAX_OUTPUT_BYTES + 5).to_string(),
-                    position: Some(1),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: "/dev/zero".to_string(),
-                    position: Some(2),
-                    required: Some(true),
-                },
-            ],
-            env: vec![],
-            description: None,
-        }];
-
-        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
+        let policy_engine = rego_engine_allow_commands(&[&head_path]);
         let output = run_network_tool_impl(
             &policy_engine,
             Path::new("."),

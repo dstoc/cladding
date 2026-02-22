@@ -22,7 +22,6 @@ pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8000";
 pub struct AppConfig {
     pub bind_addr: SocketAddr,
     pub policy_dir: Option<PathBuf>,
-    pub policy_file: Option<PathBuf>,
     pub default_cwd: PathBuf,
 }
 
@@ -41,18 +40,12 @@ impl AppConfig {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
-        let policy_file = std::env::var("POLICY_FILE")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
         let default_cwd =
             std::env::current_dir().map_err(|source| ConfigError::CurrentDir { source })?;
 
         Ok(Self {
             bind_addr,
             policy_dir,
-            policy_file,
             default_cwd,
         })
     }
@@ -126,7 +119,7 @@ impl ServerHandler for NetworkMcpServer {
                 website_url: None,
             },
             instructions: Some(
-                "Use run_network_tool with executable/args/cwd/env. Requests are validated against POLICY_DIR (Rego) or POLICY_FILE (legacy JSON)."
+                "Use run_network_tool with executable/args/cwd/env. Requests are validated against POLICY_DIR Rego policy modules."
                     .to_string(),
             ),
             ..Default::default()
@@ -161,21 +154,16 @@ pub fn build_app(policy_engine: Arc<PolicyEngine>, default_cwd: PathBuf) -> Rout
 }
 
 pub async fn serve(config: AppConfig) -> Result<(), AppError> {
-    let policy_engine = Arc::new(PolicyEngine::from_sources(
-        config.policy_dir.clone(),
-        config.policy_file.clone(),
-    ));
+    let policy_engine = Arc::new(PolicyEngine::from_sources(config.policy_dir.clone()));
     policy_engine.start_watcher();
 
     tracing::info!(
         bind_addr = %config.bind_addr,
         policy_mode = match policy_engine.mode() {
             PolicyMode::Rego => "rego",
-            PolicyMode::LegacyJson => "legacy-json",
             PolicyMode::DenyAll => "deny-all",
         },
         policy_dir = ?config.policy_dir.as_ref().map(|path| path.display().to_string()),
-        policy_file = ?config.policy_file.as_ref().map(|path| path.display().to_string()),
         "starting network MCP server",
     );
 
@@ -195,7 +183,7 @@ mod tests {
 
     use super::*;
     use crate::executor::{MAX_OUTPUT_BYTES, RunNetworkToolOutput, TRUNCATION_MARKER};
-    use crate::policy::{ArgCheck, CommandRule, Policy, PolicyEngine};
+    use crate::policy::PolicyEngine;
     use rmcp::ServiceExt;
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::StreamableHttpClientTransport;
@@ -211,6 +199,20 @@ mod tests {
         None
     }
 
+    fn rego_engine_allow_commands(commands: &[&str]) -> PolicyEngine {
+        let mut allowed_map = String::new();
+        for command in commands {
+            let escaped = command.replace('\\', "\\\\").replace('\"', "\\\"");
+            allowed_map.push_str(&format!("  \"{escaped}\": true,\n"));
+        }
+
+        let main = format!(
+            "package sandbox.main\n\ndefault allow = false\n\nallowed_commands := {{\n{allowed_map}}}\n\nallow if {{\n  allowed_commands[input.command]\n}}\n"
+        );
+
+        PolicyEngine::from_rego_for_tests(&[("main.rego", &main)])
+    }
+
     #[tokio::test]
     async fn mcp_http_sse_smoke_tool_invocation() {
         let env_path = match find_executable("env") {
@@ -218,25 +220,7 @@ mod tests {
             None => return,
         };
 
-        let policy: Policy = vec![CommandRule {
-            command: env_path.clone(),
-            args: vec![
-                ArgCheck::Exact {
-                    value: "printf".to_string(),
-                    position: Some(0),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: "smoke".to_string(),
-                    position: Some(1),
-                    required: Some(true),
-                },
-            ],
-            env: vec![],
-            description: None,
-        }];
-
-        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
+        let policy_engine = rego_engine_allow_commands(&[&env_path]);
         let app = build_app(
             Arc::new(policy_engine),
             std::env::current_dir().expect("current dir"),
@@ -297,30 +281,7 @@ mod tests {
         };
 
         let requested = MAX_OUTPUT_BYTES + 5;
-        let policy: Policy = vec![CommandRule {
-            command: head_path.clone(),
-            args: vec![
-                ArgCheck::Exact {
-                    value: "-c".to_string(),
-                    position: Some(0),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: requested.to_string(),
-                    position: Some(1),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: "/dev/zero".to_string(),
-                    position: Some(2),
-                    required: Some(true),
-                },
-            ],
-            env: vec![],
-            description: None,
-        }];
-
-        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
+        let policy_engine = rego_engine_allow_commands(&[&head_path]);
         let app = build_app(
             Arc::new(policy_engine),
             std::env::current_dir().expect("current dir"),

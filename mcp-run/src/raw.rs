@@ -333,7 +333,7 @@ mod tests {
     use super::*;
     use crate::executor::{MAX_OUTPUT_BYTES, RunNetworkToolInput};
     use crate::mcp::build_app;
-    use crate::policy::{ArgCheck, CommandRule, Policy, PolicyEngine};
+    use crate::policy::PolicyEngine;
 
     fn find_executable(name: &str) -> Option<String> {
         let path = std::env::var_os("PATH")?;
@@ -346,8 +346,21 @@ mod tests {
         None
     }
 
-    async fn start_server(policy: Policy) -> (String, tokio::task::JoinHandle<()>) {
-        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
+    fn rego_engine_allow_commands(commands: &[&str]) -> PolicyEngine {
+        let mut allowed_map = String::new();
+        for command in commands {
+            let escaped = command.replace('\\', "\\\\").replace('\"', "\\\"");
+            allowed_map.push_str(&format!("  \"{escaped}\": true,\n"));
+        }
+
+        let main = format!(
+            "package sandbox.main\n\ndefault allow = false\n\nallowed_commands := {{\n{allowed_map}}}\n\nallow if {{\n  allowed_commands[input.command]\n}}\n"
+        );
+
+        PolicyEngine::from_rego_for_tests(&[("main.rego", &main)])
+    }
+
+    async fn start_server(policy_engine: PolicyEngine) -> (String, tokio::task::JoinHandle<()>) {
         let app = build_app(Arc::new(policy_engine), PathBuf::from("."));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -415,25 +428,7 @@ mod tests {
             None => return,
         };
         let script = "printf 'hello'; printf 'oops' >&2";
-        let policy: Policy = vec![CommandRule {
-            command: sh_path.clone(),
-            args: vec![
-                ArgCheck::Exact {
-                    value: "-c".to_string(),
-                    position: Some(0),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: script.to_string(),
-                    position: Some(1),
-                    required: Some(true),
-                },
-            ],
-            env: vec![],
-            description: None,
-        }];
-
-        let (base_url, server_task) = start_server(policy).await;
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&sh_path])).await;
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
             .json(&RunNetworkToolInput {
@@ -479,13 +474,8 @@ mod tests {
             Some(path) => path,
             None => return,
         };
-        let policy: Policy = vec![CommandRule {
-            command: true_path,
-            args: vec![],
-            env: vec![],
-            description: None,
-        }];
-        let (base_url, server_task) = start_server(policy).await;
+        let (base_url, server_task) =
+            start_server(rego_engine_allow_commands(&[&true_path])).await;
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
@@ -516,29 +506,8 @@ mod tests {
             None => return,
         };
         let requested = MAX_OUTPUT_BYTES + 4096;
-        let policy: Policy = vec![CommandRule {
-            command: head_path.clone(),
-            args: vec![
-                ArgCheck::Exact {
-                    value: "-c".to_string(),
-                    position: Some(0),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: requested.to_string(),
-                    position: Some(1),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: "/dev/zero".to_string(),
-                    position: Some(2),
-                    required: Some(true),
-                },
-            ],
-            env: vec![],
-            description: None,
-        }];
-        let (base_url, server_task) = start_server(policy).await;
+        let (base_url, server_task) =
+            start_server(rego_engine_allow_commands(&[&head_path])).await;
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
@@ -575,24 +544,7 @@ mod tests {
             None => return,
         };
         let script = "printf '\\377\\000A'";
-        let policy: Policy = vec![CommandRule {
-            command: sh_path.clone(),
-            args: vec![
-                ArgCheck::Exact {
-                    value: "-c".to_string(),
-                    position: Some(0),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: script.to_string(),
-                    position: Some(1),
-                    required: Some(true),
-                },
-            ],
-            env: vec![],
-            description: None,
-        }];
-        let (base_url, server_task) = start_server(policy).await;
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&sh_path])).await;
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
@@ -621,24 +573,7 @@ mod tests {
             None => return,
         };
         let script = "(for i in 1 2 3; do printf \"o$i\"; done) & (for i in 1 2 3; do printf \"e$i\" >&2; done) & wait";
-        let policy: Policy = vec![CommandRule {
-            command: sh_path.clone(),
-            args: vec![
-                ArgCheck::Exact {
-                    value: "-c".to_string(),
-                    position: Some(0),
-                    required: Some(true),
-                },
-                ArgCheck::Exact {
-                    value: script.to_string(),
-                    position: Some(1),
-                    required: Some(true),
-                },
-            ],
-            env: vec![],
-            description: None,
-        }];
-        let (base_url, server_task) = start_server(policy).await;
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&sh_path])).await;
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
