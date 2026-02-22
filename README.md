@@ -11,6 +11,8 @@ Run an agent in a constrained container environment where network access is inte
 
 In short: the agent cannot freely access the network; it can delegate commands to `mcp-run` via MCP or the [`run-remote`](mcp-run/src/bin/run-remote.rs) binary, where any external network path is gated by command policy plus domain allowlists.
 
+For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`mcp-run/README.md`](mcp-run/README.md).
+
 ## Getting Started
 
 * Initialize local config:
