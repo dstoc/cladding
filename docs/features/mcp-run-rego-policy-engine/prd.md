@@ -241,6 +241,56 @@ allow {
 }
 ```
 
+Example `config/sandbox_commands/toolx_flexible.rego` (allowlist of up to 3 arguments, any order, including none):
+
+```rego
+package sandbox.toolx_flexible
+
+default allow = false
+default allow_env = false
+
+allowed_args := {"--fast", "--verbose", "--dry-run"}
+
+allow {
+    count(input.args) <= 3
+    every a in input.args {
+        allowed_args[a]
+    }
+}
+```
+
+Example `config/sandbox_commands/toolx_segments.rego` (0 or more args from allowlist, where `["--target", "x86"]` is an allowed pair):
+
+```rego
+package sandbox.toolx_segments
+
+default allow = false
+default allow_env = false
+
+single_args := {"--fast", "--verbose", "--dry-run"}
+
+allow {
+    valid_from(0)
+}
+
+valid_from(i) {
+    i == count(input.args)
+}
+
+valid_from(i) {
+    i < count(input.args)
+    single_args[input.args[i]]
+    valid_from(i + 1)
+}
+
+valid_from(i) {
+    i + 1 < count(input.args)
+    input.args[i] == "--target"
+    input.args[i + 1] == "x86"
+    valid_from(i + 2)
+}
+```
+
 ## Non-Goals
 1. Removing legacy JSON support in this feature (handled in a later feature).
 2. Introducing endpoint authentication/authorization layers beyond existing trust model.
