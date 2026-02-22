@@ -184,7 +184,7 @@ check_required_config_files() {
     return 1
   fi
 
-  for rel in $(cd "$src" && find . -type f -print | sed 's|^\./||'); do
+  for rel in $(cd "$src" && find . -mindepth 1 -maxdepth 1 -print | sed 's|^\./||'); do
     if [ ! -e "$dst/$rel" ]; then
       echo "missing: config/$rel ($dst/$rel)" >&2
       missing=1
@@ -192,7 +192,7 @@ check_required_config_files() {
   done
 
   if [ "$missing" -ne 0 ]; then
-    echo "hint: run cladding init, or add missing files from $src into $dst" >&2
+    echo "hint: run cladding init, or add missing top-level entries from $src into $dst" >&2
     return 1
   fi
 }
