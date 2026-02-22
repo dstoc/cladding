@@ -113,33 +113,6 @@ env_allowed if {
 
 ## Rego Examples
 
-### `main.rego`
-
-```rego
-package sandbox.main
-
-default allow = false
-
-allow if {
-    command_allowed
-    env_allowed
-}
-
-command_allowed if {
-    data.sandbox[input.command].allow
-}
-
-# Default-deny for env: only empty env is allowed unless command policy
-# explicitly exposes allow_env.
-env_allowed if {
-    count(object.keys(input.env)) == 0
-}
-
-env_allowed if {
-    data.sandbox[input.command].allow_env
-}
-```
-
 ### `curl.rego`
 
 ```rego
@@ -150,8 +123,7 @@ default allow_env = false
 
 # Allow: curl -I https://example.com
 allow if {
-    input.args[0] == "-I"
-    input.args[1] == "https://example.com"
+    input.args == ["-I", "https://example.com"]
     startswith(input.path, "/usr/bin/")
 }
 
@@ -168,8 +140,7 @@ default allow_env = false
 
 # Allow: python -m http.server
 allow if {
-    input.args[0] == "-m"
-    input.args[1] == "http.server"
+    input.args == ["-m", "http.server"]
 }
 
 # Optional override example:
