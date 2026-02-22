@@ -99,9 +99,21 @@ pub fn spawn_network_tool_process(
     input: RunNetworkToolInput,
 ) -> Result<Child, ToolError> {
     let user_env = input.env.unwrap_or_default();
-    policy_engine.validate_invocation(&input.executable, &input.args, &user_env)?;
+    let resolved_executable =
+        resolve_executable_path(&input.executable).map_err(|details| ToolError::Validation(
+            ValidationError::PathResolutionFailed {
+                command: input.executable.clone(),
+                details,
+            },
+        ))?;
+    policy_engine.validate_invocation(
+        &input.executable,
+        &resolved_executable,
+        &input.args,
+        &user_env,
+    )?;
 
-    let mut command = Command::new(&input.executable);
+    let mut command = Command::new(&resolved_executable);
     command
         .args(&input.args)
         .stdin(Stdio::null())
@@ -126,6 +138,39 @@ pub fn spawn_network_tool_process(
     command
         .spawn()
         .map_err(|source| ToolError::Spawn { source })
+}
+
+pub(crate) fn resolve_executable_path(command: &str) -> Result<String, String> {
+    if command.contains('/') {
+        let canonical = std::fs::canonicalize(command)
+            .map_err(|error| format!("{} ({error})", command))?;
+        return Ok(canonical.to_string_lossy().into_owned());
+    }
+
+    let path = std::env::var_os("PATH").ok_or_else(|| "PATH is not set".to_string())?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(command);
+        if !candidate.is_file() {
+            continue;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = candidate.metadata().map_err(|error| {
+                format!("failed reading metadata for '{}': {error}", candidate.display())
+            })?;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+
+        let canonical = std::fs::canonicalize(&candidate)
+            .map_err(|error| format!("failed resolving '{}': {error}", candidate.display()))?;
+        return Ok(canonical.to_string_lossy().into_owned());
+    }
+
+    Err(format!("'{}' was not found on PATH", command))
 }
 
 pub(crate) fn build_command_env(user_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
