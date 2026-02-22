@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
-use crate::policy::{Policy, ValidationError, validate_invocation};
+use crate::policy::{PolicyEngine, ValidationError};
 
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const TRUNCATION_MARKER: &str = "\n...truncated...";
@@ -53,11 +53,11 @@ pub enum ToolError {
 }
 
 pub async fn run_network_tool_impl(
-    policy: &Policy,
+    policy_engine: &PolicyEngine,
     default_cwd: &Path,
     input: RunNetworkToolInput,
 ) -> Result<RunNetworkToolOutput, ToolError> {
-    let mut child = spawn_network_tool_process(policy, default_cwd, input)?;
+    let mut child = spawn_network_tool_process(policy_engine, default_cwd, input)?;
 
     let stdout = child.stdout.take().ok_or_else(|| ToolError::StdoutRead {
         source: std::io::Error::other("stdout pipe missing"),
@@ -94,12 +94,12 @@ pub async fn run_network_tool_impl(
 }
 
 pub fn spawn_network_tool_process(
-    policy: &Policy,
+    policy_engine: &PolicyEngine,
     default_cwd: &Path,
     input: RunNetworkToolInput,
 ) -> Result<Child, ToolError> {
     let user_env = input.env.unwrap_or_default();
-    validate_invocation(policy, &input.executable, &input.args, &user_env)?;
+    policy_engine.validate_invocation(&input.executable, &input.args, &user_env)?;
 
     let mut command = Command::new(&input.executable);
     command
@@ -231,7 +231,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::policy::{ArgCheck, CommandRule, Policy};
+    use crate::policy::{ArgCheck, CommandRule, Policy, PolicyEngine};
 
     fn find_executable(name: &str) -> Option<String> {
         let path = std::env::var_os("PATH")?;
@@ -342,8 +342,9 @@ mod tests {
             description: None,
         }];
 
+        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
         let output = run_network_tool_impl(
-            &policy,
+            &policy_engine,
             Path::new("."),
             RunNetworkToolInput {
                 executable: env_path,
@@ -385,8 +386,9 @@ mod tests {
             description: None,
         }];
 
+        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
         let output = run_network_tool_impl(
-            &policy,
+            &policy_engine,
             Path::new("."),
             RunNetworkToolInput {
                 executable: env_path,
@@ -478,8 +480,9 @@ mod tests {
             description: None,
         }];
 
+        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
         let error = run_network_tool_impl(
-            &policy,
+            &policy_engine,
             Path::new("."),
             RunNetworkToolInput {
                 executable: "echo".to_string(),
@@ -524,8 +527,9 @@ mod tests {
             description: None,
         }];
 
+        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
         let output = run_network_tool_impl(
-            &policy,
+            &policy_engine,
             Path::new("."),
             RunNetworkToolInput {
                 executable: head_path,

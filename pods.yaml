@@ -100,6 +100,8 @@ spec:
       value: "/opt/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     - name: MCP_BIND_ADDR
       value: "0.0.0.0:3000"
+    - name: POLICY_DIR
+      value: "/opt/config/sandbox_commands"
     - name: POLICY_FILE
       value: "/opt/config/sandbox_commands.json"
     - name: http_proxy

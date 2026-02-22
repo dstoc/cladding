@@ -17,11 +17,11 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::executor::{RunNetworkToolInput, ToolError, spawn_network_tool_process};
-use crate::policy::Policy;
+use crate::policy::PolicyEngine;
 
 #[derive(Debug, Clone)]
 pub struct RawEndpointState {
-    pub policy: Arc<Policy>,
+    pub policy_engine: Arc<PolicyEngine>,
     pub default_cwd: PathBuf,
 }
 
@@ -97,7 +97,7 @@ pub async fn raw_handler(
     let executable = input.executable.clone();
     let args_for_log = input.args.clone();
 
-    let mut child = match spawn_network_tool_process(&state.policy, &state.default_cwd, input) {
+    let mut child = match spawn_network_tool_process(&state.policy_engine, &state.default_cwd, input) {
         Ok(child) => child,
         Err(ToolError::Validation(error)) => {
             tracing::warn!(command = %executable, args = ?args_for_log, error = %error, "raw request denied by policy");
@@ -333,7 +333,7 @@ mod tests {
     use super::*;
     use crate::executor::{MAX_OUTPUT_BYTES, RunNetworkToolInput};
     use crate::mcp::build_app;
-    use crate::policy::{ArgCheck, CommandRule, Policy};
+    use crate::policy::{ArgCheck, CommandRule, Policy, PolicyEngine};
 
     fn find_executable(name: &str) -> Option<String> {
         let path = std::env::var_os("PATH")?;
@@ -347,7 +347,8 @@ mod tests {
     }
 
     async fn start_server(policy: Policy) -> (String, tokio::task::JoinHandle<()>) {
-        let app = build_app(Arc::new(policy), PathBuf::from("."));
+        let policy_engine = PolicyEngine::from_legacy_policy_for_tests(policy);
+        let app = build_app(Arc::new(policy_engine), PathBuf::from("."));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
