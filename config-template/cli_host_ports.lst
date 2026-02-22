@@ -1,0 +1,5 @@
+# One port (or range) per line allowed for cli-pod connections to host.containers.internal
+# Examples:
+# 80
+# 443
+# 3000-3010
