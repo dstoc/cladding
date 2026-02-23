@@ -8,6 +8,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates \
        curl \
+       python3 \
+       python3-pip \
     && if getent group $GID; then \
          group_name=$(getent group $GID | cut -d: -f1); \
          useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
