@@ -1,0 +1,7 @@
+interface:
+  display_name: "Command Policy Proposer"
+  short_description: "Draft safe Rego sandbox command policies."
+  default_prompt: "Use $command-policy-proposer to draft or update a strict Rego policy for an allowed command."
+
+policy:
+  allow_implicit_invocation: true

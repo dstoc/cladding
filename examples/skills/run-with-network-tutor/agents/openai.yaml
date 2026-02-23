@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run With Network Tutor"
+  short_description: "Fix run-with-network usage and policy errors"
+  default_prompt: "Use $run-with-network-tutor to run a network command and resolve any sandbox or policy errors."
