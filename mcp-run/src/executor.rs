@@ -142,9 +142,30 @@ pub fn spawn_network_tool_process(
 
 pub(crate) fn resolve_executable_path(command: &str) -> Result<String, String> {
     if command.contains('/') {
-        let canonical = std::fs::canonicalize(command)
-            .map_err(|error| format!("{} ({error})", command))?;
-        return Ok(canonical.to_string_lossy().into_owned());
+        let path = std::path::Path::new(command);
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| format!("failed resolving cwd: {error}"))?
+                .join(path)
+        };
+        if !candidate.is_file() {
+            return Err(format!("'{}' is not a file", candidate.display()));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = candidate.metadata().map_err(|error| {
+                format!("failed reading metadata for '{}': {error}", candidate.display())
+            })?;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(format!("'{}' is not executable", candidate.display()));
+            }
+        }
+
+        return Ok(candidate.to_string_lossy().into_owned());
     }
 
     let path = std::env::var_os("PATH").ok_or_else(|| "PATH is not set".to_string())?;
@@ -165,9 +186,7 @@ pub(crate) fn resolve_executable_path(command: &str) -> Result<String, String> {
             }
         }
 
-        let canonical = std::fs::canonicalize(&candidate)
-            .map_err(|error| format!("failed resolving '{}': {error}", candidate.display()))?;
-        return Ok(canonical.to_string_lossy().into_owned());
+        return Ok(candidate.to_string_lossy().into_owned());
     }
 
     Err(format!("'{}' was not found on PATH", command))
@@ -311,6 +330,41 @@ mod tests {
         );
 
         PolicyEngine::from_rego_for_tests(&[("main.rego", &main)])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_executable_path_preserves_symlink_in_path_lookup() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_bin = temp.path().join("real-bin");
+        std::fs::write(&real_bin, b"#!/bin/sh\necho ok\n").expect("write real bin");
+        let mut perms = std::fs::metadata(&real_bin)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&real_bin, perms).expect("set perms");
+
+        let link_path = temp.path().join("cargo");
+        symlink(&real_bin, &link_path).expect("symlink");
+
+        let original_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", temp.path());
+        }
+        let resolved = resolve_executable_path("cargo").expect("resolve");
+        if let Some(value) = original_path {
+            unsafe {
+                std::env::set_var("PATH", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PATH");
+            }
+        }
+
+        assert_eq!(resolved, link_path.to_string_lossy());
     }
 
     #[test]
