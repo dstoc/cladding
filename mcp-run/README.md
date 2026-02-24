@@ -16,6 +16,7 @@ Policy decisions are made by [Rego](https://www.openpolicyagent.org/docs/policy-
 - Rego input includes:
   - `input.command`: executable token requested by client
   - `input.path`: resolved absolute executable path
+  - `input.hash`: SHA-256 hash of the resolved executable file (lowercase hex)
   - `input.args`: argument list
   - `input.env`: forwarded environment map
 - Runtime is fail-closed:
@@ -128,6 +129,22 @@ allow if {
 }
 
 # This command intentionally allows no forwarded env vars.
+```
+
+### `curl_pinned.rego` (pin executable hash)
+
+```rego
+package sandbox.curl
+
+default allow = false
+default allow_env = false
+
+# Allow only the expected curl binary and invocation.
+allow if {
+    input.args == ["-I", "https://example.com"]
+    input.path == "/usr/bin/curl"
+    input.hash == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
 ```
 
 ### `python.rego`
