@@ -38,6 +38,7 @@ This feature introduces:
 2. Rego input object includes at minimum:
 - `command`: requested command token.
 - `path`: resolved executable path.
+- `hash`: SHA-256 hash of the resolved executable file, encoded as lowercase hex.
 - `args`: requested args.
 - `env`: requested environment map.
 3. Router-style policy support is required, with a model equivalent to:
@@ -86,7 +87,7 @@ This feature introduces:
 
 ### 10. Testing Requirements
 1. Unit tests for Rego evaluator integration and decision mapping.
-2. Unit tests for input shape correctness (`command`, `path`, `args`, `env`).
+2. Unit tests for input shape correctness (`command`, `path`, `hash`, `args`, `env`).
 3. Integration tests for allow/deny behavior across `/mcp` and `/raw`.
 4. Watcher/reload tests:
 - valid policy update becomes active;

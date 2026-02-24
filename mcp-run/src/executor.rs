@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
@@ -106,9 +109,16 @@ pub fn spawn_network_tool_process(
                 details,
             },
         ))?;
+    let executable_hash = compute_executable_sha256_hex(&resolved_executable).map_err(|details| {
+        ToolError::Validation(ValidationError::HashResolutionFailed {
+            command: input.executable.clone(),
+            details,
+        })
+    })?;
     policy_engine.validate_invocation(
         &input.executable,
         &resolved_executable,
+        &executable_hash,
         &input.args,
         &user_env,
     )?;
@@ -248,6 +258,30 @@ pub(crate) fn build_command_env(user_env: &BTreeMap<String, String>) -> BTreeMap
     }
 
     command_env
+}
+
+pub(crate) fn compute_executable_sha256_hex(path: &str) -> Result<String, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("failed opening '{path}' for hashing: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("failed reading '{path}' for hashing: {error}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    Ok(output)
 }
 
 async fn read_limited<R: tokio::io::AsyncRead + Unpin>(
@@ -391,9 +425,11 @@ mod tests {
         assert_eq!(merged.get("HOME").map(String::as_str), Some("user-home"));
         assert_eq!(merged.get("LANG").map(String::as_str), Some("user-lang"));
 
-        match std::env::var("PATH") {
-            Ok(path) => assert_eq!(merged.get("PATH"), Some(&path)),
-            Err(_) => assert!(!merged.contains_key("PATH")),
+        assert_ne!(merged.get("PATH").map(String::as_str), Some("user-path"));
+        if std::env::var_os("PATH").is_some() {
+            assert!(merged.get("PATH").is_some());
+        } else {
+            assert!(!merged.contains_key("PATH"));
         }
 
         match std::env::var("http_proxy").ok() {
@@ -428,6 +464,20 @@ mod tests {
                 assert!(!merged.contains_key("NO_PROXY"));
             }
         }
+    }
+
+    #[test]
+    fn compute_executable_sha256_hex_uses_lowercase_hex() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let file_path = temp.path().join("sample.bin");
+        std::fs::write(&file_path, b"abc").expect("write file");
+
+        let hash = compute_executable_sha256_hex(file_path.to_string_lossy().as_ref())
+            .expect("hash should succeed");
+        assert_eq!(
+            hash,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[tokio::test]

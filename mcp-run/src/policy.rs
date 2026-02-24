@@ -21,6 +21,8 @@ pub enum ValidationError {
     CommandNotAllowed(String),
     #[error("Failed to resolve executable path for '{command}': {details}")]
     PathResolutionFailed { command: String, details: String },
+    #[error("Failed to compute executable hash for '{command}': {details}")]
+    HashResolutionFailed { command: String, details: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,7 @@ impl RegoPolicy {
         let input_value = serde_json::json!({
             "command": input.command,
             "path": input.path,
+            "hash": input.hash,
             "args": input.args,
             "env": input.env,
         });
@@ -92,6 +95,7 @@ pub struct PolicyEngine {
 struct PolicyEvaluationInput<'a> {
     command: &'a str,
     path: &'a str,
+    hash: &'a str,
     args: &'a [String],
     env: &'a BTreeMap<String, String>,
 }
@@ -147,6 +151,7 @@ impl PolicyEngine {
         &self,
         command: &str,
         path: &str,
+        hash: &str,
         args: &[String],
         env: &BTreeMap<String, String>,
     ) -> Result<(), ValidationError> {
@@ -159,6 +164,7 @@ impl PolicyEngine {
         let evaluation_input = PolicyEvaluationInput {
             command,
             path,
+            hash,
             args,
             env,
         };
@@ -406,13 +412,19 @@ allow if {
         let engine = PolicyEngine::from_sources(Some(dir.path().to_path_buf()));
         assert_eq!(engine.mode(), PolicyMode::DenyAll);
         let err = engine
-            .validate_invocation("echo", "/usr/bin/echo", &[], &BTreeMap::new())
+            .validate_invocation(
+                "echo",
+                "/usr/bin/echo",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                &[],
+                &BTreeMap::new(),
+            )
             .expect_err("deny-all expected");
         assert!(matches!(err, ValidationError::PolicyUnavailable { .. }));
     }
 
     #[test]
-    fn rego_input_contains_command_path_args_env() {
+    fn rego_input_contains_command_path_args_env_hash() {
         let modules = [
             (
                 "main.rego",
@@ -435,6 +447,7 @@ allow if {
   input.command == "echo"
   input.args[0] == "ok"
   input.env.FLAG == "1"
+  input.hash == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   startswith(input.path, "/")
 }
 "#,
@@ -446,12 +459,24 @@ allow if {
         let args = vec!["ok".to_string()];
         assert!(
             engine
-                .validate_invocation("echo", "/usr/bin/echo", &args, &env)
+                .validate_invocation(
+                    "echo",
+                    "/usr/bin/echo",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    &args,
+                    &env,
+                )
                 .is_ok()
         );
 
         let err = engine
-            .validate_invocation("/usr/bin/echo", "/usr/bin/echo", &args, &env)
+            .validate_invocation(
+                "/usr/bin/echo",
+                "/usr/bin/echo",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                &args,
+                &env,
+            )
             .expect_err("command token should not match when full path is sent");
         assert!(err.to_string().contains("Command not allowed"));
     }
@@ -464,7 +489,13 @@ allow if {
         let engine = PolicyEngine::from_sources(Some(dir.path().to_path_buf()));
         assert_eq!(engine.mode(), PolicyMode::Rego);
         assert!(engine
-            .validate_invocation("echo", "/usr/bin/echo", &[], &BTreeMap::new())
+            .validate_invocation(
+                "echo",
+                "/usr/bin/echo",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                &[],
+                &BTreeMap::new(),
+            )
             .is_ok());
 
         std::fs::write(
@@ -477,7 +508,13 @@ allow if {
         assert_eq!(engine.mode(), PolicyMode::DenyAll);
         assert!(matches!(
             engine
-                .validate_invocation("echo", "/usr/bin/echo", &[], &BTreeMap::new())
+                .validate_invocation(
+                    "echo",
+                    "/usr/bin/echo",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    &[],
+                    &BTreeMap::new(),
+                )
                 .expect_err("deny-all expected"),
             ValidationError::PolicyUnavailable { .. }
         ));
@@ -486,7 +523,13 @@ allow if {
         engine.reload();
         assert_eq!(engine.mode(), PolicyMode::Rego);
         assert!(engine
-            .validate_invocation("echo", "/usr/bin/echo", &[], &BTreeMap::new())
+            .validate_invocation(
+                "echo",
+                "/usr/bin/echo",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                &[],
+                &BTreeMap::new(),
+            )
             .is_ok());
     }
 
