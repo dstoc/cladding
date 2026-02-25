@@ -8,7 +8,7 @@ use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, pa
 use cladding::network::resolve_network_settings;
 use cladding::podman::{ensure_network_settings, podman_build_image, podman_play_kube};
 use anyhow::Context as _;
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -49,6 +49,8 @@ enum CommandSpec {
     Destroy,
     /// Run a command in the cli container
     Run {
+        #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
+        env: Vec<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -72,7 +74,7 @@ pub fn run() -> Result<()> {
         CommandSpec::Up => cmd_up(&context),
         CommandSpec::Down => cmd_down(&context),
         CommandSpec::Destroy => cmd_destroy(&context),
-        CommandSpec::Run { args } => cmd_run(&context, &args),
+        CommandSpec::Run { env, args } => cmd_run(&context, &env, &args),
         CommandSpec::ReloadProxy => cmd_reload_proxy(&context),
     }
 }
@@ -439,9 +441,9 @@ fn cmd_destroy(context: &Context) -> Result<()> {
     cladding::podman::ensure_success(status, "podman rm")
 }
 
-fn cmd_run(context: &Context, args: &[String]) -> Result<()> {
+fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
     if args.is_empty() {
-        eprintln!("usage: cladding run <command> [args...]");
+        eprintln!("usage: cladding run [--env KEY[=VALUE] ...] <command> [args...]");
         return Err(Error::message("missing run command"));
     }
 
@@ -475,6 +477,7 @@ fn cmd_run(context: &Context, args: &[String]) -> Result<()> {
     }
 
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let container_name = format!("{}-cli-app", network_settings.cli_pod_name);
 
     let mut cmd = Command::new("podman");
     if interactive {
@@ -493,7 +496,6 @@ fn cmd_run(context: &Context, args: &[String]) -> Result<()> {
             &format!("COLORTERM={colorterm}"),
             "--env",
             &format!("FORCE_COLOR={force_color}"),
-            &format!("{}-cli-app", network_settings.cli_pod_name),
         ]);
     } else {
         cmd.args([
@@ -503,9 +505,14 @@ fn cmd_run(context: &Context, args: &[String]) -> Result<()> {
             &container_workdir.display().to_string(),
             "--env",
             "LANG=C.UTF-8",
-            &format!("{}-cli-app", network_settings.cli_pod_name),
         ]);
     }
+
+    for env_var in env_vars {
+        cmd.arg("--env").arg(env_var);
+    }
+
+    cmd.arg(&container_name);
 
     for arg in args {
         cmd.arg(arg);

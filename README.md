@@ -77,6 +77,7 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`cr
 
   ```bash
   cladding run gemini
+  cladding run --env GEMINI_API_KEY gemini
   ```
 
 ## Mounts
@@ -133,7 +134,7 @@ flowchart TB
 ```bash
 cladding init [name]  # initialize .cladding, config and create network
 cladding check        # verify required paths/images
-cladding run [cmd]    # run a command in the cli-app container
+cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the cli-app container
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding down         # stop associated pods
 cladding destroy      # force-remove running containers
