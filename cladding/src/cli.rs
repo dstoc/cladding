@@ -1,12 +1,18 @@
-use crate::assets::{materialize_embedded_files, render_pods_yaml, CONFIG_TOP_LEVEL, EMBEDDED_CONFIG_FILES, EMBEDDED_SCRIPTS};
+use crate::assets::{
+    materialize_embedded_files, render_pods_yaml, CONFIG_TOP_LEVEL, EMBEDDED_CONFIG_FILES,
+    EMBEDDED_SCRIPTS,
+};
 use crate::config::{load_cladding_config, write_default_cladding_config, Config};
 use crate::error::{Error, Result};
-use crate::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink, set_permissions};
+use crate::fs_utils::{
+    canonicalize_path, is_broken_symlink, is_executable, path_is_symlink, set_permissions,
+};
 use crate::network::resolve_network_settings;
 use crate::podman::{
     build_mcp_run, ensure_network_settings, podman_build_image, podman_play_kube,
 };
 use anyhow::Context as _;
+use clap::{Parser, Subcommand};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -22,69 +28,62 @@ struct Context {
     project_root: PathBuf,
 }
 
-pub fn run() -> Result<()> {
-    let mut args = env::args().skip(1);
-    let cmd = args.next().unwrap_or_else(|| "help".to_string());
-    let remaining: Vec<String> = args.collect();
+#[derive(Parser)]
+#[command(name = "cladding", arg_required_else_help = true)]
+struct Cli {
+    #[arg(long, global = true, hide = true)]
+    project_root: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<CommandSpec>,
+}
 
-    if matches!(cmd.as_str(), "help" | "-h" | "--help") {
-        print_help();
-        return Ok(());
-    }
+#[derive(Subcommand)]
+enum CommandSpec {
+    /// Build local container images
+    Build,
+    /// Create config and default mount directories
+    Init { name: Option<String> },
+    /// Check requirements
+    Check,
+    /// Start the system
+    Up,
+    /// Stop the system
+    Down,
+    /// Force-remove running containers
+    Destroy,
+    /// Run a command in the cli container
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Reload the squid proxy configuration
+    ReloadProxy,
+}
+
+pub fn run() -> Result<()> {
+    let cli = Cli::parse();
+    let command = cli.command.unwrap();
 
     let cwd = env::current_dir().with_context(|| "failed to determine current directory")?;
-
-    let project_root = match find_project_root(&cwd) {
-        Some(root) => root,
-        None => {
-            if cmd == "init" {
-                cwd.join(".cladding")
-            } else {
-                eprintln!(
-                    "error: no .cladding directory found in {} or any parent directory",
-                    cwd.display()
-                );
-                eprintln!("hint: run 'cladding init' from the project directory to create one");
-                return Err(Error::message("missing .cladding"));
-            }
-        }
-    };
+    let project_root = resolve_project_root(&cwd, cli.project_root.as_ref(), &command)?;
 
     let context = Context { project_root };
 
-    match cmd.as_str() {
-        "build" => cmd_build(&context, &remaining),
-        "init" => cmd_init(&context, &remaining),
-        "check" => cmd_check(&context),
-        "up" => cmd_up(&context),
-        "down" => cmd_down(&context),
-        "destroy" => cmd_destroy(&context),
-        "run" => cmd_run(&context, &remaining),
-        "reload-proxy" => cmd_reload_proxy(&context),
-        _ => {
-            eprintln!("Unknown command: {cmd}");
-            eprintln!();
-            print_help_to_stderr();
-            Err(Error::message("unknown command"))
-        }
+    match command {
+        CommandSpec::Build => cmd_build(&context),
+        CommandSpec::Init { name } => cmd_init(&context, name.as_deref()),
+        CommandSpec::Check => cmd_check(&context),
+        CommandSpec::Up => cmd_up(&context),
+        CommandSpec::Down => cmd_down(&context),
+        CommandSpec::Destroy => cmd_destroy(&context),
+        CommandSpec::Run { args } => cmd_run(&context, &args),
+        CommandSpec::ReloadProxy => cmd_reload_proxy(&context),
     }
 }
 
 pub fn print_error_and_exit(err: Error) -> ! {
     eprintln!("{err}");
     std::process::exit(err.exit_code());
-}
-
-fn print_help() {
-    println!(
-        "Usage: cladding <command> [args...]\n\nCommands:\n  build                Build local container images\n  init [name]          Create config and default mount directories\n  check                Check requirements\n  up                   Start the system\n  down                 Stop the system\n  destroy              Force-remove running containers\n  run                  Run a command in the cli container\n  reload-proxy         Reload the squid proxy configuration\n  help                 Show this help"
-    );
-}
-
-fn print_help_to_stderr() {
-    eprintln!(
-        "Usage: cladding <command> [args...]\n\nCommands:\n  build                Build local container images\n  init [name]          Create config and default mount directories\n  check                Check requirements\n  up                   Start the system\n  down                 Stop the system\n  destroy              Force-remove running containers\n  run                  Run a command in the cli container\n  reload-proxy         Reload the squid proxy configuration\n  help                 Show this help"
-    );
 }
 
 fn find_project_root(start: &Path) -> Option<PathBuf> {
@@ -101,7 +100,32 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-fn cmd_build(context: &Context, _args: &[String]) -> Result<()> {
+fn resolve_project_root(
+    cwd: &Path,
+    override_root: Option<&PathBuf>,
+    command: &CommandSpec,
+) -> Result<PathBuf> {
+    if let Some(root) = override_root {
+        return Ok(root.to_path_buf());
+    }
+
+    match find_project_root(cwd) {
+        Some(root) => Ok(root),
+        None => match command {
+            CommandSpec::Init { .. } => Ok(cwd.join(".cladding")),
+            _ => {
+                eprintln!(
+                    "error: no .cladding directory found in {} or any parent directory",
+                    cwd.display()
+                );
+                eprintln!("hint: run 'cladding init' from the project directory to create one");
+                Err(Error::message("missing .cladding"))
+            }
+        },
+    }
+}
+
+fn cmd_build(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
 
     let cladding_root = find_repo_root().ok_or_else(|| {
@@ -182,13 +206,7 @@ fn install_binary(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_init(context: &Context, args: &[String]) -> Result<()> {
-    if args.len() > 1 {
-        eprintln!("usage: cladding init [name]");
-        return Err(Error::message("invalid init args"));
-    }
-
-    let name_override = args.get(0).map(String::as_str);
+fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
     let project_root = &context.project_root;
     let config_dir = project_root.join("config");
     let scripts_dir = project_root.join("scripts");
