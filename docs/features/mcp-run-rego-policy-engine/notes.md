@@ -11,7 +11,7 @@
 
 ## Existing Product Findings
 
-### Current policy architecture (`mcp-run/src/policy.rs`)
+### Current policy architecture (`crates/mcp-run/src/policy.rs`)
 - Policy file is a single JSON file loaded from `POLICY_FILE` via `load_policy`.
 - Top-level policy shape is `Vec<CommandRule>` with strict serde schema and validation for regex patterns.
 - Validation is Rust-implemented logic (`validate_invocation`) with rule OR semantics by command name.
@@ -22,7 +22,7 @@
   - `CommandNotAllowed`
   - `RuleValidationFailed` with details across attempted rules.
 
-### Current server wiring (`mcp-run/src/mcp.rs`, `mcp-run/src/raw.rs`, `mcp-run/src/executor.rs`)
+### Current server wiring (`crates/mcp-run/src/mcp.rs`, `crates/mcp-run/src/raw.rs`, `crates/mcp-run/src/executor.rs`)
 - `AppConfig` requires `POLICY_FILE` and loads policy once at startup in `serve`.
 - Loaded policy is stored in `Arc<Policy>` and injected into both MCP (`/mcp`) and raw (`/raw`) paths.
 - Both execution paths call `spawn_network_tool_process`, which calls `validate_invocation` before process spawn.
@@ -34,7 +34,7 @@
 - `cladding` build step installs `run-remote` as `run-with-network` helper; helper behavior depends on policy-enforced command execution success.
 
 ### Dependency status
-- `regorus = "0.9.1"` is already present in `mcp-run/Cargo.toml`.
+- `regorus = "0.9.1"` is already present in `crates/mcp-run/Cargo.toml`.
 - No file watcher crate is currently declared (likely need to add one, e.g. `notify`).
 
 ## Existing PRD Style Findings

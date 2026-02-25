@@ -9,7 +9,7 @@
 
 ## Existing Product Findings
 
-### `mcp-run` server shape (`mcp-run/src/mcp.rs`)
+### `mcp-run` server shape (`crates/mcp-run/src/mcp.rs`)
 - Existing server is Axum + `rmcp` streamable HTTP service.
 - Current endpoint is only `/mcp`:
   - `Router::new().route_service("/mcp", any_service(mcp_service))`
@@ -18,7 +18,7 @@
   - `POLICY_FILE` (required)
 - Tool exposed via MCP: `run_network_tool`.
 
-### Command execution behavior (`mcp-run/src/executor.rs`)
+### Command execution behavior (`crates/mcp-run/src/executor.rs`)
 - Request model: `RunNetworkToolInput`
   - `executable: String`
   - `args: Vec<String>`
@@ -34,7 +34,7 @@
   - keeps selected baseline env (`HOME`, `LANG`, `PATH` + proxy vars from host)
   - clears command env and injects sanitized/controlled values.
 
-### Policy behavior (`mcp-run/src/policy.rs`)
+### Policy behavior (`crates/mcp-run/src/policy.rs`)
 - Policy is list of command rules.
 - Validation supports arg checks: `exact`, `regex`, `hash` with optional `position` and `required`.
 - Per-rule env allowlist enforced.

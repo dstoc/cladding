@@ -73,13 +73,13 @@ cmd_build() {
 
   podman run --rm \
     -e CARGO_TARGET_DIR=/work/mcp-run/target \
-    -v "$CLADDING_ROOT/mcp-run:/work/mcp-run" \
+    -v "$CLADDING_ROOT/crates/mcp-run:/work/mcp-run" \
     -w /work/mcp-run \
     docker.io/library/rust:latest \
     cargo build --manifest-path /work/mcp-run/Cargo.toml --release --locked --bin mcp-run --bin run-remote
 
-  install -m 0755 "$CLADDING_ROOT/mcp-run/target/release/mcp-run" "$TOOLS_BIN_DIR/mcp-run"
-  install -m 0755 "$CLADDING_ROOT/mcp-run/target/release/run-remote" "$TOOLS_BIN_DIR/run-with-network"
+  install -m 0755 "$CLADDING_ROOT/crates/mcp-run/target/release/mcp-run" "$TOOLS_BIN_DIR/mcp-run"
+  install -m 0755 "$CLADDING_ROOT/crates/mcp-run/target/release/run-remote" "$TOOLS_BIN_DIR/run-with-network"
 
   cli_image_built=0
   if [ "$CLI_IMAGE" = "$DEFAULT_CLI_BUILD_IMAGE" ]; then

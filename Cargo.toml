@@ -1,0 +1,3 @@
+[workspace]
+members = ["cladding", "crates/mcp-run"]
+resolver = "2"

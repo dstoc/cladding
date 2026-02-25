@@ -9,26 +9,32 @@ Run an agent in a constrained container environment where network access is inte
   - `.cladding/config/cli_domains.lst` (template: [`config-template/cli_domains.lst`](config-template/cli_domains.lst))
   - `.cladding/config/sandbox_domains.lst` (template: [`config-template/sandbox_domains.lst`](config-template/sandbox_domains.lst))
 
-In short: the agent cannot freely access the network; it can delegate commands to `mcp-run` via MCP or the [`run-remote`](mcp-run/src/bin/run-remote.rs) binary, where any external network path is gated by command policy plus domain allowlists.
+In short: the agent cannot freely access the network; it can delegate commands to `mcp-run` via MCP or the [`run-remote`](crates/mcp-run/src/bin/run-remote.rs) binary, where any external network path is gated by command policy plus domain allowlists.
 
-For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`mcp-run/README.md`](mcp-run/README.md).
+For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`crates/mcp-run/README.md`](crates/mcp-run/README.md).
 
 ## Getting Started
+
+* Build the `cladding` binary:
+
+  ```bash
+  cargo build -p cladding --release
+  ```
 
 * Initialize local config:
 
   Config and mounts are stored in a `.cladding` directory.
 
   ```bash
-  ./cladding init
+  ./target/release/cladding init
   # or override generated name
-  ./cladding init myproject
+  ./target/release/cladding init myproject
   ```
 
   `init`:
   - copies template files into `.cladding/config/`
   - generates `.cladding/config/cladding.json`
-    - `name`: derived from current directory name or passed to `./cladding init <name>` (alphanumeric)
+    - `name`: derived from current directory name or passed to `./target/release/cladding init <name>` (alphanumeric)
   - default images: `localhost/cladding-default:latest` for both CLI and sandbox
     - subnet: auto-selected from an unused `10.90.X.0/24`
   - creates the Podman network `<name>_cladding_net`
@@ -54,19 +60,19 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`mc
 * Build images and refresh host-mounted binaries (`mcp-run`, `run-with-network`) in `.cladding/tools/bin`:
 
   ```bash
-  ./cladding build
+  ./target/release/cladding build
   ```
 
 * Start the environment:
 
   ```bash
-  ./cladding up
+  ./target/release/cladding up
   ```
 
 * Run commands in the CLI container (workdir follows your host `cwd` relative to the directory containing `.cladding`):
 
   ```bash
-  ./cladding run gemini
+  ./target/release/cladding run gemini
   ```
 
 ## Mounts
@@ -121,12 +127,12 @@ flowchart TB
 ## Useful Commands
 
 ```bash
-./cladding init [name]  # initialize .cladding, config and create network
-./cladding check        # verify required paths/images
-./cladding run [cmd]    # run a command in the cli-app container
-./cladding reload-proxy # reconfigure squid after domain-list edits
-./cladding down         # stop associated pods
-./cladding destroy      # force-remove running containers
+./target/release/cladding init [name]  # initialize .cladding, config and create network
+./target/release/cladding check        # verify required paths/images
+./target/release/cladding run [cmd]    # run a command in the cli-app container
+./target/release/cladding reload-proxy # reconfigure squid after domain-list edits
+./target/release/cladding down         # stop associated pods
+./target/release/cladding destroy      # force-remove running containers
 podman logs -f <name>-proxy-pod-proxy           # view proxy logs
 podman logs -f <name>-sandbox-pod-sandbox-app   # sandbox (mcp-run) logs
 ```

@@ -30,7 +30,7 @@
 - Sandbox container image currently built from `Containerfile.sandbox` using Node artifact and `supergateway`.
 - `scripts/start_network_gateway.sh` launches `supergateway --stdio "node /opt/network-mcp/dist/index.js"` exposing HTTP endpoints.
 - `pods.yaml` runs `sandbox-app` with `POLICY_FILE` and proxy env vars pre-set in container env.
-- `mcp-run` cargo project exists but is currently scaffold-only (`mcp-run/src/main.rs` hello world).
+- `mcp-run` cargo project exists but is currently scaffold-only (`crates/mcp-run/src/main.rs` hello world).
 
 ## Clarified Decisions From Q&A
 - Keep command policy configuration/features aligned with TS implementation (arg checks, positional/required semantics, hash checks, env allowlist).

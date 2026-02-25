@@ -77,7 +77,7 @@ Use a Cargo workspace at repo root:
 - `Cargo.toml` (workspace root)
 - `cladding/` (Rust binary crate for the CLI)
 - `crates/`
-  - `mcp-run/` (moved from current `mcp-run/`)
+  - `crates/mcp-run/` (moved from current `mcp-run/`)
   - optional shared crates (e.g., `cladding-core` for config/IP math/podman helpers)
 
 ### 2. Rust Implementation Sketch
@@ -115,4 +115,3 @@ Use a Cargo workspace at repo root:
 1. Should we remove or deprecate the on-disk `Containerfile.cladding`, `pods.yaml`, and `scripts/*` from the repo once embedding is complete, or keep them as sources of truth for maintenance?
 2. Do we want a `--print-templates` or `--dump-embedded` debug flag for auditing embedded content?
 3. Should the Rust binary tolerate missing `podman` with a specific exit code and message, or fail generically?
-
