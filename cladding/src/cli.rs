@@ -1,7 +1,4 @@
-use crate::assets::{
-    materialize_embedded_files, render_pods_yaml, CONFIG_TOP_LEVEL, EMBEDDED_CONFIG_FILES,
-    EMBEDDED_SCRIPTS,
-};
+use crate::assets::{materialize_config, materialize_scripts, render_pods_yaml, CONFIG_TOP_LEVEL};
 use crate::config::{load_cladding_config, write_default_cladding_config, Config};
 use crate::error::{Error, Result};
 use crate::fs_utils::{
@@ -238,7 +235,7 @@ fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
         println!("initialized: {}", config_dir.display());
     }
 
-    materialize_embedded_files(&config_dir, EMBEDDED_CONFIG_FILES)?;
+    materialize_config(&config_dir)?;
 
     if scripts_dir.exists() || path_is_symlink(&scripts_dir) {
         println!("scripts already exists: {}", scripts_dir.display());
@@ -248,7 +245,7 @@ fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
         println!("initialized: {}", scripts_dir.display());
     }
 
-    materialize_embedded_files(&scripts_dir, EMBEDDED_SCRIPTS)?;
+    materialize_scripts(&scripts_dir)?;
 
     if cladding_config.exists() {
         println!("cladding config already exists: {}", cladding_config.display());

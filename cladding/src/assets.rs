@@ -1,68 +1,15 @@
 use crate::error::Result;
 use crate::fs_utils::set_permissions;
 use anyhow::Context as _;
+use include_dir::{include_dir, Dir};
 use std::fs;
 use std::path::Path;
 
 const CONTAINERFILE_CLADDING: &str = include_str!("../../Containerfile.cladding");
 const PODS_YAML: &str = include_str!("../../pods.yaml");
 
-pub struct EmbeddedFile {
-    pub path: &'static str,
-    pub contents: &'static [u8],
-    pub mode: u32,
-}
-
-pub const EMBEDDED_CONFIG_FILES: &[EmbeddedFile] = &[
-    EmbeddedFile {
-        path: "cli_domains.lst",
-        contents: include_bytes!("../../config-template/cli_domains.lst"),
-        mode: 0o644,
-    },
-    EmbeddedFile {
-        path: "cli_host_ports.lst",
-        contents: include_bytes!("../../config-template/cli_host_ports.lst"),
-        mode: 0o644,
-    },
-    EmbeddedFile {
-        path: "sandbox_domains.lst",
-        contents: include_bytes!("../../config-template/sandbox_domains.lst"),
-        mode: 0o644,
-    },
-    EmbeddedFile {
-        path: "squid.conf",
-        contents: include_bytes!("../../config-template/squid.conf"),
-        mode: 0o644,
-    },
-    EmbeddedFile {
-        path: "sandbox_commands/main.rego",
-        contents: include_bytes!("../../config-template/sandbox_commands/main.rego"),
-        mode: 0o644,
-    },
-    EmbeddedFile {
-        path: "sandbox_commands/curl.rego",
-        contents: include_bytes!("../../config-template/sandbox_commands/curl.rego"),
-        mode: 0o644,
-    },
-];
-
-pub const EMBEDDED_SCRIPTS: &[EmbeddedFile] = &[
-    EmbeddedFile {
-        path: "jail_cli.sh",
-        contents: include_bytes!("../../scripts/jail_cli.sh"),
-        mode: 0o755,
-    },
-    EmbeddedFile {
-        path: "jail_sandbox.sh",
-        contents: include_bytes!("../../scripts/jail_sandbox.sh"),
-        mode: 0o755,
-    },
-    EmbeddedFile {
-        path: "proxy_startup.sh",
-        contents: include_bytes!("../../scripts/proxy_startup.sh"),
-        mode: 0o755,
-    },
-];
+static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../config-template");
+static SCRIPTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../scripts");
 
 pub const CONFIG_TOP_LEVEL: &[&str] = &[
     "cli_domains.lst",
@@ -72,9 +19,18 @@ pub const CONFIG_TOP_LEVEL: &[&str] = &[
     "sandbox_commands",
 ];
 
-pub fn materialize_embedded_files(base_dir: &Path, files: &[EmbeddedFile]) -> Result<()> {
-    for file in files {
-        let target = base_dir.join(file.path);
+pub fn materialize_config(base_dir: &Path) -> Result<()> {
+    materialize_dir(base_dir, &CONFIG_DIR)
+}
+
+pub fn materialize_scripts(base_dir: &Path) -> Result<()> {
+    materialize_dir(base_dir, &SCRIPTS_DIR)
+}
+
+fn materialize_dir(base_dir: &Path, dir: &Dir<'_>) -> Result<()> {
+    for entry in dir.files() {
+        let rel_path = entry.path();
+        let target = base_dir.join(rel_path);
         if target.exists() {
             continue;
         }
@@ -82,9 +38,14 @@ pub fn materialize_embedded_files(base_dir: &Path, files: &[EmbeddedFile]) -> Re
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        fs::write(&target, file.contents)
+        fs::write(&target, entry.contents())
             .with_context(|| format!("failed to write {}", target.display()))?;
-        set_permissions(&target, file.mode)?;
+        let mode = if target.extension().and_then(|s| s.to_str()) == Some("sh") {
+            0o755
+        } else {
+            0o644
+        };
+        set_permissions(&target, mode)?;
     }
 
     Ok(())
