@@ -80,38 +80,6 @@ pub fn ensure_network_settings(network_settings: &NetworkSettings) -> Result<()>
     Ok(())
 }
 
-pub fn build_mcp_run(cladding_root: &std::path::Path) -> Result<()> {
-    let output = Command::new("podman")
-        .args([
-            "run",
-            "--rm",
-            "-e",
-            "CARGO_TARGET_DIR=/work/mcp-run/target",
-            "-v",
-            &format!(
-                "{}:/work/mcp-run",
-                cladding_root.join("crates/mcp-run").display()
-            ),
-            "-w",
-            "/work/mcp-run",
-            "docker.io/library/rust:latest",
-            "cargo",
-            "build",
-            "--manifest-path",
-            "/work/mcp-run/Cargo.toml",
-            "--release",
-            "--locked",
-            "--bin",
-            "mcp-run",
-            "--bin",
-            "run-remote",
-        ])
-        .output()
-        .with_context(|| "failed to run podman for build")?;
-
-    ensure_success_output(&output, "podman run")
-}
-
 pub fn podman_build_image(
     cladding_root: &std::path::Path,
     image: &str,

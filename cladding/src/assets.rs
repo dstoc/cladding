@@ -11,6 +11,9 @@ const PODS_YAML: &str = include_str!("../../pods.yaml");
 static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../config-template");
 static SCRIPTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../scripts");
 
+static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
+static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
+
 pub const CONFIG_TOP_LEVEL: &[&str] = &[
     "cli_domains.lst",
     "cli_host_ports.lst",
@@ -25,6 +28,24 @@ pub fn materialize_config(base_dir: &Path) -> Result<()> {
 
 pub fn materialize_scripts(base_dir: &Path) -> Result<()> {
     materialize_dir(base_dir, &SCRIPTS_DIR)
+}
+
+pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
+    let mcp_run_path = bin_dir.join("mcp-run");
+    if !mcp_run_path.exists() {
+        fs::write(&mcp_run_path, MCP_RUN_BIN)
+            .with_context(|| format!("failed to write {}", mcp_run_path.display()))?;
+        set_permissions(&mcp_run_path, 0o755)?;
+    }
+
+    let run_remote_path = bin_dir.join("run-with-network");
+    if !run_remote_path.exists() {
+        fs::write(&run_remote_path, RUN_REMOTE_BIN)
+            .with_context(|| format!("failed to write {}", run_remote_path.display()))?;
+        set_permissions(&run_remote_path, 0o755)?;
+    }
+
+    Ok(())
 }
 
 fn materialize_dir(base_dir: &Path, dir: &Dir<'_>) -> Result<()> {

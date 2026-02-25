@@ -1,13 +1,12 @@
-use cladding::assets::{materialize_config, materialize_scripts, render_pods_yaml, CONFIG_TOP_LEVEL};
+use cladding::assets::{
+    materialize_config, materialize_scripts, render_pods_yaml, write_embedded_tools,
+    CONFIG_TOP_LEVEL,
+};
 use cladding::config::{load_cladding_config, write_default_cladding_config, Config};
 use cladding::error::{Error, Result};
-use cladding::fs_utils::{
-    canonicalize_path, is_broken_symlink, is_executable, path_is_symlink, set_permissions,
-};
+use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
 use cladding::network::resolve_network_settings;
-use cladding::podman::{
-    build_mcp_run, ensure_network_settings, podman_build_image, podman_play_kube,
-};
+use cladding::podman::{ensure_network_settings, podman_build_image, podman_play_kube};
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use std::env;
@@ -125,13 +124,6 @@ fn resolve_project_root(
 fn cmd_build(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
 
-    let cladding_root = find_repo_root().ok_or_else(|| {
-        eprintln!(
-            "error: could not locate cladding repo root (missing crates/mcp-run/Cargo.toml + Containerfile.cladding)"
-        );
-        Error::message("missing repo root")
-    })?;
-
     let host_uid = unsafe { libc::getuid() };
     let host_gid = unsafe { libc::getgid() };
 
@@ -146,21 +138,16 @@ fn cmd_build(context: &Context) -> Result<()> {
     fs::create_dir_all(&tools_bin_dir)
         .with_context(|| "failed to create tools directory")?;
 
-    build_mcp_run(&cladding_root)?;
-
-    install_binary(
-        &cladding_root
-            .join("crates/mcp-run/target/release/mcp-run"),
-        &tools_bin_dir.join("mcp-run"),
-    )?;
-    install_binary(
-        &cladding_root
-            .join("crates/mcp-run/target/release/run-remote"),
-        &tools_bin_dir.join("run-with-network"),
-    )?;
+    write_embedded_tools(&tools_bin_dir)?;
 
     let mut cli_image_built = false;
     if config.cli_image == DEFAULT_CLI_BUILD_IMAGE {
+        let cladding_root = find_repo_root().ok_or_else(|| {
+            eprintln!(
+                "error: could not locate cladding repo root (missing crates/mcp-run/Cargo.toml + Containerfile.cladding)"
+            );
+            Error::message("missing repo root")
+        })?;
         podman_build_image(&cladding_root, &config.cli_image, host_uid, host_gid)?;
         cli_image_built = true;
     } else {
@@ -177,6 +164,12 @@ fn cmd_build(context: &Context) -> Result<()> {
                 config.sandbox_image
             );
         } else {
+            let cladding_root = find_repo_root().ok_or_else(|| {
+                eprintln!(
+                    "error: could not locate cladding repo root (missing crates/mcp-run/Cargo.toml + Containerfile.cladding)"
+                );
+                Error::message("missing repo root")
+            })?;
             podman_build_image(&cladding_root, &config.sandbox_image, host_uid, host_gid)?;
         }
     } else {
@@ -185,20 +178,6 @@ fn cmd_build(context: &Context) -> Result<()> {
             config.sandbox_image, DEFAULT_CLADDING_BUILD_IMAGE
         );
     }
-
-    Ok(())
-}
-
-fn install_binary(src: &Path, dst: &Path) -> Result<()> {
-    if !src.exists() {
-        eprintln!("missing: built binary ({})", src.display());
-        return Err(Error::message("missing built binary"));
-    }
-
-    fs::copy(src, dst)
-        .with_context(|| format!("failed to install binary {}", dst.display()))?;
-
-    set_permissions(dst, 0o755)?;
 
     Ok(())
 }
