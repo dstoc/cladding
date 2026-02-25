@@ -20,6 +20,7 @@ RUN apt-get update \
        python3-venv \
        ripgrep \
     && npm install -g @openai/codex@latest \
+    && npm install -g @google/gemini-cli@latest \
     && if getent group $GID; then \
          group_name=$(getent group $GID | cut -d: -f1); \
          useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
@@ -32,4 +33,5 @@ RUN apt-get update \
 
 USER $USERNAME
 WORKDIR /home/$USERNAME/workspace
-CMD ["codex"]
+CMD ["zsh"]
+

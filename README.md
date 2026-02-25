@@ -29,7 +29,7 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`mc
   - copies template files into `.cladding/config/`
   - generates `.cladding/config/cladding.json`
     - `name`: derived from current directory name or passed to `./cladding init <name>` (alphanumeric)
-    - default images: `localhost/gemini-cli:latest`, `localhost/mcp-run-sandbox:latest`
+  - default images: `localhost/cladding-default:latest` for both CLI and sandbox
     - subnet: auto-selected from an unused `10.90.X.0/24`
   - creates the Podman network `<name>_cladding_net`
 
@@ -86,7 +86,7 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`mc
 flowchart TB
   subgraph C[cli-pod]
     CJ[cli-node: nftables jailer]
-    CA[cli-app: gemini-cli]
+    CA[cli-app]
   end
 
   subgraph H[volumes]
