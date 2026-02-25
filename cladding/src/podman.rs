@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::network::{is_ipv4_cidr, NetworkSettings};
 use anyhow::Context as _;
 use std::env;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
 pub fn podman_required(message: &str) -> Result<()> {
     if command_exists("podman") {
@@ -41,7 +41,7 @@ pub fn ensure_network_settings(network_settings: &NetworkSettings) -> Result<()>
                 .with_context(|| "failed to inspect podman network")?;
 
             if !output.status.success() {
-                return ensure_success(output.status, "podman network inspect");
+                return ensure_success_output(&output, "podman network inspect");
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -81,7 +81,7 @@ pub fn ensure_network_settings(network_settings: &NetworkSettings) -> Result<()>
 }
 
 pub fn build_mcp_run(cladding_root: &std::path::Path) -> Result<()> {
-    let status = Command::new("podman")
+    let output = Command::new("podman")
         .args([
             "run",
             "--rm",
@@ -106,10 +106,10 @@ pub fn build_mcp_run(cladding_root: &std::path::Path) -> Result<()> {
             "--bin",
             "run-remote",
         ])
-        .status()
+        .output()
         .with_context(|| "failed to run podman for build")?;
 
-    ensure_success(status, "podman run")
+    ensure_success_output(&output, "podman run")
 }
 
 pub fn podman_build_image(
@@ -193,7 +193,7 @@ pub fn list_podman_ipv4_subnets() -> Result<Vec<String>> {
         .with_context(|| "failed to list podman networks")?;
 
     if !output.status.success() {
-        return ensure_success(output.status, "podman network ls").map(|_| Vec::new());
+        return ensure_success_output(&output, "podman network ls").map(|_| Vec::new());
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -237,6 +237,20 @@ pub fn ensure_success(status: ExitStatus, context: &'static str) -> Result<()> {
 
     let code = status.code().unwrap_or(1);
     eprintln!("error: {context} failed (exit code {code})");
+    Err(Error::CommandFailed { context, code })
+}
+
+pub fn ensure_success_output(output: &Output, context: &'static str) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let code = output.status.code().unwrap_or(1);
+    eprintln!("error: {context} failed (exit code {code})");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        eprintln!("{stderr}");
+    }
     Err(Error::CommandFailed { context, code })
 }
 
