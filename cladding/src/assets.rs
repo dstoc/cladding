@@ -36,6 +36,29 @@ pub fn config_top_level_entries() -> Vec<String> {
     names.into_iter().collect()
 }
 
+pub fn scripts_top_level_entries() -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for entry in SCRIPTS_DIR.dirs() {
+        if let Some(component) = entry.path().components().next() {
+            if let std::path::Component::Normal(name) = component {
+                if let Some(name) = name.to_str() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    for entry in SCRIPTS_DIR.files() {
+        if let Some(component) = entry.path().components().next() {
+            if let std::path::Component::Normal(name) = component {
+                if let Some(name) = name.to_str() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
 pub fn materialize_config(base_dir: &Path) -> Result<()> {
     materialize_dir(base_dir, &CONFIG_DIR)
 }

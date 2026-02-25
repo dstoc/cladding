@@ -1,6 +1,6 @@
 use cladding::assets::{
     config_top_level_entries, materialize_config, materialize_scripts, render_pods_yaml,
-    write_embedded_tools,
+    scripts_top_level_entries, write_embedded_tools,
 };
 use cladding::config::{load_cladding_config, write_default_cladding_config, Config};
 use cladding::error::{Error, Result};
@@ -246,12 +246,14 @@ fn cmd_check(context: &Context) -> Result<()> {
 
 fn check_required_paths(context: &Context) -> Result<()> {
     let mut missing = false;
-    for name in ["config", "home", "tools"] {
+    for name in ["config", "home", "scripts", "tools"] {
         let path = context.project_root.join(name);
 
         if is_broken_symlink(&path)? {
             eprintln!("missing: {name} (broken symlink at {})", path.display());
             if name == "config" {
+                eprintln!("hint: run cladding init");
+            } else if name == "scripts" {
                 eprintln!("hint: run cladding init");
             } else {
                 eprintln!("hint: create or relink {}", path.display());
@@ -264,6 +266,8 @@ fn check_required_paths(context: &Context) -> Result<()> {
             eprintln!("missing: {name} ({})", path.display());
             if name == "config" {
                 eprintln!("hint: run cladding init");
+            } else if name == "scripts" {
+                eprintln!("hint: run cladding init");
             } else {
                 eprintln!("hint: mkdir -p {} (or symlink it)", path.display());
             }
@@ -275,7 +279,8 @@ fn check_required_paths(context: &Context) -> Result<()> {
         return Err(Error::message("missing required paths"));
     }
 
-    check_required_config_files(context)
+    check_required_config_files(context)?;
+    check_required_scripts_files(context)
 }
 
 fn check_required_config_files(context: &Context) -> Result<()> {
@@ -283,7 +288,7 @@ fn check_required_config_files(context: &Context) -> Result<()> {
     let mut missing = false;
 
     for name in config_top_level_entries() {
-        let path = dst.join(name);
+        let path = dst.join(&name);
         if !path.exists() {
             eprintln!("missing: config/{name} ({})", path.display());
             missing = true;
@@ -296,6 +301,29 @@ fn check_required_config_files(context: &Context) -> Result<()> {
             dst.display()
         );
         return Err(Error::message("missing config files"));
+    }
+
+    Ok(())
+}
+
+fn check_required_scripts_files(context: &Context) -> Result<()> {
+    let dst = context.project_root.join("scripts");
+    let mut missing = false;
+
+    for name in scripts_top_level_entries() {
+        let path = dst.join(&name);
+        if !path.exists() {
+            eprintln!("missing: scripts/{name} ({})", path.display());
+            missing = true;
+        }
+    }
+
+    if missing {
+        eprintln!(
+            "hint: run cladding init, or add missing top-level entries into {}",
+            dst.display()
+        );
+        return Err(Error::message("missing scripts files"));
     }
 
     Ok(())
