@@ -1,6 +1,6 @@
 use cladding::assets::{
-    materialize_config, materialize_scripts, render_pods_yaml, write_embedded_tools,
-    CONFIG_TOP_LEVEL,
+    config_top_level_entries, materialize_config, materialize_scripts, render_pods_yaml,
+    write_embedded_tools,
 };
 use cladding::config::{load_cladding_config, write_default_cladding_config, Config};
 use cladding::error::{Error, Result};
@@ -294,7 +294,7 @@ fn check_required_config_files(context: &Context) -> Result<()> {
     let dst = context.project_root.join("config");
     let mut missing = false;
 
-    for name in CONFIG_TOP_LEVEL {
+    for name in config_top_level_entries() {
         let path = dst.join(name);
         if !path.exists() {
             eprintln!("missing: config/{name} ({})", path.display());

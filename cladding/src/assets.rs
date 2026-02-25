@@ -13,14 +13,28 @@ static SCRIPTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../scripts");
 
 static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
 static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
-
-pub const CONFIG_TOP_LEVEL: &[&str] = &[
-    "cli_domains.lst",
-    "cli_host_ports.lst",
-    "sandbox_domains.lst",
-    "squid.conf",
-    "sandbox_commands",
-];
+pub fn config_top_level_entries() -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for entry in CONFIG_DIR.dirs() {
+        if let Some(component) = entry.path().components().next() {
+            if let std::path::Component::Normal(name) = component {
+                if let Some(name) = name.to_str() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    for entry in CONFIG_DIR.files() {
+        if let Some(component) = entry.path().components().next() {
+            if let std::path::Component::Normal(name) = component {
+                if let Some(name) = name.to_str() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
+}
 
 pub fn materialize_config(base_dir: &Path) -> Result<()> {
     materialize_dir(base_dir, &CONFIG_DIR)
