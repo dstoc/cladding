@@ -99,7 +99,6 @@ pub fn render_pods_yaml(
 ) -> String {
     PODS_YAML
         .replace("PROJECT_ROOT", &project_root.display().to_string())
-        .replace("CLADDING_ROOT", &project_root.display().to_string())
         .replace("REPLACE_PROXY_POD_NAME", proxy_pod_name)
         .replace("REPLACE_SANDBOX_POD_NAME", sandbox_pod_name)
         .replace("REPLACE_CLI_POD_NAME", cli_pod_name)

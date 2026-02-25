@@ -38,7 +38,7 @@ spec:
       type: Directory
   - name: scripts-dir
     hostPath:
-      path: CLADDING_ROOT/scripts
+      path: PROJECT_ROOT/scripts
       type: Directory
 
 ---
@@ -113,7 +113,7 @@ spec:
   volumes:
   - name: scripts-dir
     hostPath:
-      path: CLADDING_ROOT/scripts
+      path: PROJECT_ROOT/scripts
       type: Directory
   - name: config-dir
     hostPath:
@@ -207,7 +207,7 @@ spec:
   volumes:
   - name: scripts-dir
     hostPath:
-      path: CLADDING_ROOT/scripts
+      path: PROJECT_ROOT/scripts
       type: Directory
   - name: config-dir
     hostPath:
