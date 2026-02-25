@@ -15,10 +15,14 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`cr
 
 ## Getting Started
 
-* Build the `cladding` binary:
+* Install [Podman](https://podman.io/)
+* Install the `cladding` binary:
 
   ```bash
-  cargo build -p cladding --release
+  podman run --rm -it \
+    -v $HOME/.local/bin:/usr/local/cargo/bin \
+    rust:latest \
+    cargo install --git https://github.com/dstoc/cladding --bin cladding
   ```
 
 * Initialize local config:
@@ -26,15 +30,15 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`cr
   Config and mounts are stored in a `.cladding` directory.
 
   ```bash
-  ./target/release/cladding init
+  cladding init
   # or override generated name
-  ./target/release/cladding init myproject
+  cladding init myproject
   ```
 
   `init`:
   - copies template files into `.cladding/config/`
   - generates `.cladding/config/cladding.json`
-    - `name`: derived from current directory name or passed to `./target/release/cladding init <name>` (alphanumeric)
+    - `name`: derived from current directory name or passed to `cladding init <name>` (alphanumeric)
   - default images: `localhost/cladding-default:latest` for both CLI and sandbox
     - subnet: auto-selected from an unused `10.90.X.0/24`
   - creates the Podman network `<name>_cladding_net`
@@ -60,19 +64,19 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`cr
 * Build images and refresh host-mounted binaries (`mcp-run`, `run-with-network`) in `.cladding/tools/bin`:
 
   ```bash
-  ./target/release/cladding build
+  cladding build
   ```
 
 * Start the environment:
 
   ```bash
-  ./target/release/cladding up
+  cladding up
   ```
 
 * Run commands in the CLI container (workdir follows your host `cwd` relative to the directory containing `.cladding`):
 
   ```bash
-  ./target/release/cladding run gemini
+  cladding run gemini
   ```
 
 ## Mounts
@@ -127,12 +131,12 @@ flowchart TB
 ## Useful Commands
 
 ```bash
-./target/release/cladding init [name]  # initialize .cladding, config and create network
-./target/release/cladding check        # verify required paths/images
-./target/release/cladding run [cmd]    # run a command in the cli-app container
-./target/release/cladding reload-proxy # reconfigure squid after domain-list edits
-./target/release/cladding down         # stop associated pods
-./target/release/cladding destroy      # force-remove running containers
+cladding init [name]  # initialize .cladding, config and create network
+cladding check        # verify required paths/images
+cladding run [cmd]    # run a command in the cli-app container
+cladding reload-proxy # reconfigure squid after domain-list edits
+cladding down         # stop associated pods
+cladding destroy      # force-remove running containers
 podman logs -f <name>-proxy-pod-proxy           # view proxy logs
 podman logs -f <name>-sandbox-pod-sandbox-app   # sandbox (mcp-run) logs
 ```
