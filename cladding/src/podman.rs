@@ -80,12 +80,7 @@ pub fn ensure_network_settings(network_settings: &NetworkSettings) -> Result<()>
     Ok(())
 }
 
-pub fn podman_build_image(
-    cladding_root: &std::path::Path,
-    image: &str,
-    host_uid: u32,
-    host_gid: u32,
-) -> Result<()> {
+pub fn podman_build_image(image: &str, host_uid: u32, host_gid: u32) -> Result<()> {
     let mut cmd = Command::new("podman");
     cmd.args([
         "build",
@@ -97,7 +92,7 @@ pub fn podman_build_image(
         image,
         "-f",
         "-",
-        &cladding_root.display().to_string(),
+        ".",
     ])
     .stdin(Stdio::piped());
 

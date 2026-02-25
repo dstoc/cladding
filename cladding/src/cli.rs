@@ -142,13 +142,7 @@ fn cmd_build(context: &Context) -> Result<()> {
 
     let mut cli_image_built = false;
     if config.cli_image == DEFAULT_CLI_BUILD_IMAGE {
-        let cladding_root = find_repo_root().ok_or_else(|| {
-            eprintln!(
-                "error: could not locate cladding repo root (missing crates/mcp-run/Cargo.toml + Containerfile.cladding)"
-            );
-            Error::message("missing repo root")
-        })?;
-        podman_build_image(&cladding_root, &config.cli_image, host_uid, host_gid)?;
+        podman_build_image(&config.cli_image, host_uid, host_gid)?;
         cli_image_built = true;
     } else {
         println!(
@@ -164,13 +158,7 @@ fn cmd_build(context: &Context) -> Result<()> {
                 config.sandbox_image
             );
         } else {
-            let cladding_root = find_repo_root().ok_or_else(|| {
-                eprintln!(
-                    "error: could not locate cladding repo root (missing crates/mcp-run/Cargo.toml + Containerfile.cladding)"
-                );
-                Error::message("missing repo root")
-            })?;
-            podman_build_image(&cladding_root, &config.sandbox_image, host_uid, host_gid)?;
+            podman_build_image(&config.sandbox_image, host_uid, host_gid)?;
         }
     } else {
         println!(
@@ -533,40 +521,4 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
 
 fn image_is_buildable_by_cladding(image: &str) -> bool {
     image == DEFAULT_CLADDING_BUILD_IMAGE
-}
-
-fn find_repo_root() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(exe) = env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.to_path_buf());
-        }
-    }
-
-    if let Ok(cwd) = env::current_dir() {
-        candidates.push(cwd);
-    }
-
-    for candidate in candidates {
-        if let Some(found) = walk_up_for_repo_root(&candidate) {
-            return Some(found);
-        }
-    }
-
-    None
-}
-
-fn walk_up_for_repo_root(start: &Path) -> Option<PathBuf> {
-    let mut current = start;
-    loop {
-        let mcp_run = current.join("crates/mcp-run").join("Cargo.toml");
-        let containerfile = current.join("Containerfile.cladding");
-        if mcp_run.is_file() && containerfile.is_file() {
-            return Some(current.to_path_buf());
-        }
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => return None,
-        }
-    }
 }
