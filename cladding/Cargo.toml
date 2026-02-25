@@ -3,6 +3,9 @@ name = "cladding"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.5.33", features = ["derive"] }

@@ -110,3 +110,25 @@ pub fn int_to_ipv4(value: u32) -> String {
         value & 0xff
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv4_roundtrip() {
+        let ip = "10.90.12.34";
+        let int = ipv4_to_int(ip).expect("parse ip");
+        assert_eq!(int_to_ipv4(int), ip);
+    }
+
+    #[test]
+    fn resolve_network_settings_basic() {
+        let settings = resolve_network_settings("demo", "10.90.5.0/24").unwrap();
+        assert_eq!(settings.network, "demo_cladding_net");
+        assert_eq!(settings.network_subnet, "10.90.5.0/24");
+        assert_eq!(settings.proxy_ip, "10.90.5.2");
+        assert_eq!(settings.sandbox_ip, "10.90.5.3");
+        assert_eq!(settings.cli_ip, "10.90.5.4");
+    }
+}

@@ -161,3 +161,14 @@ fn pick_available_subnet() -> std::result::Result<String, i32> {
 
     Err(2)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_init_name() {
+        assert_eq!(normalize_cladding_name_arg("MyProject").unwrap(), "myproject");
+        assert!(normalize_cladding_name_arg("bad-name").is_err());
+    }
+}

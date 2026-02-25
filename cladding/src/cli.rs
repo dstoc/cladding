@@ -1,11 +1,11 @@
-use crate::assets::{materialize_config, materialize_scripts, render_pods_yaml, CONFIG_TOP_LEVEL};
-use crate::config::{load_cladding_config, write_default_cladding_config, Config};
-use crate::error::{Error, Result};
-use crate::fs_utils::{
+use cladding::assets::{materialize_config, materialize_scripts, render_pods_yaml, CONFIG_TOP_LEVEL};
+use cladding::config::{load_cladding_config, write_default_cladding_config, Config};
+use cladding::error::{Error, Result};
+use cladding::fs_utils::{
     canonicalize_path, is_broken_symlink, is_executable, path_is_symlink, set_permissions,
 };
-use crate::network::resolve_network_settings;
-use crate::podman::{
+use cladding::network::resolve_network_settings;
+use cladding::podman::{
     build_mcp_run, ensure_network_settings, podman_build_image, podman_play_kube,
 };
 use anyhow::Context as _;
@@ -441,7 +441,7 @@ fn cmd_destroy(context: &Context) -> Result<()> {
         .status()
         .with_context(|| "failed to run podman rm")?;
 
-    crate::podman::ensure_success(status, "podman rm")
+    cladding::podman::ensure_success(status, "podman rm")
 }
 
 fn cmd_run(context: &Context, args: &[String]) -> Result<()> {
@@ -549,7 +549,7 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
         .status()
         .with_context(|| "failed to run podman exec")?;
 
-    crate::podman::ensure_success(status, "podman exec")
+    cladding::podman::ensure_success(status, "podman exec")
 }
 
 fn image_is_buildable_by_cladding(image: &str) -> bool {
