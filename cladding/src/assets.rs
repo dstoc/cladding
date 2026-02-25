@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::fs_utils::set_permissions;
 use anyhow::Context as _;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use std::fs;
 use std::path::Path;
 
@@ -32,18 +32,14 @@ pub fn materialize_scripts(base_dir: &Path) -> Result<()> {
 
 pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
     let mcp_run_path = bin_dir.join("mcp-run");
-    if !mcp_run_path.exists() {
-        fs::write(&mcp_run_path, MCP_RUN_BIN)
-            .with_context(|| format!("failed to write {}", mcp_run_path.display()))?;
-        set_permissions(&mcp_run_path, 0o755)?;
-    }
+    fs::write(&mcp_run_path, MCP_RUN_BIN)
+        .with_context(|| format!("failed to write {}", mcp_run_path.display()))?;
+    set_permissions(&mcp_run_path, 0o755)?;
 
     let run_remote_path = bin_dir.join("run-with-network");
-    if !run_remote_path.exists() {
-        fs::write(&run_remote_path, RUN_REMOTE_BIN)
-            .with_context(|| format!("failed to write {}", run_remote_path.display()))?;
-        set_permissions(&run_remote_path, 0o755)?;
-    }
+    fs::write(&run_remote_path, RUN_REMOTE_BIN)
+        .with_context(|| format!("failed to write {}", run_remote_path.display()))?;
+    set_permissions(&run_remote_path, 0o755)?;
 
     Ok(())
 }
