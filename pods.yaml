@@ -78,6 +78,7 @@ spec:
   - name: sandbox-app
     image: REPLACE_SANDBOX_IMAGE
     imagePullPolicy: Never
+    command: ["mcp-run"]
     ports:
     - containerPort: 3000
     workingDir: /home/user/workspace
