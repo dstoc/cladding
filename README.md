@@ -1,4 +1,4 @@
-Cladding lets you an agent in a constrained container environment where network access is intentionally narrow:
+Cladding lets you run an agent in a constrained container environment where network access is intentionally narrow:
 
 - The agent runs in `cli-pod`.
 - Direct egress from the agent container is blocked except to:
