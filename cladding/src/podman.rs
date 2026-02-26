@@ -2,7 +2,9 @@ use crate::assets::containerfile;
 use crate::error::{Error, Result};
 use crate::network::{is_ipv4_cidr, NetworkSettings};
 use anyhow::Context as _;
+use serde_json::Value;
 use std::env;
+use std::collections::HashMap;
 use std::process::{Command, ExitStatus, Output, Stdio};
 
 pub fn podman_required(message: &str) -> Result<()> {
@@ -224,4 +226,102 @@ fn command_exists(command: &str) -> bool {
             candidate.is_file()
         })
     })
+}
+
+#[derive(Debug, Clone)]
+pub struct RunningProject {
+    pub name: String,
+    pub project_root: String,
+    pub pod_count: usize,
+}
+
+pub fn list_running_projects() -> Result<Vec<RunningProject>> {
+    let output = Command::new("podman")
+        .args([
+            "pod",
+            "ps",
+            "--filter",
+            "label=cladding",
+            "--filter",
+            "status=running",
+            "--format",
+            "json",
+        ])
+        .output()
+        .with_context(|| "failed to run podman pod ps")?;
+
+    if !output.status.success() {
+        return ensure_success_output(&output, "podman pod ps").map(|_| Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)
+        .with_context(|| "failed to parse podman pod ps json output")?;
+
+    let mut projects: HashMap<(String, String), usize> = HashMap::new();
+    let Some(items) = parsed.as_array() else {
+        return Ok(Vec::new());
+    };
+
+    for item in items {
+        let Some(labels_value) = item.get("Labels") else {
+            continue;
+        };
+        let labels = parse_labels(labels_value);
+        let Some(name) = labels.get("cladding") else {
+            continue;
+        };
+        let Some(project_root) = labels.get("project_root") else {
+            continue;
+        };
+        let key = (name.clone(), project_root.clone());
+        let count = projects.entry(key).or_insert(0);
+        *count += 1;
+    }
+
+    let mut results: Vec<RunningProject> = projects
+        .into_iter()
+        .map(|((name, project_root), pod_count)| RunningProject {
+            name,
+            project_root,
+            pod_count,
+        })
+        .collect();
+
+    results.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.project_root.cmp(&b.project_root))
+    });
+
+    Ok(results)
+}
+
+fn parse_labels(value: &Value) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    match value {
+        Value::Object(map) => {
+            for (key, val) in map {
+                if let Some(s) = val.as_str() {
+                    labels.insert(key.clone(), s.to_string());
+                }
+            }
+        }
+        Value::String(raw) => {
+            for entry in raw.split(',') {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                let mut parts = entry.splitn(2, '=');
+                let key = parts.next().unwrap_or("").trim();
+                let val = parts.next().unwrap_or("").trim();
+                if !key.is_empty() && !val.is_empty() {
+                    labels.insert(key.to_string(), val.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    labels
 }

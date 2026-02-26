@@ -7,7 +7,10 @@ use cladding::error::{Error, Result};
 use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
 use cladding::network::resolve_network_settings;
 use cladding::pods::{host_paths_from_rendered, render_pods_yaml};
-use cladding::podman::{ensure_network_settings, podman_build_image, podman_play_kube};
+use cladding::podman::{
+    ensure_network_settings, list_running_projects, podman_build_image, podman_play_kube,
+    podman_required,
+};
 use anyhow::Context as _;
 use clap::{ArgAction, Parser, Subcommand};
 use std::env;
@@ -57,6 +60,8 @@ enum CommandSpec {
     },
     /// Reload the squid proxy configuration
     ReloadProxy,
+    /// Show running cladding projects
+    Ps,
 }
 
 pub fn run() -> Result<()> {
@@ -77,6 +82,7 @@ pub fn run() -> Result<()> {
         CommandSpec::Destroy => cmd_destroy(&context),
         CommandSpec::Run { env, args } => cmd_run(&context, &env, &args),
         CommandSpec::ReloadProxy => cmd_reload_proxy(&context),
+        CommandSpec::Ps => cmd_ps(&context),
     }
 }
 
@@ -112,6 +118,7 @@ fn resolve_project_root(
         Some(root) => Ok(root),
         None => match command {
             CommandSpec::Init { .. } => Ok(cwd.join(".cladding")),
+            CommandSpec::Ps => Ok(cwd.join(".cladding")),
             _ => {
                 eprintln!(
                     "error: no .cladding directory found in {} or any parent directory",
@@ -424,6 +431,25 @@ fn cmd_destroy(context: &Context) -> Result<()> {
         .with_context(|| "failed to run podman rm")?;
 
     cladding::podman::ensure_success(status, "podman rm")
+}
+
+fn cmd_ps(_context: &Context) -> Result<()> {
+    podman_required("podman (required for cladding ps)")?;
+    let projects = list_running_projects()?;
+    if projects.is_empty() {
+        println!("no running cladding projects");
+        return Ok(());
+    }
+
+    println!("running cladding projects:");
+    for project in projects {
+        println!(
+            "{}  {}  (pods: {})",
+            project.name, project.project_root, project.pod_count
+        );
+    }
+
+    Ok(())
 }
 
 fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {

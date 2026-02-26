@@ -13,6 +13,7 @@ pub fn render_pods_yaml(
 ) -> String {
     let rendered = PODS_YAML
         .replace("PROJECT_ROOT", &project_root.display().to_string())
+        .replace("CLADDING_NAME", &config.name)
         .replace(
             "REPLACE_PROXY_POD_NAME",
             &network_settings.proxy_pod_name,

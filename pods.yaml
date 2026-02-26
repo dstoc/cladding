@@ -7,6 +7,8 @@ metadata:
   name: REPLACE_PROXY_POD_NAME
   labels:
     app: proxy
+    cladding: CLADDING_NAME
+    project_root: "PROJECT_ROOT"
 spec:
   hostAliases:
   - ip: "REPLACE_CLI_IP"
@@ -51,6 +53,8 @@ metadata:
   name: REPLACE_SANDBOX_POD_NAME
   labels:
     app: sandbox
+    cladding: CLADDING_NAME
+    project_root: "PROJECT_ROOT"
   annotations:
     io.podman.annotations.userns: "keep-id"
 spec:
@@ -145,6 +149,8 @@ metadata:
   name: REPLACE_CLI_POD_NAME
   labels:
     app: cli
+    cladding: CLADDING_NAME
+    project_root: "PROJECT_ROOT"
   annotations:
     io.podman.annotations.userns: "keep-id"
 spec:

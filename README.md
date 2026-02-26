@@ -107,6 +107,12 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
   cladding up
   ```
 
+* List running cladding projects:
+
+  ```bash
+  cladding ps
+  ```
+
 * Run commands in the CLI container (workdir follows your host `cwd` relative to the directory containing `.cladding`):
 
   ```bash
@@ -197,6 +203,7 @@ flowchart TB
 ```bash
 cladding init [name]  # initialize .cladding, config and create network
 cladding check        # verify required paths/images
+cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the cli-app container
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding down         # stop associated pods
