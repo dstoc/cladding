@@ -1,21 +1,19 @@
-use cladding::assets::render_pods_yaml;
+use cladding::config::Config;
 use cladding::network::resolve_network_settings;
+use cladding::pods::render_pods_yaml;
 use std::path::Path;
 
 #[test]
 fn render_pods_yaml_replaces_placeholders() {
     let settings = resolve_network_settings("demo", "10.90.1.0/24").unwrap();
-    let rendered = render_pods_yaml(
-        Path::new("/tmp/project/.cladding"),
-        "sandbox:image",
-        "cli:image",
-        &settings.proxy_pod_name,
-        &settings.sandbox_pod_name,
-        &settings.cli_pod_name,
-        &settings.proxy_ip,
-        &settings.sandbox_ip,
-        &settings.cli_ip,
-    );
+    let config = Config {
+        name: "demo".to_string(),
+        subnet: "10.90.1.0/24".to_string(),
+        sandbox_image: "sandbox:image".to_string(),
+        cli_image: "cli:image".to_string(),
+        mounts: Vec::new(),
+    };
+    let rendered = render_pods_yaml(Path::new("/tmp/project/.cladding"), &config, &settings);
 
     assert!(!rendered.contains("REPLACE_PROXY_POD_NAME"));
     assert!(!rendered.contains("REPLACE_CLI_IMAGE"));

@@ -5,7 +5,8 @@ use anyhow::Context as _;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -13,6 +14,15 @@ pub struct Config {
     pub subnet: String,
     pub sandbox_image: String,
     pub cli_image: String,
+    pub mounts: Vec<MountConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MountConfig {
+    pub mount_path: String,
+    pub host_path: Option<PathBuf>,
+    pub volume: Option<String>,
+    pub read_only: bool,
 }
 
 pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
@@ -32,18 +42,25 @@ pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
         Error::message("invalid cladding.json")
     })?;
 
-    let name = get_config_string(&parsed, "name")?;
-    let subnet = get_config_string(&parsed, "subnet")?;
-    let sandbox_image = get_config_string(&parsed, "sandbox_image")?;
-    let cli_image = get_config_string(&parsed, "cli_image")?;
+    let name = get_config_string(&parsed, "name", &config_path)?;
+    let subnet = get_config_string(&parsed, "subnet", &config_path)?;
+    let sandbox_image = get_config_string(&parsed, "sandbox_image", &config_path)?;
+    let cli_image = get_config_string(&parsed, "cli_image", &config_path)?;
+    let mut used_mount_paths = HashSet::new();
+    let mounts = parse_mounts(project_root, &parsed, &config_path, &mut used_mount_paths)?;
 
     if !is_lowercase_alnum(&name) {
         eprintln!("error: config key 'name' must be lowercase alphanumeric ([a-z0-9]+)");
+        eprintln!("file: {}", config_path.display());
         return Err(Error::message("invalid name"));
     }
 
     if !is_ipv4_cidr(&subnet) {
-        // subnet-specific error gets printed in network::resolve_network_settings
+        eprintln!(
+            "error: config key 'subnet' must be in CIDR notation (example: 10.90.0.0/24)"
+        );
+        eprintln!("file: {}", config_path.display());
+        return Err(Error::message("invalid subnet format"));
     }
 
     Ok(Config {
@@ -51,6 +68,7 @@ pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
         subnet,
         sandbox_image,
         cli_image,
+        mounts,
     })
 }
 
@@ -100,15 +118,147 @@ pub fn write_default_cladding_config(
     ))
 }
 
-fn get_config_string(parsed: &serde_json::Value, key: &str) -> Result<String> {
+fn get_config_string(
+    parsed: &serde_json::Value,
+    key: &str,
+    config_path: &Path,
+) -> Result<String> {
     parsed
         .get(key)
         .and_then(|value| value.as_str())
         .map(|value| value.to_string())
         .ok_or_else(|| {
             eprintln!("error: cladding.json must include string key: {key}");
+            eprintln!("file: {}", config_path.display());
             Error::message("invalid cladding.json")
         })
+}
+
+fn parse_mounts(
+    project_root: &Path,
+    parsed: &serde_json::Value,
+    config_path: &Path,
+    used_mount_paths: &mut HashSet<String>,
+) -> Result<Vec<MountConfig>> {
+    let Some(raw) = parsed.get("mounts") else {
+        return Ok(Vec::new());
+    };
+
+    let array = raw.as_array().ok_or_else(|| {
+        eprintln!("error: cladding.json field 'mounts' must be an array");
+        eprintln!("file: {}", config_path.display());
+        Error::message("invalid cladding.json")
+    })?;
+
+    let mut mounts = Vec::with_capacity(array.len());
+    for (index, entry) in array.iter().enumerate() {
+        let Some(object) = entry.as_object() else {
+            eprintln!("error: cladding.json field 'mounts[{index}]' must be an object");
+            eprintln!("file: {}", config_path.display());
+            return Err(Error::message("invalid cladding.json"));
+        };
+
+        let mount_path = object
+            .get("mount")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                eprintln!(
+                    "error: cladding.json invalid field 'mounts[{index}].mount' (expected string)"
+                );
+                eprintln!("file: {}", config_path.display());
+                Error::message("invalid cladding.json")
+            })?;
+        ensure_absolute_mount_path(config_path, &format!("mounts[{index}].mount"), mount_path)?;
+
+        if !used_mount_paths.insert(mount_path.to_string()) {
+            eprintln!(
+                "error: cladding.json duplicate mount path '{mount_path}' in mounts"
+            );
+            eprintln!("file: {}", config_path.display());
+            return Err(Error::message("duplicate mount path"));
+        }
+
+        let host_path = match object.get("hostPath") {
+            Some(value) => {
+                let raw = value.as_str().ok_or_else(|| {
+                    eprintln!("error: cladding.json invalid field 'mounts[{index}].hostPath' (expected string)");
+                    eprintln!("file: {}", config_path.display());
+                    Error::message("invalid cladding.json")
+                })?;
+                let candidate = PathBuf::from(raw);
+                Some(if candidate.is_absolute() {
+                    candidate
+                } else {
+                    project_root.join(candidate)
+                })
+            }
+            None => None,
+        };
+
+        let volume = match object.get("volume") {
+            Some(value) => Some(value.as_str().ok_or_else(|| {
+                eprintln!("error: cladding.json invalid field 'mounts[{index}].volume' (expected string)");
+                eprintln!("file: {}", config_path.display());
+                Error::message("invalid cladding.json")
+            })?.to_string()),
+            None => None,
+        };
+
+        if host_path.is_some() && volume.is_some() {
+            eprintln!(
+                "error: cladding.json invalid field 'mounts[{index}]' (hostPath and volume are mutually exclusive)"
+            );
+            eprintln!("file: {}", config_path.display());
+            return Err(Error::message("invalid cladding.json"));
+        }
+
+        let read_only = match object.get("readOnly") {
+            Some(value) => value.as_bool().ok_or_else(|| {
+                eprintln!("error: cladding.json invalid field 'mounts[{index}].readOnly' (expected boolean)");
+                eprintln!("file: {}", config_path.display());
+                Error::message("invalid cladding.json")
+            })?,
+            None => false,
+        };
+
+        if volume.is_some() && read_only {
+            eprintln!(
+                "error: cladding.json invalid field 'mounts[{index}].readOnly' (readOnly not supported for volume mounts)"
+            );
+            eprintln!("file: {}", config_path.display());
+            return Err(Error::message("invalid cladding.json"));
+        }
+
+        let read_only = if host_path.is_none() && volume.is_none() {
+            true
+        } else {
+            read_only
+        };
+
+        mounts.push(MountConfig {
+            mount_path: mount_path.to_string(),
+            host_path,
+            volume,
+            read_only,
+        });
+    }
+
+    Ok(mounts)
+}
+
+fn ensure_absolute_mount_path(
+    config_path: &Path,
+    field: &str,
+    mount_path: &str,
+) -> Result<()> {
+    if Path::new(mount_path).is_absolute() {
+        return Ok(());
+    }
+    eprintln!(
+        "error: cladding.json invalid field '{field}' (mount path must be absolute)"
+    );
+    eprintln!("file: {}", config_path.display());
+    Err(Error::message("invalid cladding.json"))
 }
 
 fn is_lowercase_alnum(name: &str) -> bool {

@@ -1,11 +1,12 @@
 use cladding::assets::{
-    config_top_level_entries, materialize_config, materialize_scripts, render_pods_yaml,
-    scripts_top_level_entries, write_embedded_tools,
+    config_top_level_entries, materialize_config, materialize_scripts, scripts_top_level_entries,
+    write_embedded_tools,
 };
 use cladding::config::{load_cladding_config, write_default_cladding_config, Config};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
 use cladding::network::resolve_network_settings;
+use cladding::pods::{host_paths_from_rendered, render_pods_yaml};
 use cladding::podman::{ensure_network_settings, podman_build_image, podman_play_kube};
 use anyhow::Context as _;
 use clap::{ArgAction, Parser, Subcommand};
@@ -240,7 +241,8 @@ fn cmd_check(context: &Context) -> Result<()> {
     check_required_paths(context)?;
     check_required_binaries(context)?;
     let config = load_cladding_config(&context.project_root)?;
-    resolve_network_settings(&config.name, &config.subnet)?;
+    let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
+    check_required_host_paths(context, &config, &network_settings)?;
     check_required_images(&config)?;
     println!("check: ok");
     Ok(())
@@ -351,6 +353,38 @@ fn check_required_binaries(context: &Context) -> Result<()> {
     Ok(())
 }
 
+fn check_required_host_paths(
+    context: &Context,
+    config: &Config,
+    network_settings: &cladding::network::NetworkSettings,
+) -> Result<()> {
+    let rendered = render_pods_yaml(
+        &context.project_root,
+        config,
+        network_settings,
+    );
+
+    let mut missing = false;
+    let mut seen = std::collections::HashSet::new();
+    for path in host_paths_from_rendered(&rendered) {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let host_path = Path::new(&path);
+        if !host_path.exists() {
+            eprintln!("missing: hostPath {}", host_path.display());
+            eprintln!("hint: create or relink {}", host_path.display());
+            missing = true;
+        }
+    }
+
+    if missing {
+        return Err(Error::message("missing host paths"));
+    }
+
+    Ok(())
+}
+
 fn check_required_images(config: &Config) -> Result<()> {
     let mut missing = false;
     for image in [&config.cli_image, &config.sandbox_image] {
@@ -391,17 +425,10 @@ fn cmd_up(context: &Context) -> Result<()> {
     let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
     check_required_images(&config)?;
     ensure_network_settings(&network_settings)?;
-
     let rendered = render_pods_yaml(
         &context.project_root,
-        &config.sandbox_image,
-        &config.cli_image,
-        &network_settings.proxy_pod_name,
-        &network_settings.sandbox_pod_name,
-        &network_settings.cli_pod_name,
-        &network_settings.proxy_ip,
-        &network_settings.sandbox_ip,
-        &network_settings.cli_ip,
+        &config,
+        &network_settings,
     );
     podman_play_kube(&rendered, &network_settings, false)
 }
@@ -411,14 +438,8 @@ fn cmd_down(context: &Context) -> Result<()> {
     let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
     let rendered = render_pods_yaml(
         &context.project_root,
-        &config.sandbox_image,
-        &config.cli_image,
-        &network_settings.proxy_pod_name,
-        &network_settings.sandbox_pod_name,
-        &network_settings.cli_pod_name,
-        &network_settings.proxy_ip,
-        &network_settings.sandbox_ip,
-        &network_settings.cli_ip,
+        &config,
+        &network_settings,
     );
     podman_play_kube(&rendered, &network_settings, true)
 }

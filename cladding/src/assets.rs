@@ -6,7 +6,6 @@ use std::fs;
 use std::path::Path;
 
 const CONTAINERFILE_CLADDING: &str = include_str!("../../Containerfile.cladding");
-const PODS_YAML: &str = include_str!("../../pods.yaml");
 
 static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../config-template");
 static SCRIPTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../scripts");
@@ -107,27 +106,4 @@ fn materialize_dir(base_dir: &Path, dir: &Dir<'_>) -> Result<()> {
 
 pub fn containerfile() -> &'static str {
     CONTAINERFILE_CLADDING
-}
-
-pub fn render_pods_yaml(
-    project_root: &Path,
-    config_sandbox_image: &str,
-    config_cli_image: &str,
-    proxy_pod_name: &str,
-    sandbox_pod_name: &str,
-    cli_pod_name: &str,
-    proxy_ip: &str,
-    sandbox_ip: &str,
-    cli_ip: &str,
-) -> String {
-    PODS_YAML
-        .replace("PROJECT_ROOT", &project_root.display().to_string())
-        .replace("REPLACE_PROXY_POD_NAME", proxy_pod_name)
-        .replace("REPLACE_SANDBOX_POD_NAME", sandbox_pod_name)
-        .replace("REPLACE_CLI_POD_NAME", cli_pod_name)
-        .replace("REPLACE_SANDBOX_IMAGE", config_sandbox_image)
-        .replace("REPLACE_CLI_IMAGE", config_cli_image)
-        .replace("REPLACE_PROXY_IP", proxy_ip)
-        .replace("REPLACE_SANDBOX_IP", sandbox_ip)
-        .replace("REPLACE_CLI_IP", cli_ip)
 }
