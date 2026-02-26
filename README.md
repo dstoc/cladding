@@ -25,6 +25,21 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`cr
     cargo install --git https://github.com/dstoc/cladding --bin cladding
   ```
 
+  Alternative (install Rust locally first):
+
+  ```bash
+  # install Rust
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  # or on macOS with Homebrew
+  brew install rust
+
+  # from this repo
+  cargo install --path . --bin cladding
+
+  # or install directly from git
+  cargo install --git https://github.com/dstoc/cladding --bin cladding
+  ```
+
 * Initialize local config:
 
   Config and mounts are stored in a `.cladding` directory.
@@ -76,7 +91,7 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`cr
 * Run commands in the CLI container (workdir follows your host `cwd` relative to the directory containing `.cladding`):
 
   ```bash
-  cladding run gemini
+  cladding run codex --yolo
   cladding run --env GEMINI_API_KEY gemini
   ```
 
