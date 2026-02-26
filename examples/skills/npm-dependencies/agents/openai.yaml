@@ -1,0 +1,4 @@
+interface:
+  display_name: "NPM Dependencies"
+  short_description: "Add or update npm packages safely"
+  default_prompt: "Manage npm dependencies with the approved network-safe workflow."
