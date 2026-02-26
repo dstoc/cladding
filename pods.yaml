@@ -86,15 +86,15 @@ spec:
     - name: config-dir
       mountPath: /opt/config
       readOnly: true
+    - name: tools-dir
+      mountPath: /opt/tools
+      readOnly: true
     - name: home-dir
       mountPath: /home/user
     - name: workspace-dir
       mountPath: /home/user/workspace
     - name: masked-cladding-dir
       mountPath: /home/user/workspace/.cladding
-      readOnly: true
-    - name: tools-dir
-      mountPath: /opt/tools
       readOnly: true
     env:
     - name: PATH
@@ -128,7 +128,8 @@ spec:
       path: PROJECT_ROOT/..
       type: Directory
   - name: masked-cladding-dir
-    emptyDir: {}
+    emptyDir:
+      medium: Memory
   - name: tools-dir
     hostPath:
       path: PROJECT_ROOT/tools
@@ -182,15 +183,15 @@ spec:
     - name: config-dir
       mountPath: /opt/config
       readOnly: true
+    - name: tools-dir
+      mountPath: /opt/tools
+      readOnly: true
     - name: home-dir
       mountPath: /home/user
     - name: workspace-dir
       mountPath: /home/user/workspace
     - name: masked-cladding-dir
       mountPath: /home/user/workspace/.cladding
-      readOnly: true
-    - name: tools-dir
-      mountPath: /opt/tools
       readOnly: true
     env:
     - name: PATH
@@ -222,7 +223,8 @@ spec:
       path: PROJECT_ROOT/..
       type: Directory
   - name: masked-cladding-dir
-    emptyDir: {}
+    emptyDir:
+      medium: Memory
   - name: tools-dir
     hostPath:
       path: PROJECT_ROOT/tools

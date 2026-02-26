@@ -80,16 +80,45 @@ For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`cr
   cladding run --env GEMINI_API_KEY gemini
   ```
 
-## Mounts
+### Configuring mounts
 
-| Host path | Container path | Used by | Mode | Purpose |
-| --- | --- | --- | --- | --- |
-| `./.cladding/home` | `/home/user` | `sandbox-app`, `cli-app` | Read-write | User home directory shared by CLI and sandbox app containers. |
-| `./.cladding/..` | `/home/user/workspace` | `sandbox-app`, `cli-app` | Read-write | Workspace root mounted directly from the discovered project root (`.cladding`). |
-| `-` | `/home/user/workspace/.cladding` | `sandbox-app`, `cli-app` | Read-only | Masks `.cladding` inside the workspace mount so it is not exposed. |
-| `./.cladding/config` | `/opt/config` | `proxy`, `sandbox-app`, `cli-app` | Read-only | Shared runtime config (policy, domain allowlists, Squid inputs). |
-| `./.cladding/tools` | `/opt/tools` | `sandbox-app`, `cli-app` | Read-only | Host-provided tools mounted into both app containers (`/opt/tools/bin` is on `PATH`). |
-| `<cladding install>/scripts` | `/opt/scripts` | `proxy`, `sandbox-node`, `cli-node` | Read-only | Startup and jail scripts from the `cladding` installation directory. |
+`cladding.json` supports a `mounts` list. Each entry has:
+
+* `mount` (required, absolute path in the container)
+* `hostPath` (optional, host bind mount; relative paths are resolved from `.cladding/`)
+* `volume` (optional, named volume; mutually exclusive with `hostPath`)
+* `readOnly` (optional, default `false`; ignored for `volume` mounts and forced `true` for emptyDir)
+
+If neither `hostPath` nor `volume` is set, an `emptyDir` is used and mounted read-only.
+Mounts apply only to `cli-app` and `sandbox-app`; other pod mounts are fixed.
+
+Example:
+
+```json
+{
+  "mounts": [
+    { "mount": "/home/user/workspace/.cache/npm", "volume": "npm-cache" },
+    { "mount": "/opt/data", "hostPath": "../data", "readOnly": true },
+    { "mount": "/tmp/isolated" }
+  ]
+}
+```
+
+Default mounts (as if expressed via `mounts`):
+
+```json
+{
+  "mounts": [
+    { "mount": "/opt/config", "hostPath": "config", "readOnly": true },
+    { "mount": "/opt/tools", "hostPath": "tools", "readOnly": true },
+    { "mount": "/home/user", "hostPath": "home" },
+    { "mount": "/home/user/workspace", "hostPath": ".." },
+    { "mount": "/home/user/workspace/.cladding" }
+  ]
+}
+```
+
+Default mounts may be overidden by adding an entry with the same `mount` value.
 
 ## Architecture + Network Controls
 
