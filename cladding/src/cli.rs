@@ -386,10 +386,65 @@ fn check_required_images(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_up(context: &Context) -> Result<()> {
-    check_required_binaries(context)?;
+struct ProjectRuntimeStatus {
+    current_project_root: String,
+    already_running: bool,
+}
 
+fn project_runtime_status(context: &Context, config: &Config) -> Result<ProjectRuntimeStatus> {
+    let current_project_root = canonicalize_path(&context.project_root)?
+        .display()
+        .to_string();
+
+    let mut conflicting_roots = Vec::new();
+    let mut already_running = false;
+    for project in list_running_projects()? {
+        if project.name != config.name {
+            continue;
+        }
+
+        let normalized_root = canonicalize_path(Path::new(&project.project_root))
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| project.project_root.clone());
+
+        if normalized_root == current_project_root {
+            already_running = true;
+        } else {
+            conflicting_roots.push(project.project_root);
+        }
+    }
+
+    if !conflicting_roots.is_empty() {
+        eprintln!(
+            "error: cladding project '{}' is already running from a different PROJECT_ROOT",
+            config.name
+        );
+        eprintln!("current PROJECT_ROOT: {current_project_root}");
+        for root in conflicting_roots {
+            eprintln!("running PROJECT_ROOT: {root}");
+        }
+        return Err(Error::message("project already running from different PROJECT_ROOT"));
+    }
+
+    Ok(ProjectRuntimeStatus {
+        current_project_root,
+        already_running,
+    })
+}
+
+fn cmd_up(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
+    let status = project_runtime_status(context, &config)?;
+
+    if status.already_running {
+        println!(
+            "already running: {} ({})",
+            config.name, status.current_project_root
+        );
+        return Ok(());
+    }
+
+    check_required_binaries(context)?;
     let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
     check_required_images(&config)?;
     check_required_host_paths(context, &config, &network_settings)?;
@@ -459,6 +514,13 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
     }
 
     let config = load_cladding_config(&context.project_root)?;
+    let status = project_runtime_status(context, &config)?;
+    if !status.already_running {
+        eprintln!("error: cladding project '{}' is not running", config.name);
+        eprintln!("hint: run 'cladding up'");
+        return Err(Error::message("project is not running"));
+    }
+
     let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
 
     let project_dir = context
