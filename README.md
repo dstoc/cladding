@@ -1,17 +1,36 @@
-Run an agent in a constrained container environment where network access is intentionally narrow:
+Cladding lets you an agent in a constrained container environment where network access is intentionally narrow:
 
 - The agent runs in `cli-pod`.
 - Direct egress from the agent container is blocked except to:
-  - `sandbox-pod` (`mcp-run` on port `3000`)
+  - `sandbox-pod` ([`mcp-run`](crates/mcp-run/README.md) on port `3000`)
   - `proxy-pod` (Squid on port `8080`)
-- `mcp-run` only executes commands allowed by Rego policy modules in `.cladding/config/sandbox_commands/` (templates under [`config-template/sandbox_commands/`](config-template/sandbox_commands/)).
+- [`mcp-run`](crates/mcp-run/README.md) only executes commands allowed by Rego policy modules in `.cladding/config/sandbox_commands/` (templates under [`config-template/sandbox_commands/`](config-template/sandbox_commands/)).
 - Outbound HTTP(S) from both CLI and sandbox is forced through Squid, which only permits domains from:
   - `.cladding/config/cli_domains.lst` (template: [`config-template/cli_domains.lst`](config-template/cli_domains.lst))
   - `.cladding/config/sandbox_domains.lst` (template: [`config-template/sandbox_domains.lst`](config-template/sandbox_domains.lst))
 
-In short: the agent cannot freely access the network; it can delegate commands to `mcp-run` via MCP or the [`run-remote`](crates/mcp-run/src/bin/run-remote.rs) binary, where any external network path is gated by command policy plus domain allowlists.
+In short: the agent cannot freely access the network; it can delegate commands to [`mcp-run`](crates/mcp-run/README.md) via MCP or the [`run-remote`](crates/mcp-run/src/bin/run-remote.rs) binary, where any external network path is gated by command policy plus domain allowlists.
 
-For `mcp-run` server/tool API, policy authoring, and endpoint examples, see [`crates/mcp-run/README.md`](crates/mcp-run/README.md).
+## Use Cases
+
+* **Minimize Risk:** Add a layer of protection when executing autonomous agents in `--yolo` mode.
+* **Avoid Exfiltration:** Reduce the potential for data exfiltration from a controlled `claw`.
+
+**⚠️ Warning: This tool is not a silver bullet.**
+
+You must remain vigilant and practice defense-in-depth:
+
+**Restrict Access**
+
+Strictly control the commands, arguments, and network domains you authorize.
+
+**Verify Artifacts**
+
+Thoroughly review any generated code or output artifacts before executing or relying on them.
+
+**Assume Modification on Read-Write Mounts**
+
+Treat any file within a read-write filesystem as potentially altered. For example, if you share a project containing a `.git` directory, an agent could install malicious Git hooks that trigger arbitrary code execution the next time *you* run a `git` command. It could also alter your remotes, causing *you* to inadvertently push sensitive code to an unauthorized destination.
 
 ## Getting Started
 
