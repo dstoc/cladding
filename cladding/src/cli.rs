@@ -238,53 +238,35 @@ fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
 }
 
 fn cmd_check(context: &Context) -> Result<()> {
-    check_required_paths(context)?;
     check_required_binaries(context)?;
     let config = load_cladding_config(&context.project_root)?;
     let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
     check_required_host_paths(context, &config, &network_settings)?;
+    check_required_config_files(context)?;
+    check_required_scripts_files(context)?;
     check_required_images(&config)?;
     println!("check: ok");
     Ok(())
 }
 
-fn check_required_paths(context: &Context) -> Result<()> {
+fn check_required_binaries(context: &Context) -> Result<()> {
     let mut missing = false;
-    for name in ["config", "home", "scripts", "tools"] {
-        let path = context.project_root.join(name);
+    let bin_dir = context.project_root.join("tools/bin");
 
-        if is_broken_symlink(&path)? {
-            eprintln!("missing: {name} (broken symlink at {})", path.display());
-            if name == "config" {
-                eprintln!("hint: run cladding init");
-            } else if name == "scripts" {
-                eprintln!("hint: run cladding init");
-            } else {
-                eprintln!("hint: create or relink {}", path.display());
-            }
-            missing = true;
-            continue;
-        }
-
-        if !path.exists() {
-            eprintln!("missing: {name} ({})", path.display());
-            if name == "config" {
-                eprintln!("hint: run cladding init");
-            } else if name == "scripts" {
-                eprintln!("hint: run cladding init");
-            } else {
-                eprintln!("hint: mkdir -p {} (or symlink it)", path.display());
-            }
+    for name in ["mcp-run", "run-with-network"] {
+        let path = bin_dir.join(name);
+        if !is_executable(&path) {
+            eprintln!("missing: tools/bin/{name} ({})", path.display());
+            eprintln!("hint: run cladding build");
             missing = true;
         }
     }
 
     if missing {
-        return Err(Error::message("missing required paths"));
+        return Err(Error::message("missing tools binaries"));
     }
 
-    check_required_config_files(context)?;
-    check_required_scripts_files(context)
+    Ok(())
 }
 
 fn check_required_config_files(context: &Context) -> Result<()> {
@@ -328,26 +310,6 @@ fn check_required_scripts_files(context: &Context) -> Result<()> {
             dst.display()
         );
         return Err(Error::message("missing scripts files"));
-    }
-
-    Ok(())
-}
-
-fn check_required_binaries(context: &Context) -> Result<()> {
-    let mut missing = false;
-    let bin_dir = context.project_root.join("tools/bin");
-
-    for name in ["mcp-run", "run-with-network"] {
-        let path = bin_dir.join(name);
-        if !is_executable(&path) {
-            eprintln!("missing: tools/bin/{name} ({})", path.display());
-            eprintln!("hint: run cladding build");
-            missing = true;
-        }
-    }
-
-    if missing {
-        return Err(Error::message("missing tools binaries"));
     }
 
     Ok(())
@@ -418,12 +380,14 @@ fn check_required_images(config: &Config) -> Result<()> {
 }
 
 fn cmd_up(context: &Context) -> Result<()> {
-    check_required_paths(context)?;
     check_required_binaries(context)?;
 
     let config = load_cladding_config(&context.project_root)?;
     let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
     check_required_images(&config)?;
+    check_required_host_paths(context, &config, &network_settings)?;
+    check_required_config_files(context)?;
+    check_required_scripts_files(context)?;
     ensure_network_settings(&network_settings)?;
     let rendered = render_pods_yaml(
         &context.project_root,
