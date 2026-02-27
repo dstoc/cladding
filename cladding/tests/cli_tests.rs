@@ -5,10 +5,9 @@ use std::path::Path;
 
 #[test]
 fn render_pods_yaml_replaces_placeholders() {
-    let settings = resolve_network_settings("demo", "10.90.1.0/24").unwrap();
+    let settings = resolve_network_settings("demo", 1).unwrap();
     let config = Config {
         name: "demo".to_string(),
-        subnet: "10.90.1.0/24".to_string(),
         sandbox_image: "sandbox:image".to_string(),
         cli_image: "cli:image".to_string(),
         mounts: Vec::new(),

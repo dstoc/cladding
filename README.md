@@ -74,8 +74,6 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
   - generates `.cladding/config/cladding.json`
     - `name`: derived from current directory name or passed to `cladding init <name>` (alphanumeric)
   - default images: `localhost/cladding-default:latest` for both CLI and sandbox
-    - subnet: auto-selected from an unused `10.90.X.0/24`
-  - creates the Podman network `<name>_cladding_net`
 
 * Edit files under `.cladding/config/`:
 
@@ -201,13 +199,14 @@ flowchart TB
 ## Useful Commands
 
 ```bash
-cladding init [name]  # initialize .cladding, config and create network
+cladding init [name]  # initialize .cladding and config
 cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the cli-app container
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding down         # stop associated pods
 cladding destroy      # force-remove running containers
+cladding up           # starts the containers
 podman logs -f <name>-proxy-pod-proxy           # view proxy logs
 podman logs -f <name>-sandbox-pod-sandbox-app   # sandbox (mcp-run) logs
 ```

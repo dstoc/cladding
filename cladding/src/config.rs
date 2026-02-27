@@ -1,17 +1,14 @@
 use crate::error::{Error, Result};
-use crate::network::is_ipv4_cidr;
-use crate::podman::{list_podman_ipv4_subnets, podman_network_exists, podman_required};
 use anyhow::Context as _;
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub name: String,
-    pub subnet: String,
     pub sandbox_image: String,
     pub cli_image: String,
     pub mounts: Vec<MountConfig>,
@@ -43,7 +40,6 @@ pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
     })?;
 
     let name = get_config_string(&parsed, "name", &config_path)?;
-    let subnet = get_config_string(&parsed, "subnet", &config_path)?;
     let sandbox_image = get_config_string(&parsed, "sandbox_image", &config_path)?;
     let cli_image = get_config_string(&parsed, "cli_image", &config_path)?;
     let mut used_mount_paths = HashSet::new();
@@ -55,17 +51,8 @@ pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
         return Err(Error::message("invalid name"));
     }
 
-    if !is_ipv4_cidr(&subnet) {
-        eprintln!(
-            "error: config key 'subnet' must be in CIDR notation (example: 10.90.0.0/24)"
-        );
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid subnet format"));
-    }
-
     Ok(Config {
         name,
-        subnet,
         sandbox_image,
         cli_image,
         mounts,
@@ -77,44 +64,15 @@ pub fn write_default_cladding_config(
     default_sandbox_image: &str,
     default_cli_image: &str,
 ) -> Result<String> {
-    podman_required("podman (required for cladding init to choose name/subnet)")?;
-
     let name = if let Some(name_override) = name_override {
         normalize_cladding_name_arg(name_override)?
     } else {
         derive_cladding_name_from_pwd()?
     };
 
-    let network_name = format!("{}_cladding_net", name);
-    match podman_network_exists(&network_name)? {
-        Some(true) => {
-            eprintln!("error: network already exists for generated name: {network_name}");
-            eprintln!(
-                "hint: run cladding init from a different directory name, or remove the existing network"
-            );
-            return Err(Error::message("network already exists"));
-        }
-        Some(false) => {}
-        None => {
-            eprintln!("error: failed to check existing networks via podman");
-            return Err(Error::message("podman network exists failed"));
-        }
-    }
-
-    let subnet = pick_available_subnet().map_err(|code| {
-        match code {
-            1 => eprintln!("error: failed to inspect existing network subnets via podman"),
-            2 => eprintln!(
-                "error: could not find an unused subnet in 10.90.0.0/16 (/24 slices)"
-            ),
-            _ => eprintln!("error: unexpected failure while selecting subnet"),
-        }
-        Error::message("failed to select subnet")
-    })?;
-
     Ok(format!(
-        "{{\n  \"sandbox_image\": \"{}\",\n  \"cli_image\": \"{}\",\n  \"name\": \"{}\",\n  \"subnet\": \"{}\"\n}}\n",
-        default_sandbox_image, default_cli_image, name, subnet
+        "{{\n  \"sandbox_image\": \"{}\",\n  \"cli_image\": \"{}\",\n  \"name\": \"{}\"\n}}\n",
+        default_sandbox_image, default_cli_image, name
     ))
 }
 
@@ -295,21 +253,6 @@ fn normalize_cladding_name_arg(name_arg: &str) -> Result<String> {
         return Err(Error::message("invalid init name"));
     }
     Ok(name)
-}
-
-fn pick_available_subnet() -> std::result::Result<String, i32> {
-    let used_subnets = match list_podman_ipv4_subnets() {
-        Ok(subnets) => subnets,
-        Err(_) => return Err(1),
-    };
-    for i in 0..=255 {
-        let candidate = format!("10.90.{i}.0/24");
-        if !used_subnets.iter().any(|subnet| subnet == &candidate) {
-            return Ok(candidate);
-        }
-    }
-
-    Err(2)
 }
 
 #[cfg(test)]

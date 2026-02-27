@@ -5,10 +5,11 @@ use cladding::assets::{
 use cladding::config::{load_cladding_config, write_default_cladding_config, Config};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
-use cladding::network::resolve_network_settings;
+use cladding::network::{parse_cladding_pool_index, resolve_network_settings};
 use cladding::pods::{host_paths_from_rendered, render_pods_yaml};
 use cladding::podman::{
-    ensure_network_settings, list_running_projects, podman_build_image, podman_play_kube,
+    ensure_pool_network_settings, list_podman_network_subnets, EnsureNetworkOutcome,
+    list_running_project_networks, list_running_projects, podman_build_image, podman_play_kube,
     podman_required,
 };
 use anyhow::Context as _;
@@ -237,17 +238,13 @@ fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
         println!("generated: {}", cladding_config.display());
     }
 
-    let config = load_cladding_config(&context.project_root)?;
-    let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
-    ensure_network_settings(&network_settings)?;
-
     Ok(())
 }
 
 fn cmd_check(context: &Context) -> Result<()> {
     check_required_binaries(context)?;
     let config = load_cladding_config(&context.project_root)?;
-    let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
+    let network_settings = resolve_network_settings(&config.name, 0)?;
     check_required_host_paths(context, &config, &network_settings)?;
     check_required_config_files(context)?;
     check_required_scripts_files(context)?;
@@ -445,12 +442,11 @@ fn cmd_up(context: &Context) -> Result<()> {
     }
 
     check_required_binaries(context)?;
-    let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
+    let network_settings = select_available_network_settings(&config.name)?;
     check_required_images(&config)?;
     check_required_host_paths(context, &config, &network_settings)?;
     check_required_config_files(context)?;
     check_required_scripts_files(context)?;
-    ensure_network_settings(&network_settings)?;
     let rendered = render_pods_yaml(
         &context.project_root,
         &config,
@@ -461,7 +457,11 @@ fn cmd_up(context: &Context) -> Result<()> {
 
 fn cmd_down(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
-    let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
+    let network_settings = resolve_active_project_network_settings(
+        context,
+        &config,
+        "cladding down",
+    )?;
     let rendered = render_pods_yaml(
         &context.project_root,
         &config,
@@ -472,7 +472,11 @@ fn cmd_down(context: &Context) -> Result<()> {
 
 fn cmd_destroy(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
-    let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
+    let network_settings = resolve_active_project_network_settings(
+        context,
+        &config,
+        "cladding destroy",
+    )?;
 
     let status = Command::new("podman")
         .args([
@@ -521,7 +525,11 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
         return Err(Error::message("project is not running"));
     }
 
-    let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
+    let network_settings = resolve_active_project_network_settings(
+        context,
+        &config,
+        "cladding run",
+    )?;
 
     let project_dir = context
         .project_root
@@ -609,7 +617,11 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
 
 fn cmd_reload_proxy(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
-    let network_settings = resolve_network_settings(&config.name, &config.subnet)?;
+    let network_settings = resolve_active_project_network_settings(
+        context,
+        &config,
+        "cladding reload-proxy",
+    )?;
 
     let status = Command::new("podman")
         .args([
@@ -629,4 +641,127 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
 
 fn image_is_buildable_by_cladding(image: &str) -> bool {
     image == DEFAULT_CLADDING_BUILD_IMAGE
+}
+
+fn select_available_network_settings(name: &str) -> Result<cladding::network::NetworkSettings> {
+    let running = list_running_project_networks()?;
+    let mut used = std::collections::HashSet::new();
+    for project in running {
+        let Some(index) = parse_cladding_pool_index(&project.network) else {
+            continue;
+        };
+        used.insert(index);
+    }
+
+    let mut subnet_to_networks: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for entry in list_podman_network_subnets()? {
+        subnet_to_networks
+            .entry(entry.subnet)
+            .or_default()
+            .push(entry.name);
+    }
+
+    let mut mismatched = 0usize;
+    let mut attempted = 0usize;
+    let mut conflicts = 0usize;
+    for index in 0u16..=255 {
+        let index = index as u8;
+        if !used.contains(&index) {
+            let candidate_subnet = format!("10.90.{index}.0/24");
+            let candidate_network = format!("cladding-{index}");
+            if let Some(names) = subnet_to_networks.get(&candidate_subnet) {
+                if names.iter().any(|name| name != &candidate_network) {
+                    conflicts += 1;
+                    continue;
+                }
+            }
+            let candidate = resolve_network_settings(name, index)?;
+            attempted += 1;
+            match ensure_pool_network_settings(&candidate)? {
+                EnsureNetworkOutcome::Ready => return Ok(candidate),
+                EnsureNetworkOutcome::SubnetMismatch => {
+                    mismatched += 1;
+                    continue;
+                }
+            }
+        }
+    }
+
+    eprintln!("error: no free cladding network slots in pool cladding-0..cladding-255");
+    if mismatched > 0 {
+        eprintln!(
+            "hint: {mismatched} cladding-N networks exist with unexpected subnets; remove them with 'podman network rm cladding-N'"
+        );
+    } else if conflicts > 0 {
+        eprintln!(
+            "hint: {conflicts} pool subnets are already used by non-cladding networks; free those subnets or remove the conflicting networks"
+        );
+    } else if attempted == 0 {
+        eprintln!("hint: run 'cladding ps' and stop a running project with 'cladding down'");
+    } else {
+        eprintln!("hint: run 'cladding ps' and stop a running project with 'cladding down'");
+    }
+    Err(Error::message("no free cladding network slots"))
+}
+
+
+fn resolve_active_project_network_settings(
+    context: &Context,
+    config: &Config,
+    command_name: &str,
+) -> Result<cladding::network::NetworkSettings> {
+    let current_project_root = canonicalize_path(&context.project_root)?
+        .display()
+        .to_string();
+
+    let mut matched_network: Option<String> = None;
+    for project in list_running_project_networks()? {
+        if project.name != config.name {
+            continue;
+        }
+
+        let normalized_root = canonicalize_path(Path::new(&project.project_root))
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| project.project_root.clone());
+
+        if normalized_root != current_project_root {
+            continue;
+        }
+
+        if let Some(existing) = &matched_network {
+            if existing != &project.network {
+                eprintln!(
+                    "error: active project '{}' has inconsistent cladding network assignment",
+                    config.name
+                );
+                eprintln!("project_root: {current_project_root}");
+                eprintln!("networks: {existing}, {}", project.network);
+                return Err(Error::message("inconsistent active network"));
+            }
+            continue;
+        }
+
+        matched_network = Some(project.network);
+    }
+
+    let Some(network_name) = matched_network else {
+        eprintln!(
+            "error: could not resolve active cladding network for project '{}'",
+            config.name
+        );
+        eprintln!("hint: ensure the project is running, then retry '{command_name}'");
+        return Err(Error::message("missing active cladding network"));
+    };
+
+    let Some(index) = parse_cladding_pool_index(&network_name) else {
+        eprintln!(
+            "error: active project '{}' is attached to unexpected network '{}'",
+            config.name, network_name
+        );
+        eprintln!("hint: restart the project with 'cladding down' then 'cladding up'");
+        return Err(Error::message("unexpected active network"));
+    };
+
+    resolve_network_settings(&config.name, index)
 }
