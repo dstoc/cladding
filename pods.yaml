@@ -112,7 +112,7 @@ spec:
     - name: https_proxy
       value: "http://proxy-pod:8080"
     - name: no_proxy
-      value: "sandbox-pod,localhost,127.0.0.1"
+      value: "sandbox-pod,host.containers.internal,localhost,127.0.0.1"
 
   volumes:
   - name: scripts-dir
@@ -173,6 +173,9 @@ spec:
     volumeMounts:
     - name: scripts-dir
       mountPath: /opt/scripts
+      readOnly: true
+    - name: config-dir
+      mountPath: /opt/config
       readOnly: true
     command: ["/bin/sh", "/opt/scripts/jail_cli.sh"]
 
