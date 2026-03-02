@@ -3,7 +3,7 @@ use crate::fs_utils::set_permissions;
 use anyhow::Context as _;
 use include_dir::{Dir, include_dir};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const CONTAINERFILE_CLADDING: &str = include_str!("../../Containerfile.cladding");
 
@@ -59,11 +59,21 @@ pub fn scripts_top_level_entries() -> Vec<String> {
 }
 
 pub fn materialize_config(base_dir: &Path) -> Result<()> {
-    materialize_dir(base_dir, &CONFIG_DIR)
+    materialize_dir(base_dir, &CONFIG_DIR, false)
 }
 
 pub fn materialize_scripts(base_dir: &Path) -> Result<()> {
-    materialize_dir(base_dir, &SCRIPTS_DIR)
+    materialize_dir(base_dir, &SCRIPTS_DIR, false)
+}
+
+pub fn materialize_scripts_force(base_dir: &Path) -> Result<()> {
+    materialize_dir(base_dir, &SCRIPTS_DIR, true)
+}
+
+pub fn scripts_files() -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    collect_dir_files(&SCRIPTS_DIR, &mut files);
+    files
 }
 
 pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
@@ -80,15 +90,15 @@ pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn materialize_dir(base_dir: &Path, dir: &Dir<'_>) -> Result<()> {
+fn materialize_dir(base_dir: &Path, dir: &Dir<'_>, overwrite: bool) -> Result<()> {
     for subdir in dir.dirs() {
-        materialize_dir(base_dir, subdir)?;
+        materialize_dir(base_dir, subdir, overwrite)?;
     }
 
     for entry in dir.files() {
         let rel_path = entry.path();
         let target = base_dir.join(rel_path);
-        if target.exists() {
+        if target.exists() && !overwrite {
             continue;
         }
         if let Some(parent) = target.parent() {
@@ -106,6 +116,15 @@ fn materialize_dir(base_dir: &Path, dir: &Dir<'_>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn collect_dir_files(dir: &Dir<'_>, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+    for subdir in dir.dirs() {
+        collect_dir_files(subdir, files);
+    }
+    for entry in dir.files() {
+        files.push((entry.path().to_path_buf(), entry.contents().to_vec()));
+    }
 }
 
 pub fn containerfile() -> &'static str {
