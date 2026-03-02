@@ -20,6 +20,7 @@ pub struct MountConfig {
     pub host_path: Option<PathBuf>,
     pub volume: Option<String>,
     pub read_only: bool,
+    pub sandbox_only: bool,
 }
 
 pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
@@ -179,6 +180,15 @@ fn parse_mounts(
             None => false,
         };
 
+        let sandbox_only = match object.get("sandboxOnly") {
+            Some(value) => value.as_bool().ok_or_else(|| {
+                eprintln!("error: cladding.json invalid field 'mounts[{index}].sandboxOnly' (expected boolean)");
+                eprintln!("file: {}", config_path.display());
+                Error::message("invalid cladding.json")
+            })?,
+            None => false,
+        };
+
         if volume.is_some() && read_only {
             eprintln!(
                 "error: cladding.json invalid field 'mounts[{index}].readOnly' (readOnly not supported for volume mounts)"
@@ -198,6 +208,7 @@ fn parse_mounts(
             host_path,
             volume,
             read_only,
+            sandbox_only,
         });
     }
 
