@@ -1,6 +1,6 @@
 use cladding::assets::{
-    config_top_level_entries, materialize_config, materialize_scripts, scripts_top_level_entries,
-    write_embedded_tools,
+    config_top_level_entries, materialize_config, materialize_scripts, materialize_scripts_force,
+    scripts_files, scripts_top_level_entries, write_embedded_tools,
 };
 use cladding::config::{load_cladding_config, write_default_cladding_config, Config};
 use cladding::error::{Error, Result};
@@ -43,7 +43,12 @@ enum CommandSpec {
     /// Build local container images
     Build,
     /// Create config and default mount directories
-    Init { name: Option<String> },
+    Init {
+        name: Option<String>,
+        /// Overwrite scripts with embedded defaults
+        #[arg(long)]
+        update_scripts: bool,
+    },
     /// Check requirements
     Check,
     /// Start the system
@@ -76,7 +81,10 @@ pub fn run() -> Result<()> {
 
     match command {
         CommandSpec::Build => cmd_build(&context),
-        CommandSpec::Init { name } => cmd_init(&context, name.as_deref()),
+        CommandSpec::Init {
+            name,
+            update_scripts,
+        } => cmd_init(&context, name.as_deref(), update_scripts),
         CommandSpec::Check => cmd_check(&context),
         CommandSpec::Up => cmd_up(&context),
         CommandSpec::Down => cmd_down(&context),
@@ -181,7 +189,7 @@ fn cmd_build(context: &Context) -> Result<()> {
     Ok(())
 }
 
-fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
+fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool) -> Result<()> {
     let project_root = &context.project_root;
     let config_dir = project_root.join("config");
     let scripts_dir = project_root.join("scripts");
@@ -223,7 +231,11 @@ fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
         println!("initialized: {}", scripts_dir.display());
     }
 
-    materialize_scripts(&scripts_dir)?;
+    if update_scripts {
+        materialize_scripts_force(&scripts_dir)?;
+    } else {
+        materialize_scripts(&scripts_dir)?;
+    }
 
     if cladding_config.exists() {
         println!("cladding config already exists: {}", cladding_config.display());
@@ -314,6 +326,36 @@ fn check_required_scripts_files(context: &Context) -> Result<()> {
             dst.display()
         );
         return Err(Error::message("missing scripts files"));
+    }
+
+    Ok(())
+}
+
+fn warn_on_script_mismatch(context: &Context) -> Result<()> {
+    let dst = context.project_root.join("scripts");
+    let mut warned = false;
+
+    for (rel_path, contents) in scripts_files() {
+        let target = dst.join(&rel_path);
+        match fs::read(&target) {
+            Ok(existing) => {
+                if existing != contents {
+                    eprintln!(
+                        "warning: scripts/{} differs from embedded version",
+                        rel_path.display()
+                    );
+                    warned = true;
+                }
+            }
+            Err(_) => {
+                eprintln!("warning: scripts/{} is missing", rel_path.display());
+                warned = true;
+            }
+        }
+    }
+
+    if warned {
+        eprintln!("hint: run cladding init --update-scripts to re-materialize scripts");
     }
 
     Ok(())
@@ -447,6 +489,7 @@ fn cmd_up(context: &Context) -> Result<()> {
     check_required_host_paths(context, &config, &network_settings)?;
     check_required_config_files(context)?;
     check_required_scripts_files(context)?;
+    warn_on_script_mismatch(context)?;
     let rendered = render_pods_yaml(
         &context.project_root,
         &config,
