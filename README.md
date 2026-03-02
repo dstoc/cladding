@@ -70,7 +70,7 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
   ```
 
   `init`:
-  - copies template files into `.cladding/config/`
+  - copies template files into `.cladding/config/` and `.cladding/scripts/`
   - generates `.cladding/config/cladding.json`
     - `name`: derived from current directory name or passed to `cladding init <name>` (alphanumeric)
   - default images: `localhost/cladding-default:latest` for both CLI and sandbox
@@ -199,7 +199,7 @@ flowchart TB
 ## Useful Commands
 
 ```bash
-cladding init [name]  # initialize .cladding and config
+cladding init [name] [--update-scripts]  # initialize or update .cladding and config
 cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the cli-app container
