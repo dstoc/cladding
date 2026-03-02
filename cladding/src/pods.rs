@@ -83,6 +83,7 @@ struct CustomMount {
     mount_path: String,
     read_only: bool,
     volume: CustomVolume,
+    sandbox_only: bool,
 }
 
 #[derive(Clone)]
@@ -100,6 +101,7 @@ fn build_custom_mounts(config: &Config) -> Vec<CustomMount> {
         host_path,
         volume,
         read_only,
+        sandbox_only,
     } in &config.mounts
     {
         let volume = match (host_path, volume) {
@@ -116,6 +118,7 @@ fn build_custom_mounts(config: &Config) -> Vec<CustomMount> {
             mount_path: mount_path.clone(),
             read_only: *read_only,
             volume,
+            sandbox_only: *sandbox_only,
         });
     }
 
@@ -153,13 +156,13 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
         let Some(container_map) = container.as_mapping_mut() else {
             continue;
         };
-        let Some(name_value) = mapping_get(container_map, "name") else {
-            continue;
+        let container_name = match mapping_get(container_map, "name")
+            .and_then(|value| value.as_str())
+        {
+            Some(name) => name.to_string(),
+            None => continue,
         };
-        let Some(name) = name_value.as_str() else {
-            continue;
-        };
-        if name != "sandbox-app" && name != "cli-app" {
+        if container_name != "sandbox-app" && container_name != "cli-app" {
             continue;
         }
 
@@ -172,6 +175,9 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
         let mut next_custom_index = 0usize;
 
         for custom in custom_mounts {
+            if custom.sandbox_only && container_name != "sandbox-app" {
+                continue;
+            }
             if let Some(&idx) = mount_index.get(&custom.mount_path) {
                 let mount_name = mount_entries[idx].name.clone();
                 mount_entries[idx].read_only = custom.read_only;

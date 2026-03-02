@@ -126,9 +126,10 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
 * `hostPath` (optional, host bind mount; relative paths are resolved from `.cladding/`)
 * `volume` (optional, named volume; mutually exclusive with `hostPath`)
 * `readOnly` (optional, default `false`; ignored for `volume` mounts and forced `true` for emptyDir)
+* `sandboxOnly` (optional, default `false`; if true, mount applies only to `sandbox-app`)
 
 If neither `hostPath` nor `volume` is set, an `emptyDir` is used and mounted read-only.
-Mounts apply only to `cli-app` and `sandbox-app`; other pod mounts are fixed.
+Mounts apply only to `cli-app` and `sandbox-app` (or only `sandbox-app` when `sandboxOnly` is true); other pod mounts are fixed.
 
 Example:
 
@@ -137,7 +138,8 @@ Example:
   "mounts": [
     { "mount": "/home/user/workspace/.cache/npm", "volume": "npm-cache" },
     { "mount": "/opt/data", "hostPath": "../data", "readOnly": true },
-    { "mount": "/tmp/isolated" }
+    { "mount": "/tmp/isolated" },
+    { "mount": "/opt/sandbox-only", "hostPath": "../sandbox-data", "sandboxOnly": true }
   ]
 }
 ```
