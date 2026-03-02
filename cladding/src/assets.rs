@@ -81,6 +81,10 @@ pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
 }
 
 fn materialize_dir(base_dir: &Path, dir: &Dir<'_>) -> Result<()> {
+    for subdir in dir.dirs() {
+        materialize_dir(base_dir, subdir)?;
+    }
+
     for entry in dir.files() {
         let rel_path = entry.path();
         let target = base_dir.join(rel_path);
