@@ -319,9 +319,12 @@ fn build_volume_value(name: &str, custom: &CustomMount) -> Value {
             mapping.insert(Value::String("hostPath".into()), Value::Mapping(host_path));
         }
         CustomVolume::EmptyDir => {
-            let mut empty_dir = Mapping::new();
-            empty_dir.insert(Value::String("medium".into()), Value::String("Memory".into()));
-            mapping.insert(Value::String("emptyDir".into()), Value::Mapping(empty_dir));
+            let mut config_map = Mapping::new();
+            config_map.insert(
+                Value::String("name".into()),
+                Value::String("empty-mask".into()),
+            );
+            mapping.insert(Value::String("configMap".into()), Value::Mapping(config_map));
         }
         CustomVolume::Named { claim_name } => {
             let mut pvc = Mapping::new();

@@ -1,3 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: empty-mask
+data: {}
+
+---
 # ==========================================
 # POD 1: THE PROXY
 # ==========================================
@@ -138,8 +145,8 @@ spec:
       path: PROJECT_ROOT/..
       type: Directory
   - name: masked-cladding-dir
-    emptyDir:
-      medium: Memory
+    configMap:
+      name: empty-mask
   - name: tools-dir
     hostPath:
       path: PROJECT_ROOT/tools
@@ -244,8 +251,8 @@ spec:
       path: PROJECT_ROOT/..
       type: Directory
   - name: masked-cladding-dir
-    emptyDir:
-      medium: Memory
+    configMap:
+      name: empty-mask
   - name: tools-dir
     hostPath:
       path: PROJECT_ROOT/tools

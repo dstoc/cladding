@@ -125,10 +125,10 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
 * `mount` (required, absolute path in the container)
 * `hostPath` (optional, host bind mount; relative paths are resolved from `.cladding/`)
 * `volume` (optional, named volume; mutually exclusive with `hostPath`)
-* `readOnly` (optional, default `false`; ignored for `volume` mounts and forced `true` for emptyDir)
+* `readOnly` (optional, default `false`; ignored for `volume` mounts and forced `true` for empty mask mounts)
 * `sandboxOnly` (optional, default `false`; if true, mount applies only to `sandbox-app`)
 
-If neither `hostPath` nor `volume` is set, an `emptyDir` is used and mounted read-only.
+If neither `hostPath` nor `volume` is set, an empty ConfigMap is used and mounted read-only.
 Mounts apply only to `cli-app` and `sandbox-app` (or only `sandbox-app` when `sandboxOnly` is true); other pod mounts are fixed.
 
 Example:
