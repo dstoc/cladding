@@ -1,36 +1,16 @@
 Cladding lets you run an agent in a constrained container environment where network access is intentionally narrow:
 
 - The agent runs in `cli-pod`.
-- Direct egress from the agent container is blocked except to:
+- Direct egress from the agent container is [blocked](scripts/jail_cli.sh) except to:
   - `sandbox-pod` ([`mcp-run`](crates/mcp-run/README.md) on port `3000`)
   - `proxy-pod` (Squid on port `8080`)
-- [`mcp-run`](crates/mcp-run/README.md) only executes commands allowed by Rego policy modules in `.cladding/config/sandbox_commands/` (templates under [`config-template/sandbox_commands/`](config-template/sandbox_commands/)).
-- Outbound HTTP(S) from both CLI and sandbox is forced through Squid, which only permits domains from:
+  - `host.containers.internal` on ports specified in [`config-template/cli_host_ports.lst`](config-template/cli_host_ports.lst).
+- `sandbox-pod` serves [`mcp-run`](crates/mcp-run/README.md) which executes commands, but only those allowed by the Rego policy modules in `.cladding/config/sandbox_commands/` (templates under [`config-template/sandbox_commands/`](config-template/sandbox_commands/)).
+- HTTP(S) from both CLI and sandbox is allowed through Squid on `proxy-pod`, which only permits domains from:
   - `.cladding/config/cli_domains.lst` (template: [`config-template/cli_domains.lst`](config-template/cli_domains.lst))
   - `.cladding/config/sandbox_domains.lst` (template: [`config-template/sandbox_domains.lst`](config-template/sandbox_domains.lst))
 
 In short: the agent cannot freely access the network; it can delegate commands to [`mcp-run`](crates/mcp-run/README.md) via MCP or the [`run-remote`](crates/mcp-run/src/bin/run-remote.rs) binary, where any external network path is gated by command policy plus domain allowlists.
-
-## Use Cases
-
-* **Minimize Risk:** Add a layer of protection when executing autonomous agents in `--yolo` mode.
-* **Avoid Exfiltration:** Reduce the potential for data exfiltration from a controlled `claw`.
-
-**⚠️ Warning: This tool is not a silver bullet.**
-
-You must remain vigilant and practice defense-in-depth:
-
-**Restrict Access**
-
-Strictly control the commands, arguments, and network domains you authorize.
-
-**Verify Artifacts**
-
-Thoroughly review any generated code or output artifacts before executing or relying on them.
-
-**Assume Modification on Read-Write Mounts**
-
-Treat any file within a read-write filesystem as potentially altered. For example, if you share a project containing a `.git` directory, an agent could install malicious Git hooks that trigger arbitrary code execution the next time *you* run a `git` command. It could also alter your remotes, causing *you* to inadvertently push sensitive code to an unauthorized destination.
 
 ## Getting Started
 
@@ -39,9 +19,9 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
 
   ```bash
   podman run --rm -it \
-    -v $HOME/.local/bin:/usr/local/cargo/bin \
+    -v $HOME/.local/bin:/target/bin \
     rust:latest \
-    cargo install --git https://github.com/dstoc/cladding --bin cladding
+    cargo install --git https://github.com/dstoc/cladding cladding --root /target --force
   ```
 
   Alternative (install Rust locally first):
@@ -56,7 +36,7 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
   cargo install --path . --bin cladding
 
   # or install directly from git
-  cargo install --git https://github.com/dstoc/cladding --bin cladding
+  cargo install --git https://github.com/dstoc/cladding cladding
   ```
 
 * Initialize local config:
@@ -82,17 +62,6 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
   - `.cladding/config/cli_domains.lst` (template: [`config-template/cli_domains.lst`](config-template/cli_domains.lst))
   - `.cladding/config/sandbox_domains.lst` (template: [`config-template/sandbox_domains.lst`](config-template/sandbox_domains.lst))
 
-* Link or create:
-
-  * storage for the home directory at `.cladding/home` - `/home/user`
-  * project tools at `.cladding/tools` - `/opt/tools` (`/opt/tools/bin` is on `PATH`)
-
-  ```bash
-  ln -s /somewhere/home ./.cladding/home
-  ln -s /somewhere/mytools ./.cladding/tools
-  ```
-
-
 * Build images and refresh host-mounted binaries (`mcp-run`, `run-with-network`) in `.cladding/tools/bin`:
 
   ```bash
@@ -103,12 +72,6 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
 
   ```bash
   cladding up
-  ```
-
-* List running cladding projects:
-
-  ```bash
-  cladding ps
   ```
 
 * Run commands in the CLI container (workdir follows your host `cwd` relative to the directory containing `.cladding`):
@@ -128,7 +91,7 @@ Treat any file within a read-write filesystem as potentially altered. For exampl
 * `readOnly` (optional, default `false`; ignored for `volume` mounts and forced `true` for empty mask mounts)
 * `sandboxOnly` (optional, default `false`; if true, mount applies only to `sandbox-app`)
 
-If neither `hostPath` nor `volume` is set, an empty ConfigMap is used and mounted read-only.
+If neither `hostPath` nor `volume` is set, an empty ConfigMap is used and mounted read-only - this is intended for masking or hiding underlying files, as used to hide `.cladding` by default.
 Mounts apply only to `cli-app` and `sandbox-app` (or only `sandbox-app` when `sandboxOnly` is true); other pod mounts are fixed.
 
 Example:
