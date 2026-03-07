@@ -1,18 +1,18 @@
+use anyhow::Context as _;
 use cladding::assets::{
     config_top_level_entries, materialize_config, materialize_scripts, materialize_scripts_force,
     scripts_files, scripts_top_level_entries, write_embedded_tools,
 };
-use cladding::config::{load_cladding_config, write_default_cladding_config, Config};
+use cladding::config::{Config, load_cladding_config, write_default_cladding_config};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
 use cladding::network::{parse_cladding_pool_index, resolve_network_settings};
-use cladding::pods::{host_paths_from_rendered, render_pods_yaml};
 use cladding::podman::{
-    ensure_pool_network_settings, list_podman_network_subnets, EnsureNetworkOutcome,
+    EnsureNetworkOutcome, ensure_pool_network_settings, list_podman_network_subnets,
     list_running_project_networks, list_running_projects, podman_build_image, podman_play_kube,
     podman_required,
 };
-use anyhow::Context as _;
+use cladding::pods::{host_paths_from_rendered, render_pods_yaml};
 use clap::{ArgAction, Parser, Subcommand};
 use std::env;
 use std::fs;
@@ -154,8 +154,7 @@ fn cmd_build(context: &Context) -> Result<()> {
     }
 
     let tools_bin_dir = tools_dir.join("bin");
-    fs::create_dir_all(&tools_bin_dir)
-        .with_context(|| "failed to create tools directory")?;
+    fs::create_dir_all(&tools_bin_dir).with_context(|| "failed to create tools directory")?;
 
     write_embedded_tools(&tools_bin_dir)?;
 
@@ -238,7 +237,10 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
     }
 
     if cladding_config.exists() {
-        println!("cladding config already exists: {}", cladding_config.display());
+        println!(
+            "cladding config already exists: {}",
+            cladding_config.display()
+        );
     } else {
         let generated = write_default_cladding_config(
             name_override,
@@ -366,11 +368,7 @@ fn check_required_host_paths(
     config: &Config,
     network_settings: &cladding::network::NetworkSettings,
 ) -> Result<()> {
-    let rendered = render_pods_yaml(
-        &context.project_root,
-        config,
-        network_settings,
-    );
+    let rendered = render_pods_yaml(&context.project_root, config, network_settings);
 
     let mut missing = false;
     let mut seen = std::collections::HashSet::new();
@@ -407,7 +405,9 @@ fn check_required_images(config: &Config) -> Result<()> {
                 if image_is_buildable_by_cladding(image) {
                     eprintln!("hint: run cladding build");
                 } else {
-                    eprintln!("hint: pull/tag image '{image}', or set cladding.json image to a supported build target and run cladding build");
+                    eprintln!(
+                        "hint: pull/tag image '{image}', or set cladding.json image to a supported build target and run cladding build"
+                    );
                 }
                 missing = true;
             }
@@ -462,7 +462,9 @@ fn project_runtime_status(context: &Context, config: &Config) -> Result<ProjectR
         for root in conflicting_roots {
             eprintln!("running PROJECT_ROOT: {root}");
         }
-        return Err(Error::message("project already running from different PROJECT_ROOT"));
+        return Err(Error::message(
+            "project already running from different PROJECT_ROOT",
+        ));
     }
 
     Ok(ProjectRuntimeStatus {
@@ -490,36 +492,22 @@ fn cmd_up(context: &Context) -> Result<()> {
     check_required_config_files(context)?;
     check_required_scripts_files(context)?;
     warn_on_script_mismatch(context)?;
-    let rendered = render_pods_yaml(
-        &context.project_root,
-        &config,
-        &network_settings,
-    );
+    let rendered = render_pods_yaml(&context.project_root, &config, &network_settings);
     podman_play_kube(&rendered, &network_settings, false)
 }
 
 fn cmd_down(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
-    let network_settings = resolve_active_project_network_settings(
-        context,
-        &config,
-        "cladding down",
-    )?;
-    let rendered = render_pods_yaml(
-        &context.project_root,
-        &config,
-        &network_settings,
-    );
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding down")?;
+    let rendered = render_pods_yaml(&context.project_root, &config, &network_settings);
     podman_play_kube(&rendered, &network_settings, true)
 }
 
 fn cmd_destroy(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
-    let network_settings = resolve_active_project_network_settings(
-        context,
-        &config,
-        "cladding destroy",
-    )?;
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding destroy")?;
 
     let status = Command::new("podman")
         .args([
@@ -568,11 +556,8 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
         return Err(Error::message("project is not running"));
     }
 
-    let network_settings = resolve_active_project_network_settings(
-        context,
-        &config,
-        "cladding run",
-    )?;
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding run")?;
 
     let project_dir = context
         .project_root
@@ -591,7 +576,10 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
             project_dir.display(),
             cwd.display()
         );
-        eprintln!("hint: run cladding from {} or one of its subdirectories", project_dir.display());
+        eprintln!(
+            "hint: run cladding from {} or one of its subdirectories",
+            project_dir.display()
+        );
         Error::message("invalid working directory")
     })?;
 
@@ -624,7 +612,7 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
     } else {
         cmd.args([
             "exec",
-            "-i",
+            "-it",
             "-w",
             &container_workdir.display().to_string(),
             "--env",
@@ -660,11 +648,8 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
 
 fn cmd_reload_proxy(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
-    let network_settings = resolve_active_project_network_settings(
-        context,
-        &config,
-        "cladding reload-proxy",
-    )?;
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding reload-proxy")?;
 
     let status = Command::new("podman")
         .args([
@@ -747,7 +732,6 @@ fn select_available_network_settings(name: &str) -> Result<cladding::network::Ne
     }
     Err(Error::message("no free cladding network slots"))
 }
-
 
 fn resolve_active_project_network_settings(
     context: &Context,
