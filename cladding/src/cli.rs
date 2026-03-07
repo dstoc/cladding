@@ -192,6 +192,8 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
     let project_root = &context.project_root;
     let config_dir = project_root.join("config");
     let scripts_dir = project_root.join("scripts");
+    let home_dir = project_root.join("home");
+    let tools_dir = project_root.join("tools");
     let cladding_config = project_root.join("cladding.json");
     let cladding_gitignore = project_root.join(".gitignore");
 
@@ -228,6 +230,22 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
         fs::create_dir_all(&scripts_dir)
             .with_context(|| format!("failed to create {}", scripts_dir.display()))?;
         println!("initialized: {}", scripts_dir.display());
+    }
+
+    if home_dir.exists() || path_is_symlink(&home_dir) {
+        println!("home already exists: {}", home_dir.display());
+    } else {
+        fs::create_dir_all(&home_dir)
+            .with_context(|| format!("failed to create {}", home_dir.display()))?;
+        println!("initialized: {}", home_dir.display());
+    }
+
+    if tools_dir.exists() || path_is_symlink(&tools_dir) {
+        println!("tools already exists: {}", tools_dir.display());
+    } else {
+        fs::create_dir_all(&tools_dir)
+            .with_context(|| format!("failed to create {}", tools_dir.display()))?;
+        println!("initialized: {}", tools_dir.display());
     }
 
     if update_scripts {
