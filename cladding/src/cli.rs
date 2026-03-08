@@ -573,14 +573,7 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding run")?;
     let container_name = format!("{}-cli-app", network_settings.cli_pod_name);
-    run_podman_exec(
-        context,
-        &config,
-        "run",
-        &container_name,
-        env_vars,
-        args,
-    )
+    run_podman_exec(context, &config, "run", &container_name, env_vars, args)
 }
 
 fn cmd_run_with_scissors(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
@@ -607,9 +600,7 @@ fn run_podman_exec(
     args: &[String],
 ) -> Result<()> {
     if args.is_empty() {
-        eprintln!(
-            "usage: cladding {command_name} [--env KEY[=VALUE] ...] <command> [args...]"
-        );
+        eprintln!("usage: cladding {command_name} [--env KEY[=VALUE] ...] <command> [args...]");
         return Err(Error::message(format!("missing {command_name} command")));
     }
 
@@ -672,7 +663,7 @@ fn run_podman_exec(
     } else {
         cmd.args([
             "exec",
-            "-it",
+            "-i",
             "-w",
             &container_workdir.display().to_string(),
             "--env",
