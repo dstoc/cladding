@@ -64,6 +64,13 @@ enum CommandSpec {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run a command in the sandbox container
+    RunWithScissors {
+        #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
+        env: Vec<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Reload the squid proxy configuration
     ReloadProxy,
     /// Show running cladding projects
@@ -90,6 +97,7 @@ pub fn run() -> Result<()> {
         CommandSpec::Down => cmd_down(&context),
         CommandSpec::Destroy => cmd_destroy(&context),
         CommandSpec::Run { env, args } => cmd_run(&context, &env, &args),
+        CommandSpec::RunWithScissors { env, args } => cmd_run_with_scissors(&context, &env, &args),
         CommandSpec::ReloadProxy => cmd_reload_proxy(&context),
         CommandSpec::Ps => cmd_ps(&context),
     }
@@ -561,21 +569,56 @@ fn cmd_ps(_context: &Context) -> Result<()> {
 }
 
 fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
+    let config = load_cladding_config(&context.project_root)?;
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding run")?;
+    let container_name = format!("{}-cli-app", network_settings.cli_pod_name);
+    run_podman_exec(
+        context,
+        &config,
+        "run",
+        &container_name,
+        env_vars,
+        args,
+    )
+}
+
+fn cmd_run_with_scissors(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
+    let config = load_cladding_config(&context.project_root)?;
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding run-with-scissors")?;
+    let container_name = format!("{}-sandbox-app", network_settings.sandbox_pod_name);
+    run_podman_exec(
+        context,
+        &config,
+        "run-with-scissors",
+        &container_name,
+        env_vars,
+        args,
+    )
+}
+
+fn run_podman_exec(
+    context: &Context,
+    config: &Config,
+    command_name: &str,
+    container_name: &str,
+    env_vars: &[String],
+    args: &[String],
+) -> Result<()> {
     if args.is_empty() {
-        eprintln!("usage: cladding run [--env KEY[=VALUE] ...] <command> [args...]");
-        return Err(Error::message("missing run command"));
+        eprintln!(
+            "usage: cladding {command_name} [--env KEY[=VALUE] ...] <command> [args...]"
+        );
+        return Err(Error::message(format!("missing {command_name} command")));
     }
 
-    let config = load_cladding_config(&context.project_root)?;
-    let status = project_runtime_status(context, &config)?;
+    let status = project_runtime_status(context, config)?;
     if !status.already_running {
         eprintln!("error: cladding project '{}' is not running", config.name);
         eprintln!("hint: run 'cladding up'");
         return Err(Error::message("project is not running"));
     }
-
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding run")?;
 
     let project_dir = context
         .project_root
@@ -607,7 +650,6 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
     }
 
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
-    let container_name = format!("{}-cli-app", network_settings.cli_pod_name);
 
     let mut cmd = Command::new("podman");
     if interactive {
@@ -642,13 +684,15 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
         cmd.arg("--env").arg(env_var);
     }
 
-    cmd.arg(&container_name);
+    cmd.arg(container_name);
 
     for arg in args {
         cmd.arg(arg);
     }
 
-    let status = cmd.status().with_context(|| "failed to run podman exec")?;
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to run podman exec for {command_name}"))?;
 
     if let Some(code) = status.code() {
         if code == 0 {

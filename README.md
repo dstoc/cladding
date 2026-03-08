@@ -162,6 +162,7 @@ cladding init [name] [--update-scripts]  # initialize or update .cladding and co
 cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the cli-app container
+cladding run-with-scissors [--env KEY[=VALUE] ...] [cmd] # run a command (not checked by policy) in the sandbox-app container
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding down         # stop associated pods
 cladding destroy      # force-remove running containers
