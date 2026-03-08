@@ -19,6 +19,9 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use signal_hook::consts::signal::{SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 
 const DEFAULT_CLADDING_BUILD_IMAGE: &str = "localhost/cladding-default:latest";
 const DEFAULT_CLI_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
@@ -681,9 +684,37 @@ fn run_podman_exec(
         cmd.arg(arg);
     }
 
-    let status = cmd
-        .status()
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("failed to run podman exec for {command_name}"))?;
+
+    let kill_pattern = args.join(" ");
+    let mut signals = Signals::new([SIGINT, SIGTERM])
+        .with_context(|| "failed to install signal handlers")?;
+    let handle = signals.handle();
+    let container_name = container_name.to_string();
+    let signal_thread = thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            if !kill_pattern.is_empty() {
+                let _ = Command::new("podman")
+                    .args([
+                        "exec",
+                        &container_name,
+                        "pkill",
+                        "-f",
+                        &kill_pattern,
+                    ])
+                    .status();
+            }
+        }
+    });
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to run podman exec for {command_name}"))?;
+
+    handle.close();
+    let _ = signal_thread.join();
 
     if let Some(code) = status.code() {
         if code == 0 {
