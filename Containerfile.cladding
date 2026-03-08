@@ -1,4 +1,4 @@
-FROM debian:trixie-slim
+FROM node:24.14-trixie-slim
 
 ARG USERNAME=user
 ARG UID=1000
@@ -18,20 +18,25 @@ RUN apt-get update \
        python3 \
        python3-pip \
        python3-venv \
-       ripgrep \
-    && npm install -g @openai/codex@latest \
-    && npm install -g @google/gemini-cli@latest \
-    && if getent group $GID; then \
+       ripgrep
+
+RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN userdel node && if getent group $GID; then \
          group_name=$(getent group $GID | cut -d: -f1); \
          useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
        else \
          groupadd -g $GID $USERNAME && \
          useradd -m -u $UID -g $GID -s /bin/bash $USERNAME; \
        fi \
-    && chsh -s /bin/zsh $USERNAME \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    && chsh -s /bin/zsh $USERNAME
+
+ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-codex.json
+ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-gemini.json
+
+RUN npm install -g @openai/codex@latest \
+    && npm install -g @google/gemini-cli@latest
 
 USER $USERNAME
 WORKDIR /home/$USERNAME/workspace
 CMD ["zsh"]
-
