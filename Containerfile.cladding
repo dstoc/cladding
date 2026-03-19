@@ -33,9 +33,11 @@ RUN userdel node && if getent group $GID; then \
 
 ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-codex.json
 ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-gemini.json
+ADD https://registry.npmjs.org/@mariozechner/pi-coding-agent /tmp/npm-pi.json
 
 RUN npm install -g @openai/codex@latest \
-    && npm install -g @google/gemini-cli@latest
+    && npm install -g @google/gemini-cli@latest \
+    && npm install -g @mariozechner/pi-coding-agent
 
 USER $USERNAME
 WORKDIR /home/$USERNAME/workspace
