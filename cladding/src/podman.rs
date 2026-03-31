@@ -289,6 +289,15 @@ pub struct RunningProjectNetwork {
     pub network: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExposeProxy {
+    pub id: String,
+    pub name: String,
+    pub host_port: u16,
+    pub container_port: u16,
+    pub status: String,
+}
+
 pub fn list_running_projects() -> Result<Vec<RunningProject>> {
     let items = list_running_pod_items()?;
     let mut projects: HashMap<(String, String), usize> = HashMap::new();
@@ -360,11 +369,93 @@ pub fn list_running_project_networks() -> Result<Vec<RunningProjectNetwork>> {
     Ok(results)
 }
 
+pub fn list_project_expose_proxies(
+    project_name: &str,
+    project_root: &str,
+    include_stopped: bool,
+) -> Result<Vec<ExposeProxy>> {
+    let items = list_expose_proxy_items(project_name, include_stopped)?;
+    let mut results = Vec::new();
+
+    for item in items {
+        if item.project_root != project_root {
+            continue;
+        }
+        if item.target != "cli-app" {
+            continue;
+        }
+        results.push(item.proxy);
+    }
+
+    results.sort_by(|a, b| {
+        a.host_port
+            .cmp(&b.host_port)
+            .then_with(|| a.container_port.cmp(&b.container_port))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(results)
+}
+
+pub fn podman_container_exists(container_name: &str) -> Result<bool> {
+    let status = Command::new("podman")
+        .args(["container", "exists", container_name])
+        .status()
+        .with_context(|| "failed to run podman container exists")?;
+
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            eprintln!("error: failed to check whether container exists: {container_name}");
+            Err(Error::message("podman container exists failed"))
+        }
+    }
+}
+
+pub fn podman_remove_containers(
+    container_ids: &[String],
+    force: bool,
+    ignore_missing: bool,
+) -> Result<()> {
+    for container_id in container_ids {
+        let mut cmd = Command::new("podman");
+        cmd.arg("rm");
+        if force {
+            cmd.arg("-f");
+        }
+        cmd.arg(container_id);
+
+        let output = cmd
+            .output()
+            .with_context(|| "failed to run podman rm")?;
+
+        if output.status.success() {
+            continue;
+        }
+
+        if ignore_missing && remove_output_is_missing_container(&output) {
+            continue;
+        }
+
+        return ensure_success_output(&output, "podman rm");
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct RunningPodItem {
     pod_id: String,
     name: String,
     project_root: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExposeProxyItem {
+    proxy: ExposeProxy,
+    project_root: String,
+    target: String,
 }
 
 fn list_running_pod_items() -> Result<Vec<RunningPodItem>> {
@@ -421,6 +512,36 @@ fn list_running_pod_items() -> Result<Vec<RunningPodItem>> {
     }
 
     Ok(pods)
+}
+
+fn list_expose_proxy_items(project_name: &str, include_stopped: bool) -> Result<Vec<ExposeProxyItem>> {
+    let mut cmd = Command::new("podman");
+    cmd.arg("ps");
+    if include_stopped {
+        cmd.arg("-a");
+    }
+    cmd.args([
+        "--filter",
+        "label=cladding_expose=true",
+        "--filter",
+        &format!("label=cladding={project_name}"),
+        "--format",
+        "json",
+    ]);
+
+    let output = cmd
+        .output()
+        .with_context(|| "failed to run podman ps for expose proxies")?;
+
+    if !output.status.success() {
+        return ensure_success_output(&output, "podman ps").map(|_| Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value =
+        serde_json::from_str(&stdout).with_context(|| "failed to parse podman ps json output")?;
+
+    Ok(parse_expose_proxy_items(&parsed))
 }
 
 fn inspect_pool_network_for_pod(pod_id: &str) -> Result<Option<String>> {
@@ -520,4 +641,182 @@ fn parse_labels(value: &Value) -> HashMap<String, String> {
         _ => {}
     }
     labels
+}
+
+fn parse_expose_proxy_items(value: &Value) -> Vec<ExposeProxyItem> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+
+    let mut proxies = Vec::new();
+    for item in items {
+        let Some(proxy) = parse_expose_proxy_item(item) else {
+            continue;
+        };
+        proxies.push(proxy);
+    }
+    proxies
+}
+
+fn parse_expose_proxy_item(value: &Value) -> Option<ExposeProxyItem> {
+    let labels = value.get("Labels").map(parse_labels).unwrap_or_default();
+    if labels.get("cladding_expose").map(String::as_str) != Some("true") {
+        return None;
+    }
+
+    let project_root = labels.get("project_root")?.to_string();
+    let target = labels.get("cladding_expose_target")?.to_string();
+    let container_port = labels
+        .get("cladding_expose_container_port")?
+        .parse::<u16>()
+        .ok()?;
+    let host_port = labels
+        .get("cladding_expose_host_port")?
+        .parse::<u16>()
+        .ok()?;
+
+    let id = get_json_string(value, &["Id", "ID"])?;
+    let name = get_json_name(value)?;
+    let status =
+        get_json_string(value, &["Status"]).or_else(|| get_json_string(value, &["State"]))?;
+
+    Some(ExposeProxyItem {
+        proxy: ExposeProxy {
+            id,
+            name,
+            host_port,
+            container_port,
+            status,
+        },
+        project_root,
+        target,
+    })
+}
+
+fn get_json_string(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let Some(raw) = value.get(*key) else {
+            continue;
+        };
+        if let Some(string) = raw.as_str().filter(|s| !s.is_empty()) {
+            return Some(string.to_string());
+        }
+    }
+    None
+}
+
+fn get_json_name(value: &Value) -> Option<String> {
+    for key in ["Names", "Name"] {
+        let Some(raw) = value.get(key) else {
+            continue;
+        };
+        match raw {
+            Value::String(name) if !name.is_empty() => return Some(name.to_string()),
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(name) = item.as_str().filter(|s| !s.is_empty()) {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn remove_output_is_missing_container(output: &Output) -> bool {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    stderr.contains("no such container") || stderr.contains("no container with name or id")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_labels_supports_string_and_object_forms() {
+        let string_labels = parse_labels(&Value::String(
+            "cladding=demo, project_root=/tmp/demo, cladding_expose=true".into(),
+        ));
+        assert_eq!(string_labels.get("cladding").map(String::as_str), Some("demo"));
+        assert_eq!(
+            string_labels.get("project_root").map(String::as_str),
+            Some("/tmp/demo")
+        );
+
+        let object_labels = parse_labels(&json!({
+            "cladding": "demo",
+            "project_root": "/tmp/demo",
+            "cladding_expose": "true"
+        }));
+        assert_eq!(
+            object_labels.get("cladding_expose").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn parse_expose_proxy_items_filters_and_extracts_expected_fields() {
+        let parsed = json!([
+            {
+                "Id": "abc123",
+                "Names": ["demo-expose-3000-9000"],
+                "Status": "Up 3 seconds",
+                "Labels": {
+                    "cladding": "demo",
+                    "project_root": "/tmp/demo/.cladding",
+                    "cladding_expose": "true",
+                    "cladding_expose_target": "cli-app",
+                    "cladding_expose_container_port": "3000",
+                    "cladding_expose_host_port": "9000"
+                }
+            },
+            {
+                "Id": "skip-me",
+                "Names": ["not-an-expose-proxy"],
+                "Status": "Up 3 seconds",
+                "Labels": {
+                    "cladding": "demo"
+                }
+            }
+        ]);
+
+        let items = parse_expose_proxy_items(&parsed);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].proxy.id, "abc123");
+        assert_eq!(items[0].proxy.name, "demo-expose-3000-9000");
+        assert_eq!(items[0].proxy.container_port, 3000);
+        assert_eq!(items[0].proxy.host_port, 9000);
+        assert_eq!(items[0].project_root, "/tmp/demo/.cladding");
+        assert_eq!(items[0].target, "cli-app");
+    }
+
+    #[test]
+    fn parse_expose_proxy_item_accepts_string_names_and_state_fallback() {
+        let parsed = json!({
+            "ID": "xyz789",
+            "Names": "demo-expose-4000-9100",
+            "State": "running",
+            "Labels": "cladding=demo,project_root=/tmp/demo/.cladding,cladding_expose=true,cladding_expose_target=cli-app,cladding_expose_container_port=4000,cladding_expose_host_port=9100"
+        });
+
+        let item = parse_expose_proxy_item(&parsed).expect("proxy item");
+        assert_eq!(item.proxy.id, "xyz789");
+        assert_eq!(item.proxy.name, "demo-expose-4000-9100");
+        assert_eq!(item.proxy.status, "running");
+    }
+
+    #[test]
+    fn remove_output_is_missing_container_matches_expected_errors() {
+        let output = Output {
+            status: std::process::Command::new("true")
+                .status()
+                .expect("status"),
+            stdout: Vec::new(),
+            stderr: b"Error: no such container".to_vec(),
+        };
+        assert!(remove_output_is_missing_container(&output));
+    }
 }

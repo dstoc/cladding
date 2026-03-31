@@ -75,6 +75,17 @@ In short: the agent cannot freely access the network; it can delegate commands t
   cladding run --env GEMINI_API_KEY gemini
   ```
 
+* Temporarily publish a TCP port from `cli-app` to the host while the project is running:
+
+  ```bash
+  cladding expose 3000
+  cladding expose 3000 9000
+  cladding expose list
+  cladding expose stop 9000
+  ```
+
+  These mappings are runtime-only and are removed by `cladding down` and `cladding destroy`.
+
 ### Configuring mounts
 
 `cladding.json` supports a `mounts` list. Each entry has:
@@ -163,6 +174,9 @@ cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the cli-app container
 cladding run-with-scissors [--env KEY[=VALUE] ...] [cmd] # run a command (not checked by policy) in the sandbox-app container
+cladding expose <containerport> [hostport] # publish a cli-app TCP port to localhost
+cladding expose list # show active published ports for the current project
+cladding expose stop <hostport> # remove one published localhost port
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding down         # stop associated pods
 cladding destroy      # force-remove running containers
