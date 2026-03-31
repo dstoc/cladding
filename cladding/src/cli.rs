@@ -9,17 +9,20 @@ use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, pa
 use cladding::network::{parse_cladding_pool_index, resolve_network_settings};
 use cladding::podman::{
     EnsureNetworkOutcome, ensure_pool_network_settings, list_podman_network_subnets,
-    list_running_project_networks, list_running_projects, podman_build_image, podman_play_kube,
+    list_project_expose_proxies, list_running_project_networks, list_running_projects,
+    podman_build_image, podman_container_exists, podman_play_kube, podman_remove_containers,
     podman_required,
 };
 use cladding::pods::{host_paths_from_rendered, render_pods_yaml};
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
@@ -41,7 +44,7 @@ struct Cli {
     command: Option<CommandSpec>,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum CommandSpec {
     /// Build local container images
     Build,
@@ -78,6 +81,34 @@ enum CommandSpec {
     ReloadProxy,
     /// Show running cladding projects
     Ps,
+    /// Publish a cli-app TCP port to the host
+    Expose(ExposeArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
+struct ExposeArgs {
+    #[command(subcommand)]
+    command: Option<ExposeSubcommand>,
+    #[arg(value_name = "CONTAINERPORT", value_parser = clap::value_parser!(u16).range(1..=65535))]
+    container_port: Option<u16>,
+    #[arg(
+        value_name = "HOSTPORT",
+        value_parser = clap::value_parser!(u16).range(1..=65535),
+        requires = "container_port"
+    )]
+    host_port: Option<u16>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ExposeSubcommand {
+    /// Remove a published host port for the current project
+    Stop {
+        #[arg(value_name = "HOSTPORT", value_parser = clap::value_parser!(u16).range(1..=65535))]
+        host_port: u16,
+    },
+    /// List published host ports for the current project
+    List,
 }
 
 pub fn run() -> Result<()> {
@@ -103,6 +134,7 @@ pub fn run() -> Result<()> {
         CommandSpec::RunWithScissors { env, args } => cmd_run_with_scissors(&context, &env, &args),
         CommandSpec::ReloadProxy => cmd_reload_proxy(&context),
         CommandSpec::Ps => cmd_ps(&context),
+        CommandSpec::Expose(args) => cmd_expose(&context, &args),
     }
 }
 
@@ -459,10 +491,14 @@ struct ProjectRuntimeStatus {
     already_running: bool,
 }
 
-fn project_runtime_status(context: &Context, config: &Config) -> Result<ProjectRuntimeStatus> {
-    let current_project_root = canonicalize_path(&context.project_root)?
+fn current_project_root(context: &Context) -> Result<String> {
+    Ok(canonicalize_path(&context.project_root)?
         .display()
-        .to_string();
+        .to_string())
+}
+
+fn project_runtime_status(context: &Context, config: &Config) -> Result<ProjectRuntimeStatus> {
+    let current_project_root = current_project_root(context)?;
 
     let mut conflicting_roots = Vec::new();
     let mut already_running = false;
@@ -527,14 +563,20 @@ fn cmd_up(context: &Context) -> Result<()> {
 
 fn cmd_down(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
+    let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding down")?;
     let rendered = render_pods_yaml(&context.project_root, &config, &network_settings);
-    podman_play_kube(&rendered, &network_settings, true)
+    let pod_result = podman_play_kube(&rendered, &network_settings, true);
+    let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
+
+    pod_result?;
+    cleanup_result
 }
 
 fn cmd_destroy(context: &Context) -> Result<()> {
     let config = load_cladding_config(&context.project_root)?;
+    let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding destroy")?;
 
@@ -549,7 +591,11 @@ fn cmd_destroy(context: &Context) -> Result<()> {
         .status()
         .with_context(|| "failed to run podman rm")?;
 
-    cladding::podman::ensure_success(status, "podman rm")
+    let destroy_result = cladding::podman::ensure_success(status, "podman rm");
+    let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
+
+    destroy_result?;
+    cleanup_result
 }
 
 fn cmd_ps(_context: &Context) -> Result<()> {
@@ -569,6 +615,19 @@ fn cmd_ps(_context: &Context) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
+    match &args.command {
+        Some(ExposeSubcommand::Stop { host_port }) => cmd_expose_stop(context, *host_port),
+        Some(ExposeSubcommand::List) => cmd_expose_list(context),
+        None => {
+            let Some(container_port) = args.container_port else {
+                return Err(Error::message("missing container port"));
+            };
+            cmd_expose_create(context, container_port, args.host_port)
+        }
+    }
 }
 
 fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
@@ -759,6 +818,210 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
     cladding::podman::ensure_success(status, "podman exec")
 }
 
+fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u16>) -> Result<()> {
+    podman_required("podman (required for cladding expose)")?;
+
+    let config = load_cladding_config(&context.project_root)?;
+    let project_root = current_project_root(context)?;
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding expose")?;
+    let cli_container_name = format!("{}-cli-app", network_settings.cli_pod_name);
+
+    if !podman_container_exists(&cli_container_name)? {
+        eprintln!(
+            "error: target container '{}' is missing for project '{}'",
+            cli_container_name, config.name
+        );
+        eprintln!("hint: run 'cladding up'");
+        return Err(Error::message("missing cli container"));
+    }
+
+    let existing = list_project_expose_proxies(&config.name, &project_root, false)?;
+    if let Some(proxy) = existing
+        .iter()
+        .find(|proxy| proxy.container_port == container_port)
+    {
+        eprintln!(
+            "error: container port {container_port} is already exposed for project '{}' on localhost:{}",
+            config.name, proxy.host_port
+        );
+        return Err(Error::message("container port already exposed"));
+    }
+
+    let start_host_port = host_port.unwrap_or(container_port);
+    for candidate_host_port in start_host_port..=u16::MAX {
+        if !host_port_appears_available(candidate_host_port) {
+            continue;
+        }
+
+        match try_start_expose_proxy(
+            &config,
+            &project_root,
+            &network_settings,
+            container_port,
+            candidate_host_port,
+        )? {
+            ExposeCreateOutcome::Started => {
+                println!(
+                    "exposed: localhost:{candidate_host_port} -> {}:{container_port}",
+                    cli_container_name
+                );
+                return Ok(());
+            }
+            ExposeCreateOutcome::HostPortConflict => continue,
+        }
+    }
+
+    eprintln!(
+        "error: could not allocate a free host port starting at {start_host_port}"
+    );
+    Err(Error::message("could not allocate free host port"))
+}
+
+fn cmd_expose_stop(context: &Context, host_port: u16) -> Result<()> {
+    podman_required("podman (required for cladding expose stop)")?;
+
+    let config = load_cladding_config(&context.project_root)?;
+    let project_root = current_project_root(context)?;
+    let proxies = list_project_expose_proxies(&config.name, &project_root, true)?;
+    let matched: Vec<_> = proxies
+        .into_iter()
+        .filter(|proxy| proxy.host_port == host_port)
+        .collect();
+
+    if matched.is_empty() {
+        eprintln!(
+            "error: no expose proxy for project '{}' publishes localhost:{host_port}",
+            config.name
+        );
+        return Err(Error::message("host port not found"));
+    }
+
+    let ids: Vec<String> = matched.iter().map(|proxy| proxy.id.clone()).collect();
+    podman_remove_containers(&ids, true, true)?;
+    println!("stopped: localhost:{host_port}");
+    Ok(())
+}
+
+fn cmd_expose_list(context: &Context) -> Result<()> {
+    podman_required("podman (required for cladding expose list)")?;
+
+    let config = load_cladding_config(&context.project_root)?;
+    let project_root = current_project_root(context)?;
+    let proxies = list_project_expose_proxies(&config.name, &project_root, false)?;
+
+    if proxies.is_empty() {
+        println!("no exposed ports for project '{}'", config.name);
+        return Ok(());
+    }
+
+    println!("HOST PORT  CONTAINER PORT  STATUS");
+    for proxy in proxies {
+        println!(
+            "{:<9}  {:<14}  {}",
+            proxy.host_port, proxy.container_port, proxy.status
+        );
+    }
+
+    Ok(())
+}
+
+fn remove_project_expose_proxies(config: &Config, project_root: &str, force: bool) -> Result<()> {
+    let proxies = list_project_expose_proxies(&config.name, project_root, true)?;
+    if proxies.is_empty() {
+        return Ok(());
+    }
+
+    let ids: Vec<String> = proxies.into_iter().map(|proxy| proxy.id).collect();
+    podman_remove_containers(&ids, force, true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExposeCreateOutcome {
+    Started,
+    HostPortConflict,
+}
+
+fn try_start_expose_proxy(
+    config: &Config,
+    project_root: &str,
+    network_settings: &cladding::network::NetworkSettings,
+    container_port: u16,
+    host_port: u16,
+) -> Result<ExposeCreateOutcome> {
+    let container_name = unique_expose_proxy_name(&config.name, container_port, host_port);
+    let mut cmd = Command::new("podman");
+    cmd.arg("run")
+        .arg("-d")
+        .arg("--name")
+        .arg(&container_name)
+        .arg("--network")
+        .arg(&network_settings.network)
+        .arg("-p")
+        .arg(format!("{host_port}:{container_port}"));
+
+    for (key, value) in expose_proxy_labels(&config.name, project_root, container_port, host_port) {
+        cmd.arg("--label").arg(format!("{key}={value}"));
+    }
+
+    cmd.arg("alpine/socat")
+        .arg(format!("TCP-LISTEN:{container_port},fork,reuseaddr"))
+        .arg(format!("TCP:{}:{container_port}", network_settings.cli_ip));
+
+    let output = cmd
+        .output()
+        .with_context(|| "failed to run podman run for cladding expose")?;
+
+    if output.status.success() {
+        return Ok(ExposeCreateOutcome::Started);
+    }
+
+    if podman_output_is_bind_conflict(&output) {
+        return Ok(ExposeCreateOutcome::HostPortConflict);
+    }
+
+    cladding::podman::ensure_success_output(&output, "podman run")?;
+    Err(Error::message("podman run failed"))
+}
+
+fn expose_proxy_labels(
+    project_name: &str,
+    project_root: &str,
+    container_port: u16,
+    host_port: u16,
+) -> [(&'static str, String); 6] {
+    [
+        ("cladding", project_name.to_string()),
+        ("project_root", project_root.to_string()),
+        ("cladding_expose", "true".to_string()),
+        ("cladding_expose_target", "cli-app".to_string()),
+        (
+            "cladding_expose_container_port",
+            container_port.to_string(),
+        ),
+        ("cladding_expose_host_port", host_port.to_string()),
+    ]
+}
+
+fn unique_expose_proxy_name(project_name: &str, container_port: u16, host_port: u16) -> String {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("{project_name}-expose-{container_port}-{host_port}-{suffix}")
+}
+
+fn host_port_appears_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+fn podman_output_is_bind_conflict(output: &std::process::Output) -> bool {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    stderr.contains("address already in use")
+        || stderr.contains("port is already allocated")
+        || stderr.contains("bind")
+}
+
 fn image_is_buildable_by_cladding(image: &str) -> bool {
     image == DEFAULT_CLADDING_BUILD_IMAGE
 }
@@ -883,4 +1146,52 @@ fn resolve_active_project_network_settings(
     };
 
     resolve_network_settings(&config.name, index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expose_create_args_parse_without_subcommand() {
+        let cli = Cli::try_parse_from(["cladding", "expose", "3000", "9000"]).expect("cli parse");
+        match cli.command.expect("command") {
+            CommandSpec::Expose(args) => {
+                assert!(args.command.is_none());
+                assert_eq!(args.container_port, Some(3000));
+                assert_eq!(args.host_port, Some(9000));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expose_stop_subcommand_parses() {
+        let cli =
+            Cli::try_parse_from(["cladding", "expose", "stop", "9000"]).expect("cli parse");
+        match cli.command.expect("command") {
+            CommandSpec::Expose(ExposeArgs {
+                command: Some(ExposeSubcommand::Stop { host_port }),
+                ..
+            }) => assert_eq!(host_port, 9000),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expose_list_subcommand_parses() {
+        let cli = Cli::try_parse_from(["cladding", "expose", "list"]).expect("cli parse");
+        match cli.command.expect("command") {
+            CommandSpec::Expose(ExposeArgs {
+                command: Some(ExposeSubcommand::List),
+                ..
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expose_requires_action_or_ports() {
+        assert!(Cli::try_parse_from(["cladding", "expose"]).is_err());
+    }
 }
