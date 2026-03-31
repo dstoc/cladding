@@ -688,33 +688,41 @@ fn run_podman_exec(
         .spawn()
         .with_context(|| format!("failed to run podman exec for {command_name}"))?;
 
-    let kill_pattern = args.join(" ");
-    let mut signals = Signals::new([SIGINT, SIGTERM])
-        .with_context(|| "failed to install signal handlers")?;
-    let handle = signals.handle();
-    let container_name = container_name.to_string();
-    let signal_thread = thread::spawn(move || {
-        if signals.forever().next().is_some() {
-            if !kill_pattern.is_empty() {
-                let _ = Command::new("podman")
-                    .args([
-                        "exec",
-                        &container_name,
-                        "pkill",
-                        "-f",
-                        &kill_pattern,
-                    ])
-                    .status();
+    let mut signal_handle = None;
+    let mut signal_thread = None;
+    if !interactive {
+        let kill_pattern = args.join(" ");
+        let mut signals = Signals::new([SIGINT, SIGTERM])
+            .with_context(|| "failed to install signal handlers")?;
+        signal_handle = Some(signals.handle());
+        let container_name = container_name.to_string();
+        signal_thread = Some(thread::spawn(move || {
+            if signals.forever().next().is_some() {
+                if !kill_pattern.is_empty() {
+                    let _ = Command::new("podman")
+                        .args([
+                            "exec",
+                            &container_name,
+                            "pkill",
+                            "-f",
+                            &kill_pattern,
+                        ])
+                        .status();
+                }
             }
-        }
-    });
+        }));
+    }
 
     let status = child
         .wait()
         .with_context(|| format!("failed to run podman exec for {command_name}"))?;
 
-    handle.close();
-    let _ = signal_thread.join();
+    if let Some(handle) = signal_handle {
+        handle.close();
+    }
+    if let Some(thread) = signal_thread {
+        let _ = thread.join();
+    }
 
     if let Some(code) = status.code() {
         if code == 0 {
