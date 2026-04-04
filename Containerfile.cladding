@@ -1,3 +1,12 @@
+# Stage 1: Cache Invalidation (Canary)
+# Fetches the latest metadata for npm packages to enable conditional
+# cache invalidation based on remote registry state (ETag/Last-Modified).
+FROM alpine:3.19 AS canary
+ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-codex.json
+ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-gemini.json
+ADD https://registry.npmjs.org/@mariozechner/pi-coding-agent /tmp/npm-pi.json
+
+# Stage 2: Final Image
 FROM node:24.14-trixie-slim
 
 ARG USERNAME=user
@@ -31,13 +40,15 @@ RUN userdel node && if getent group $GID; then \
        fi \
     && chsh -s /bin/zsh $USERNAME
 
-ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-codex.json
-ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-gemini.json
-ADD https://registry.npmjs.org/@mariozechner/pi-coding-agent /tmp/npm-pi.json
+# Inherit cache invalidation from the canary stage and install global
+# npm packages. Metadata files are removed in the same layer to
+# keep the final image optimized.
+COPY --from=canary /tmp/npm-*.json /tmp/
 
 RUN npm install -g @openai/codex@latest \
     && npm install -g @google/gemini-cli@latest \
-    && npm install -g @mariozechner/pi-coding-agent
+    && npm install -g @mariozechner/pi-coding-agent@latest \
+    && rm /tmp/npm-*.json
 
 USER $USERNAME
 WORKDIR /home/$USERNAME/workspace
