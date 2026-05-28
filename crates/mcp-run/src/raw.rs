@@ -97,7 +97,11 @@ pub async fn raw_handler(
     let executable = input.executable.clone();
     let args_for_log = input.args.clone();
 
-    let mut child = match spawn_network_tool_process(&state.policy_engine, &state.default_cwd, input) {
+    let mut child = match spawn_network_tool_process(
+        &state.policy_engine,
+        &state.default_cwd,
+        input,
+    ) {
         Ok(child) => child,
         Err(ToolError::Validation(error)) => {
             tracing::warn!(command = %executable, args = ?args_for_log, error = %error, "raw request denied by policy");
@@ -474,8 +478,7 @@ mod tests {
             Some(path) => path,
             None => return,
         };
-        let (base_url, server_task) =
-            start_server(rego_engine_allow_commands(&[&true_path])).await;
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&true_path])).await;
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
@@ -506,8 +509,7 @@ mod tests {
             None => return,
         };
         let requested = MAX_OUTPUT_BYTES + 4096;
-        let (base_url, server_task) =
-            start_server(rego_engine_allow_commands(&[&head_path])).await;
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&head_path])).await;
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))

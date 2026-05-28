@@ -77,11 +77,7 @@ pub fn write_default_cladding_config(
     ))
 }
 
-fn get_config_string(
-    parsed: &serde_json::Value,
-    key: &str,
-    config_path: &Path,
-) -> Result<String> {
+fn get_config_string(parsed: &serde_json::Value, key: &str, config_path: &Path) -> Result<String> {
     parsed
         .get(key)
         .and_then(|value| value.as_str())
@@ -130,9 +126,7 @@ fn parse_mounts(
         ensure_absolute_mount_path(config_path, &format!("mounts[{index}].mount"), mount_path)?;
 
         if !used_mount_paths.insert(mount_path.to_string()) {
-            eprintln!(
-                "error: cladding.json duplicate mount path '{mount_path}' in mounts"
-            );
+            eprintln!("error: cladding.json duplicate mount path '{mount_path}' in mounts");
             eprintln!("file: {}", config_path.display());
             return Err(Error::message("duplicate mount path"));
         }
@@ -215,31 +209,25 @@ fn parse_mounts(
     Ok(mounts)
 }
 
-fn ensure_absolute_mount_path(
-    config_path: &Path,
-    field: &str,
-    mount_path: &str,
-) -> Result<()> {
+fn ensure_absolute_mount_path(config_path: &Path, field: &str, mount_path: &str) -> Result<()> {
     if Path::new(mount_path).is_absolute() {
         return Ok(());
     }
-    eprintln!(
-        "error: cladding.json invalid field '{field}' (mount path must be absolute)"
-    );
+    eprintln!("error: cladding.json invalid field '{field}' (mount path must be absolute)");
     eprintln!("file: {}", config_path.display());
     Err(Error::message("invalid cladding.json"))
 }
 
 fn is_lowercase_alnum(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 fn derive_cladding_name_from_pwd() -> Result<String> {
     let cwd = env::current_dir().with_context(|| "failed to determine current directory")?;
-    let raw_name = cwd
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("");
+    let raw_name = cwd.file_name().and_then(OsStr::to_str).unwrap_or("");
     let name = raw_name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -272,7 +260,10 @@ mod tests {
 
     #[test]
     fn normalize_init_name() {
-        assert_eq!(normalize_cladding_name_arg("MyProject").unwrap(), "myproject");
+        assert_eq!(
+            normalize_cladding_name_arg("MyProject").unwrap(),
+            "myproject"
+        );
         assert!(normalize_cladding_name_arg("bad-name").is_err());
     }
 }

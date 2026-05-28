@@ -28,7 +28,10 @@ fn main() {
 
     let release_dir = release_dir(&target_dir, release_target);
 
-    copy_bin(&release_dir.join(bin_name("mcp-run")), &out_dir.join("mcp-run"));
+    copy_bin(
+        &release_dir.join(bin_name("mcp-run")),
+        &out_dir.join("mcp-run"),
+    );
     copy_bin(
         &release_dir.join(bin_name("run-remote")),
         &out_dir.join("run-remote"),
@@ -44,7 +47,11 @@ fn release_dir(target_dir: &Path, target: Option<&str>) -> PathBuf {
 
 fn copy_bin(src: &Path, dst: &Path) {
     fs::copy(src, dst).unwrap_or_else(|err| {
-        panic!("failed to copy {} to {}: {err}", src.display(), dst.display())
+        panic!(
+            "failed to copy {} to {}: {err}",
+            src.display(),
+            dst.display()
+        )
     });
 }
 
@@ -60,7 +67,9 @@ fn build_locally(workspace_root: &Path, target_dir: &Path, target: Option<&str>)
         cargo.arg("--target").arg(target);
     }
 
-    let status = cargo.status().expect("failed to run cargo build for mcp-run");
+    let status = cargo
+        .status()
+        .expect("failed to run cargo build for mcp-run");
     if !status.success() {
         panic!("cargo build -p mcp-run failed");
     }

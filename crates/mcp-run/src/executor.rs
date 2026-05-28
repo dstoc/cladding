@@ -102,19 +102,19 @@ pub fn spawn_network_tool_process(
     input: RunNetworkToolInput,
 ) -> Result<Child, ToolError> {
     let user_env = input.env.unwrap_or_default();
-    let resolved_executable =
-        resolve_executable_path(&input.executable).map_err(|details| ToolError::Validation(
-            ValidationError::PathResolutionFailed {
-                command: input.executable.clone(),
-                details,
-            },
-        ))?;
-    let executable_hash = compute_executable_sha256_hex(&resolved_executable).map_err(|details| {
-        ToolError::Validation(ValidationError::HashResolutionFailed {
+    let resolved_executable = resolve_executable_path(&input.executable).map_err(|details| {
+        ToolError::Validation(ValidationError::PathResolutionFailed {
             command: input.executable.clone(),
             details,
         })
     })?;
+    let executable_hash =
+        compute_executable_sha256_hex(&resolved_executable).map_err(|details| {
+            ToolError::Validation(ValidationError::HashResolutionFailed {
+                command: input.executable.clone(),
+                details,
+            })
+        })?;
     policy_engine.validate_invocation(
         &input.executable,
         &resolved_executable,
@@ -168,7 +168,10 @@ pub(crate) fn resolve_executable_path(command: &str) -> Result<String, String> {
         {
             use std::os::unix::fs::PermissionsExt;
             let metadata = candidate.metadata().map_err(|error| {
-                format!("failed reading metadata for '{}': {error}", candidate.display())
+                format!(
+                    "failed reading metadata for '{}': {error}",
+                    candidate.display()
+                )
             })?;
             if metadata.permissions().mode() & 0o111 == 0 {
                 return Err(format!("'{}' is not executable", candidate.display()));
@@ -189,7 +192,10 @@ pub(crate) fn resolve_executable_path(command: &str) -> Result<String, String> {
         {
             use std::os::unix::fs::PermissionsExt;
             let metadata = candidate.metadata().map_err(|error| {
-                format!("failed reading metadata for '{}': {error}", candidate.display())
+                format!(
+                    "failed reading metadata for '{}': {error}",
+                    candidate.display()
+                )
             })?;
             if metadata.permissions().mode() & 0o111 == 0 {
                 continue;
@@ -369,7 +375,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_executable_path_preserves_symlink_in_path_lookup() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::fs::{PermissionsExt, symlink};
 
         let temp = tempfile::tempdir().expect("tempdir");
         let real_bin = temp.path().join("real-bin");

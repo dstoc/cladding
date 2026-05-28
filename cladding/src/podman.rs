@@ -1,6 +1,6 @@
 use crate::assets::containerfile;
 use crate::error::{Error, Result};
-use crate::network::{is_ipv4_cidr, parse_cladding_pool_index, NetworkSettings};
+use crate::network::{NetworkSettings, is_ipv4_cidr, parse_cladding_pool_index};
 use anyhow::Context as _;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -34,8 +34,10 @@ pub fn ensure_network_settings(network_settings: &NetworkSettings) -> Result<()>
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.contains(&format!("\"subnet\": \"{}\"", network_settings.network_subnet))
-            {
+            if !stdout.contains(&format!(
+                "\"subnet\": \"{}\"",
+                network_settings.network_subnet
+            )) {
                 eprintln!(
                     "error: network {} exists but is not on {}",
                     network_settings.network, network_settings.network_subnet
@@ -96,7 +98,10 @@ pub fn ensure_pool_network_settings(
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains(&format!("\"subnet\": \"{}\"", network_settings.network_subnet)) {
+            if stdout.contains(&format!(
+                "\"subnet\": \"{}\"",
+                network_settings.network_subnet
+            )) {
                 Ok(EnsureNetworkOutcome::Ready)
             } else {
                 Ok(EnsureNetworkOutcome::SubnetMismatch)
@@ -149,7 +154,9 @@ pub fn podman_build_image(image: &str, host_uid: u32, host_gid: u32) -> Result<(
             .with_context(|| "failed to write Containerfile to podman")?;
     }
 
-    let status = child.wait().with_context(|| "failed to wait on podman build")?;
+    let status = child
+        .wait()
+        .with_context(|| "failed to wait on podman build")?;
 
     ensure_success(status, "podman build")
 }
@@ -186,8 +193,7 @@ pub fn list_podman_network_subnets() -> Result<Vec<NetworkSubnet>> {
             .with_context(|| "failed to inspect podman network")?;
 
         if !output.status.success() {
-            return ensure_success_output(&output, "podman network inspect")
-                .map(|_| Vec::new());
+            return ensure_success_output(&output, "podman network inspect").map(|_| Vec::new());
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -204,11 +210,7 @@ pub fn list_podman_network_subnets() -> Result<Vec<NetworkSubnet>> {
     Ok(subnets)
 }
 
-pub fn podman_play_kube(
-    rendered: &str,
-    network: &NetworkSettings,
-    down: bool,
-) -> Result<()> {
+pub fn podman_play_kube(rendered: &str, network: &NetworkSettings, down: bool) -> Result<()> {
     let mut cmd = Command::new("podman");
     cmd.arg("play").arg("kube");
     if down {
@@ -228,7 +230,9 @@ pub fn podman_play_kube(
     cmd.arg("-");
     cmd.stdin(Stdio::piped());
 
-    let mut child = cmd.spawn().with_context(|| "failed to run podman play kube")?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed to run podman play kube")?;
 
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
@@ -237,7 +241,9 @@ pub fn podman_play_kube(
             .with_context(|| "failed to write pods.yaml to podman")?;
     }
 
-    let status = child.wait().with_context(|| "failed to wait on podman play kube")?;
+    let status = child
+        .wait()
+        .with_context(|| "failed to wait on podman play kube")?;
 
     ensure_success(status, "podman play kube")
 }
@@ -426,9 +432,7 @@ pub fn podman_remove_containers(
         }
         cmd.arg(container_id);
 
-        let output = cmd
-            .output()
-            .with_context(|| "failed to run podman rm")?;
+        let output = cmd.output().with_context(|| "failed to run podman rm")?;
 
         if output.status.success() {
             continue;
@@ -514,7 +518,10 @@ fn list_running_pod_items() -> Result<Vec<RunningPodItem>> {
     Ok(pods)
 }
 
-fn list_expose_proxy_items(project_name: &str, include_stopped: bool) -> Result<Vec<ExposeProxyItem>> {
+fn list_expose_proxy_items(
+    project_name: &str,
+    include_stopped: bool,
+) -> Result<Vec<ExposeProxyItem>> {
     let mut cmd = Command::new("podman");
     cmd.arg("ps");
     if include_stopped {
@@ -740,7 +747,10 @@ mod tests {
         let string_labels = parse_labels(&Value::String(
             "cladding=demo, project_root=/tmp/demo, cladding_expose=true".into(),
         ));
-        assert_eq!(string_labels.get("cladding").map(String::as_str), Some("demo"));
+        assert_eq!(
+            string_labels.get("cladding").map(String::as_str),
+            Some("demo")
+        );
         assert_eq!(
             string_labels.get("project_root").map(String::as_str),
             Some("/tmp/demo")
@@ -811,9 +821,7 @@ mod tests {
     #[test]
     fn remove_output_is_missing_container_matches_expected_errors() {
         let output = Output {
-            status: std::process::Command::new("true")
-                .status()
-                .expect("status"),
+            status: std::process::Command::new("true").status().expect("status"),
             stdout: Vec::new(),
             stderr: b"Error: no such container".to_vec(),
         };

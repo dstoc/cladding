@@ -14,10 +14,7 @@ pub fn render_pods_yaml(
     let rendered = PODS_YAML
         .replace("PROJECT_ROOT", &project_root.display().to_string())
         .replace("CLADDING_NAME", &config.name)
-        .replace(
-            "REPLACE_PROXY_POD_NAME",
-            &network_settings.proxy_pod_name,
-        )
+        .replace("REPLACE_PROXY_POD_NAME", &network_settings.proxy_pod_name)
         .replace(
             "REPLACE_SANDBOX_POD_NAME",
             &network_settings.sandbox_pod_name,
@@ -156,12 +153,11 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
         let Some(container_map) = container.as_mapping_mut() else {
             continue;
         };
-        let container_name = match mapping_get(container_map, "name")
-            .and_then(|value| value.as_str())
-        {
-            Some(name) => name.to_string(),
-            None => continue,
-        };
+        let container_name =
+            match mapping_get(container_map, "name").and_then(|value| value.as_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
         if container_name != "sandbox-app" && container_name != "cli-app" {
             continue;
         }
@@ -181,12 +177,7 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
             if let Some(&idx) = mount_index.get(&custom.mount_path) {
                 let mount_name = mount_entries[idx].name.clone();
                 mount_entries[idx].read_only = custom.read_only;
-                volume_index = ensure_volume_definition(
-                    volumes,
-                    volume_index,
-                    &mount_name,
-                    custom,
-                );
+                volume_index = ensure_volume_definition(volumes, volume_index, &mount_name, custom);
             } else {
                 next_custom_index += 1;
                 let mount_name = format!("custom-mount-{next_custom_index}");
@@ -196,12 +187,7 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
                     read_only: custom.read_only,
                 });
                 mount_index.insert(custom.mount_path.clone(), mount_entries.len() - 1);
-                volume_index = ensure_volume_definition(
-                    volumes,
-                    volume_index,
-                    &mount_name,
-                    custom,
-                );
+                volume_index = ensure_volume_definition(volumes, volume_index, &mount_name, custom);
             }
         }
 
@@ -311,7 +297,10 @@ fn ensure_volume_definition(
 
 fn build_volume_value(name: &str, custom: &CustomMount) -> Value {
     let mut mapping = Mapping::new();
-    mapping.insert(Value::String("name".into()), Value::String(name.to_string()));
+    mapping.insert(
+        Value::String("name".into()),
+        Value::String(name.to_string()),
+    );
     match &custom.volume {
         CustomVolume::HostPath { path } => {
             let mut host_path = Mapping::new();
@@ -324,7 +313,10 @@ fn build_volume_value(name: &str, custom: &CustomMount) -> Value {
                 Value::String("name".into()),
                 Value::String("empty-mask".into()),
             );
-            mapping.insert(Value::String("configMap".into()), Value::Mapping(config_map));
+            mapping.insert(
+                Value::String("configMap".into()),
+                Value::Mapping(config_map),
+            );
         }
         CustomVolume::Named { claim_name } => {
             let mut pvc = Mapping::new();

@@ -205,11 +205,17 @@ impl PolicyEngine {
                         "policy reload succeeded",
                     );
                 }
-                *self.state.write().expect("policy state write lock poisoned") = snapshot;
+                *self
+                    .state
+                    .write()
+                    .expect("policy state write lock poisoned") = snapshot;
             }
             Err(error) => {
                 tracing::error!(error = %error, "policy reload failed; deny-all activated");
-                *self.state.write().expect("policy state write lock poisoned") =
+                *self
+                    .state
+                    .write()
+                    .expect("policy state write lock poisoned") =
                     PolicySnapshot::deny_all(error.to_string());
             }
         }
@@ -291,8 +297,8 @@ fn load_policy_snapshot(sources: &PolicySources) -> Result<PolicySnapshot, Strin
         .as_ref()
         .ok_or_else(|| "POLICY_DIR is not configured".to_string())?;
 
-    let rego =
-        load_rego_policy_dir(policy_dir).map_err(|error| format!("rego policy load failed: {error}"))?;
+    let rego = load_rego_policy_dir(policy_dir)
+        .map_err(|error| format!("rego policy load failed: {error}"))?;
     Ok(PolicySnapshot::from_rego(rego))
 }
 
@@ -406,8 +412,11 @@ allow if {
     #[test]
     fn invalid_startup_policy_is_deny_all() {
         let dir = tempdir().expect("temp rego dir");
-        std::fs::write(dir.path().join("bad.rego"), "package sandbox.main\nallow if")
-            .expect("write bad rego");
+        std::fs::write(
+            dir.path().join("bad.rego"),
+            "package sandbox.main\nallow if",
+        )
+        .expect("write bad rego");
 
         let engine = PolicyEngine::from_sources(Some(dir.path().to_path_buf()));
         assert_eq!(engine.mode(), PolicyMode::DenyAll);
@@ -488,15 +497,17 @@ allow if {
 
         let engine = PolicyEngine::from_sources(Some(dir.path().to_path_buf()));
         assert_eq!(engine.mode(), PolicyMode::Rego);
-        assert!(engine
-            .validate_invocation(
-                "echo",
-                "/usr/bin/echo",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                &[],
-                &BTreeMap::new(),
-            )
-            .is_ok());
+        assert!(
+            engine
+                .validate_invocation(
+                    "echo",
+                    "/usr/bin/echo",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    &[],
+                    &BTreeMap::new(),
+                )
+                .is_ok()
+        );
 
         std::fs::write(
             dir.path().join("command.rego"),
@@ -522,15 +533,17 @@ allow if {
         write_rego_bundle(dir.path(), "echo");
         engine.reload();
         assert_eq!(engine.mode(), PolicyMode::Rego);
-        assert!(engine
-            .validate_invocation(
-                "echo",
-                "/usr/bin/echo",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                &[],
-                &BTreeMap::new(),
-            )
-            .is_ok());
+        assert!(
+            engine
+                .validate_invocation(
+                    "echo",
+                    "/usr/bin/echo",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    &[],
+                    &BTreeMap::new(),
+                )
+                .is_ok()
+        );
     }
 
     #[test]

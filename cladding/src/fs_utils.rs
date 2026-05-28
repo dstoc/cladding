@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 
 pub fn is_broken_symlink(path: &Path) -> Result<bool> {
-    let meta = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to stat {}", path.display()))?;
+    let meta =
+        fs::symlink_metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
     if meta.file_type().is_symlink() {
         return Ok(fs::metadata(path).is_err());
     }

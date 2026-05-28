@@ -15,6 +15,8 @@ use cladding::podman::{
 };
 use cladding::pods::{host_paths_from_rendered, render_pods_yaml};
 use clap::{ArgAction, Args, Parser, Subcommand};
+use signal_hook::consts::signal::{SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -23,8 +25,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use signal_hook::consts::signal::{SIGINT, SIGTERM};
-use signal_hook::iterator::Signals;
 
 const DEFAULT_CLADDING_BUILD_IMAGE: &str = "localhost/cladding-default:latest";
 const DEFAULT_CLI_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
@@ -751,21 +751,15 @@ fn run_podman_exec(
     let mut signal_thread = None;
     if !interactive {
         let kill_pattern = args.join(" ");
-        let mut signals = Signals::new([SIGINT, SIGTERM])
-            .with_context(|| "failed to install signal handlers")?;
+        let mut signals =
+            Signals::new([SIGINT, SIGTERM]).with_context(|| "failed to install signal handlers")?;
         signal_handle = Some(signals.handle());
         let container_name = container_name.to_string();
         signal_thread = Some(thread::spawn(move || {
             if signals.forever().next().is_some() {
                 if !kill_pattern.is_empty() {
                     let _ = Command::new("podman")
-                        .args([
-                            "exec",
-                            &container_name,
-                            "pkill",
-                            "-f",
-                            &kill_pattern,
-                        ])
+                        .args(["exec", &container_name, "pkill", "-f", &kill_pattern])
                         .status();
                 }
             }
@@ -872,9 +866,7 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
         }
     }
 
-    eprintln!(
-        "error: could not allocate a free host port starting at {start_host_port}"
-    );
+    eprintln!("error: could not allocate a free host port starting at {start_host_port}");
     Err(Error::message("could not allocate free host port"))
 }
 
@@ -995,10 +987,7 @@ fn expose_proxy_labels(
         ("project_root", project_root.to_string()),
         ("cladding_expose", "true".to_string()),
         ("cladding_expose_target", "cli-app".to_string()),
-        (
-            "cladding_expose_container_port",
-            container_port.to_string(),
-        ),
+        ("cladding_expose_container_port", container_port.to_string()),
         ("cladding_expose_host_port", host_port.to_string()),
     ]
 }
@@ -1167,8 +1156,7 @@ mod tests {
 
     #[test]
     fn expose_stop_subcommand_parses() {
-        let cli =
-            Cli::try_parse_from(["cladding", "expose", "stop", "9000"]).expect("cli parse");
+        let cli = Cli::try_parse_from(["cladding", "expose", "stop", "9000"]).expect("cli parse");
         match cli.command.expect("command") {
             CommandSpec::Expose(ExposeArgs {
                 command: Some(ExposeSubcommand::Stop { host_port }),
