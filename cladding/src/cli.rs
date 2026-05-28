@@ -29,6 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DEFAULT_CLADDING_BUILD_IMAGE: &str = "localhost/cladding-default:latest";
 const DEFAULT_CLI_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
 const DEFAULT_SANDBOX_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
+const CONTAINER_WORKSPACE_DIR: &str = "/home/user/workspace";
 
 #[derive(Debug, Clone)]
 struct Context {
@@ -683,24 +684,7 @@ fn run_podman_exec(
 
     let project_dir = canonicalize_path(&project_dir)?;
     let cwd = canonicalize_path(&cwd)?;
-
-    let workdir_rel = cwd.strip_prefix(&project_dir).map_err(|_| {
-        eprintln!(
-            "error: could not determine current path relative to project dir ({}): {}",
-            project_dir.display(),
-            cwd.display()
-        );
-        eprintln!(
-            "hint: run cladding from {} or one of its subdirectories",
-            project_dir.display()
-        );
-        Error::message("invalid working directory")
-    })?;
-
-    let mut container_workdir = PathBuf::from("/home/user/workspace");
-    if !workdir_rel.as_os_str().is_empty() {
-        container_workdir = container_workdir.join(workdir_rel);
-    }
+    let container_workdir = resolve_container_workdir(config, &project_dir, &cwd)?;
 
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
 
@@ -1137,9 +1121,70 @@ fn resolve_active_project_network_settings(
     resolve_network_settings(&config.name, index)
 }
 
+fn resolve_container_workdir(config: &Config, project_dir: &Path, cwd: &Path) -> Result<PathBuf> {
+    if let Some(custom_workspace_host_path) =
+        effective_cli_workspace_host_path(config).filter(|path| path.starts_with(project_dir))
+    {
+        let custom_workspace_host_path = canonicalize_path(&custom_workspace_host_path)?;
+        let workdir_rel = cwd.strip_prefix(&custom_workspace_host_path).map_err(|_| {
+            eprintln!(
+                "error: could not determine current path relative to configured workspace hostPath ({}): {}",
+                custom_workspace_host_path.display(),
+                cwd.display()
+            );
+            eprintln!(
+                "hint: run cladding from {} or one of its subdirectories",
+                custom_workspace_host_path.display()
+            );
+            Error::message("invalid working directory")
+        })?;
+        return Ok(join_container_workspace(workdir_rel));
+    }
+
+    let workdir_rel = cwd.strip_prefix(project_dir).map_err(|_| {
+        eprintln!(
+            "error: could not determine current path relative to project dir ({}): {}",
+            project_dir.display(),
+            cwd.display()
+        );
+        eprintln!(
+            "hint: run cladding from {} or one of its subdirectories",
+            project_dir.display()
+        );
+        Error::message("invalid working directory")
+    })?;
+
+    Ok(join_container_workspace(workdir_rel))
+}
+
+fn effective_cli_workspace_host_path(config: &Config) -> Option<PathBuf> {
+    let custom_mount = config
+        .mounts
+        .iter()
+        .find(|mount| mount.mount_path == CONTAINER_WORKSPACE_DIR && !mount.sandbox_only)?;
+
+    if custom_mount.ignore {
+        return None;
+    }
+
+    custom_mount.host_path.clone()
+}
+
+fn join_container_workspace(workdir_rel: &Path) -> PathBuf {
+    let mut container_workdir = PathBuf::from(CONTAINER_WORKSPACE_DIR);
+    if !workdir_rel.as_os_str().is_empty() {
+        container_workdir = container_workdir.join(workdir_rel);
+    }
+    container_workdir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cladding::config::MountConfig;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn expose_create_args_parse_without_subcommand() {
@@ -1181,5 +1226,69 @@ mod tests {
     #[test]
     fn expose_requires_action_or_ports() {
         assert!(Cli::try_parse_from(["cladding", "expose"]).is_err());
+    }
+
+    #[test]
+    fn resolve_container_workdir_uses_default_project_mapping() {
+        let temp = create_temp_dir("default-workdir");
+        let project_dir = temp.join("workspace");
+        let nested_dir = project_dir.join("src/module");
+        fs::create_dir_all(&nested_dir).expect("create nested dir");
+
+        let config = Config {
+            name: "demo".to_string(),
+            sandbox_image: "sandbox:image".to_string(),
+            cli_image: "cli:image".to_string(),
+            mounts: Vec::new(),
+        };
+
+        let resolved =
+            resolve_container_workdir(&config, &project_dir, &nested_dir).expect("workdir");
+        assert_eq!(
+            resolved,
+            PathBuf::from(CONTAINER_WORKSPACE_DIR).join("src/module")
+        );
+    }
+
+    #[test]
+    fn resolve_container_workdir_uses_custom_workspace_host_path() {
+        let temp = create_temp_dir("custom-workdir");
+        let project_dir = temp.join("project");
+        let custom_root = project_dir.join("workspace");
+        let nested_dir = custom_root.join("src/module");
+        fs::create_dir_all(&nested_dir).expect("create nested dir");
+
+        let config = Config {
+            name: "demo".to_string(),
+            sandbox_image: "sandbox:image".to_string(),
+            cli_image: "cli:image".to_string(),
+            mounts: vec![MountConfig {
+                mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
+                // `hostPath: "../workspace"` has already been resolved relative to `.cladding`.
+                host_path: Some(custom_root.clone()),
+                volume: None,
+                read_only: false,
+                sandbox_only: false,
+                ignore: false,
+            }],
+        };
+
+        let resolved =
+            resolve_container_workdir(&config, &project_dir, &nested_dir).expect("workdir");
+        assert_eq!(
+            resolved,
+            PathBuf::from(CONTAINER_WORKSPACE_DIR).join("src/module")
+        );
+    }
+
+    fn create_temp_dir(name: &str) -> PathBuf {
+        let unique = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            env::temp_dir().join(format!("cladding-{name}-{}-{}", std::process::id(), unique));
+        if path.exists() {
+            fs::remove_dir_all(&path).expect("cleanup stale temp dir");
+        }
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 }
