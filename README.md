@@ -95,6 +95,7 @@ In short: the agent cannot freely access the network; it can delegate commands t
 * `volume` (optional, named volume; mutually exclusive with `hostPath`)
 * `readOnly` (optional, default `false`; ignored for `volume` mounts and forced `true` for empty mask mounts)
 * `sandboxOnly` (optional, default `false`; if true, mount applies only to `sandbox-app`)
+* `ignore` (optional, default `false`; when true, removes an existing default mount at the same `mount` path instead of replacing it)
 
 If neither `hostPath` nor `volume` is set, an empty ConfigMap is used and mounted read-only - this is intended for masking or hiding underlying files, as used to hide `.cladding` by default.
 Mounts apply only to `cli-app` and `sandbox-app` (or only `sandbox-app` when `sandboxOnly` is true); other pod mounts are fixed.
@@ -126,7 +127,7 @@ Default mounts (as if expressed via `mounts`):
 }
 ```
 
-Default mounts may be overidden by adding an entry with the same `mount` value.
+Default mounts may be overridden by adding an entry with the same `mount` value, or removed by adding an entry with the same `mount` and `"ignore": true`.
 
 ## Architecture + Network Controls
 

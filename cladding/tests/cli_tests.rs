@@ -97,6 +97,7 @@ fn sandbox_only_mounts_skip_cli() {
             volume: None,
             read_only: true,
             sandbox_only: true,
+            ignore: false,
         }],
     };
     let rendered = render_pods_yaml(Path::new("/tmp/project/.cladding"), &config, &settings);
@@ -105,4 +106,52 @@ fn sandbox_only_mounts_skip_cli() {
 
     assert!(sandbox_mounts.contains(&"/opt/sandbox-only".to_string()));
     assert!(!cli_mounts.contains(&"/opt/sandbox-only".to_string()));
+}
+
+#[test]
+fn ignore_mount_removes_default_mount() {
+    let settings = resolve_network_settings("demo", 1).unwrap();
+    let config = Config {
+        name: "demo".to_string(),
+        sandbox_image: "sandbox:image".to_string(),
+        cli_image: "cli:image".to_string(),
+        mounts: vec![MountConfig {
+            mount_path: "/opt/config".to_string(),
+            host_path: None,
+            volume: None,
+            read_only: true,
+            sandbox_only: false,
+            ignore: true,
+        }],
+    };
+    let rendered = render_pods_yaml(Path::new("/tmp/project/.cladding"), &config, &settings);
+    let sandbox_mounts = container_mount_paths(&rendered, "sandbox-app");
+    let cli_mounts = container_mount_paths(&rendered, "cli-app");
+
+    assert!(!sandbox_mounts.contains(&"/opt/config".to_string()));
+    assert!(!cli_mounts.contains(&"/opt/config".to_string()));
+}
+
+#[test]
+fn sandbox_only_ignore_keeps_cli_default_mount() {
+    let settings = resolve_network_settings("demo", 1).unwrap();
+    let config = Config {
+        name: "demo".to_string(),
+        sandbox_image: "sandbox:image".to_string(),
+        cli_image: "cli:image".to_string(),
+        mounts: vec![MountConfig {
+            mount_path: "/opt/config".to_string(),
+            host_path: None,
+            volume: None,
+            read_only: true,
+            sandbox_only: true,
+            ignore: true,
+        }],
+    };
+    let rendered = render_pods_yaml(Path::new("/tmp/project/.cladding"), &config, &settings);
+    let sandbox_mounts = container_mount_paths(&rendered, "sandbox-app");
+    let cli_mounts = container_mount_paths(&rendered, "cli-app");
+
+    assert!(!sandbox_mounts.contains(&"/opt/config".to_string()));
+    assert!(cli_mounts.contains(&"/opt/config".to_string()));
 }

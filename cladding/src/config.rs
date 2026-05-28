@@ -21,6 +21,7 @@ pub struct MountConfig {
     pub volume: Option<String>,
     pub read_only: bool,
     pub sandbox_only: bool,
+    pub ignore: bool,
 }
 
 pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
@@ -183,9 +184,36 @@ fn parse_mounts(
             None => false,
         };
 
+        let ignore = match object.get("ignore") {
+            Some(value) => value.as_bool().ok_or_else(|| {
+                eprintln!(
+                    "error: cladding.json invalid field 'mounts[{index}].ignore' (expected boolean)"
+                );
+                eprintln!("file: {}", config_path.display());
+                Error::message("invalid cladding.json")
+            })?,
+            None => false,
+        };
+
         if volume.is_some() && read_only {
             eprintln!(
                 "error: cladding.json invalid field 'mounts[{index}].readOnly' (readOnly not supported for volume mounts)"
+            );
+            eprintln!("file: {}", config_path.display());
+            return Err(Error::message("invalid cladding.json"));
+        }
+
+        if ignore && (host_path.is_some() || volume.is_some()) {
+            eprintln!(
+                "error: cladding.json invalid field 'mounts[{index}]' (ignore cannot be combined with hostPath or volume)"
+            );
+            eprintln!("file: {}", config_path.display());
+            return Err(Error::message("invalid cladding.json"));
+        }
+
+        if ignore && object.get("readOnly").is_some() {
+            eprintln!(
+                "error: cladding.json invalid field 'mounts[{index}].readOnly' (readOnly not supported when ignore is true)"
             );
             eprintln!("file: {}", config_path.display());
             return Err(Error::message("invalid cladding.json"));
@@ -203,6 +231,7 @@ fn parse_mounts(
             volume,
             read_only,
             sandbox_only,
+            ignore,
         });
     }
 

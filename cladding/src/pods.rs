@@ -81,6 +81,7 @@ struct CustomMount {
     read_only: bool,
     volume: CustomVolume,
     sandbox_only: bool,
+    ignore: bool,
 }
 
 #[derive(Clone)]
@@ -99,6 +100,7 @@ fn build_custom_mounts(config: &Config) -> Vec<CustomMount> {
         volume,
         read_only,
         sandbox_only,
+        ignore,
     } in &config.mounts
     {
         let volume = match (host_path, volume) {
@@ -116,6 +118,7 @@ fn build_custom_mounts(config: &Config) -> Vec<CustomMount> {
             read_only: *read_only,
             volume,
             sandbox_only: *sandbox_only,
+            ignore: *ignore,
         });
     }
 
@@ -175,9 +178,16 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
                 continue;
             }
             if let Some(&idx) = mount_index.get(&custom.mount_path) {
+                if custom.ignore {
+                    mount_entries.remove(idx);
+                    mount_index = mount_index_by_path(&mount_entries);
+                    continue;
+                }
                 let mount_name = mount_entries[idx].name.clone();
                 mount_entries[idx].read_only = custom.read_only;
                 volume_index = ensure_volume_definition(volumes, volume_index, &mount_name, custom);
+            } else if custom.ignore {
+                continue;
             } else {
                 next_custom_index += 1;
                 let mount_name = format!("custom-mount-{next_custom_index}");
