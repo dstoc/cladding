@@ -1,0 +1,72 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Maintains a "chore: release X.Y.Z" PR from conventional commits. Merging
+  # that PR bumps the version, tags it, and cuts a GitHub Release.
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs['cladding--release_created'] }}
+      tag_name: ${{ steps.release.outputs['cladding--tag_name'] }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Only runs on the push that merges the release PR (release_created == true).
+  # Builds a release binary per target and attaches it to the fresh Release.
+  upload-binaries:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      # cladding's build.rs embeds the Linux mcp-run/run-remote helpers. On
+      # non-Linux hosts it builds them inside a container, so the macOS runner
+      # needs a working Podman machine before `cargo build`.
+      - name: Set up Podman (embedded mcp-run build)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          brew list podman >/dev/null 2>&1 || brew install podman
+          podman machine init
+          podman machine start
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p cladding
+      - name: Package
+        shell: bash
+        run: |
+          bin=cladding
+          staging="${bin}-${{ needs.release-please.outputs.tag_name }}-${{ matrix.target }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/${bin}" "$staging/"
+          cp README.md "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+          echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "$ASSET" --clobber
