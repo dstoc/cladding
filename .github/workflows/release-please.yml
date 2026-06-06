@@ -22,10 +22,48 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # cladding's build.rs embeds the Linux mcp-run/run-remote helpers, which run
+  # inside cladding's arm64 sandbox containers on Apple silicon. GitHub's macOS
+  # runners can't run a Linux container to build them, so cross-compile the
+  # aarch64-linux (glibc, matching the Debian base image) helpers here and hand
+  # them to the macOS job as an artifact.
+  build-helpers:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install aarch64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build helpers (aarch64 Linux)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: |
+          cargo build -p mcp-run --release --locked \
+            --target aarch64-unknown-linux-gnu \
+            --bin mcp-run --bin run-remote
+      - name: Stage helpers
+        run: |
+          mkdir helpers
+          cp target/aarch64-unknown-linux-gnu/release/mcp-run helpers/
+          cp target/aarch64-unknown-linux-gnu/release/run-remote helpers/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcp-run-helpers-aarch64-linux
+          path: helpers/
+
   # Only runs on the push that merges the release PR (release_created == true).
   # Builds a release binary per target and attaches it to the fresh Release.
   upload-binaries:
-    needs: release-please
+    needs: [release-please, build-helpers]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     permissions:
       contents: write
@@ -44,16 +82,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      # cladding's build.rs embeds the Linux mcp-run/run-remote helpers. On
-      # non-Linux hosts it builds them inside a container, so the macOS runner
-      # needs a working Podman machine before `cargo build`.
-      - name: Set up Podman (embedded mcp-run build)
+      # macOS can't run a Linux container to build the embedded helpers, so pull
+      # the prebuilt aarch64-linux binaries and let build.rs copy them in via the
+      # CLADDING_MCP_RUN_BIN / CLADDING_RUN_REMOTE_BIN escape hatch. On Linux the
+      # build.rs builds them locally, so this step is skipped.
+      - name: Fetch prebuilt helpers
+        if: runner.os == 'macOS'
+        uses: actions/download-artifact@v4
+        with:
+          name: mcp-run-helpers-aarch64-linux
+          path: helpers
+      - name: Point build.rs at prebuilt helpers
         if: runner.os == 'macOS'
         run: |
-          set -euo pipefail
-          brew list podman >/dev/null 2>&1 || brew install podman
-          podman machine init
-          podman machine start
+          echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/helpers/mcp-run" >> "$GITHUB_ENV"
+          echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/helpers/run-remote" >> "$GITHUB_ENV"
+      # --locked is safe: the cargo-workspace plugin keeps the root Cargo.lock
+      # in sync with the version bump on the release commit.
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p cladding
       - name: Package
