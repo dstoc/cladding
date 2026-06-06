@@ -273,7 +273,7 @@ pub fn ensure_success_output(output: &Output, context: &'static str) -> Result<(
 }
 
 fn command_exists(command: &str) -> bool {
-    env::var_os("PATH").map_or(false, |paths| {
+    env::var_os("PATH").is_some_and(|paths| {
         env::split_paths(&paths).any(|path| {
             let candidate = path.join(command);
             candidate.is_file()

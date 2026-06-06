@@ -413,14 +413,14 @@ mod tests {
 
     fn assert_has_event(events: &[RawStreamEvent], expected: &str) {
         assert!(
-            events.iter().any(|event| match (expected, event) {
-                ("start", RawStreamEvent::Start {}) => true,
-                ("stdout", RawStreamEvent::Stdout { .. }) => true,
-                ("stderr", RawStreamEvent::Stderr { .. }) => true,
-                ("exit", RawStreamEvent::Exit { .. }) => true,
-                ("error", RawStreamEvent::Error { .. }) => true,
-                _ => false,
-            }),
+            events.iter().any(|event| matches!(
+                (expected, event),
+                ("start", RawStreamEvent::Start {})
+                    | ("stdout", RawStreamEvent::Stdout { .. })
+                    | ("stderr", RawStreamEvent::Stderr { .. })
+                    | ("exit", RawStreamEvent::Exit { .. })
+                    | ("error", RawStreamEvent::Error { .. })
+            )),
             "missing expected event: {expected}",
         );
     }

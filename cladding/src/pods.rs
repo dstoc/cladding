@@ -203,7 +203,7 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
 
         *volume_mounts = mount_entries
             .into_iter()
-            .map(|entry| entry.to_value())
+            .map(|entry| entry.into_value())
             .collect();
     }
 
@@ -218,7 +218,7 @@ struct VolumeMountEntry {
 }
 
 impl VolumeMountEntry {
-    fn to_value(self) -> Value {
+    fn into_value(self) -> Value {
         let mut mapping = Mapping::new();
         mapping.insert(Value::String("name".into()), Value::String(self.name));
         mapping.insert(
@@ -239,17 +239,17 @@ fn parse_volume_mounts(volume_mounts: &[Value]) -> Vec<VolumeMountEntry> {
             continue;
         };
         let name = mapping
-            .get(&Value::String("name".into()))
+            .get(Value::String("name".into()))
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
         let mount_path = mapping
-            .get(&Value::String("mountPath".into()))
+            .get(Value::String("mountPath".into()))
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
         let read_only = mapping
-            .get(&Value::String("readOnly".into()))
+            .get(Value::String("readOnly".into()))
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
 
@@ -279,7 +279,7 @@ fn volume_index_by_name(volumes: &[Value]) -> std::collections::HashMap<String, 
             continue;
         };
         let name = mapping
-            .get(&Value::String("name".into()))
+            .get(Value::String("name".into()))
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         if !name.is_empty() {
@@ -344,17 +344,17 @@ fn build_volume_value(name: &str, custom: &CustomMount) -> Value {
 }
 
 fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
-    mapping.get(&Value::String(key.into()))
+    mapping.get(Value::String(key.into()))
 }
 
 fn mapping_get_mut<'a>(value: &'a mut Value, key: &str) -> Option<&'a mut Value> {
     let mapping = value.as_mapping_mut()?;
-    mapping.get_mut(&Value::String(key.into()))
+    mapping.get_mut(Value::String(key.into()))
 }
 
 fn seq_get_mut_mapping<'a>(mapping: &'a mut Mapping, key: &str) -> Option<&'a mut Vec<Value>> {
     mapping
-        .get_mut(&Value::String(key.into()))?
+        .get_mut(Value::String(key.into()))?
         .as_sequence_mut()
 }
 

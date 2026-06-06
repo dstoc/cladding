@@ -370,11 +370,8 @@ mod tests {
         let second = Bytes::copy_from_slice(&lines[split..]);
 
         async fn handler(State(chunks): State<Vec<Bytes>>) -> Response {
-            let stream = futures_util::stream::iter(
-                chunks
-                    .into_iter()
-                    .map(|chunk| Ok::<Bytes, Infallible>(chunk)),
-            );
+            let stream =
+                futures_util::stream::iter(chunks.into_iter().map(Ok::<Bytes, Infallible>));
             let mut response = Response::new(Body::from_stream(stream));
             *response.status_mut() = StatusCode::OK;
             response.headers_mut().insert(

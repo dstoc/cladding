@@ -35,14 +35,14 @@ fn container_mount_paths(rendered: &str, container_name: &str) -> Vec<String> {
         let Some(mapping) = doc.as_mapping() else {
             continue;
         };
-        let Some(spec) = mapping.get(&Value::String("spec".into())) else {
+        let Some(spec) = mapping.get(Value::String("spec".into())) else {
             continue;
         };
         let Some(spec_mapping) = spec.as_mapping() else {
             continue;
         };
         let Some(containers) = spec_mapping
-            .get(&Value::String("containers".into()))
+            .get(Value::String("containers".into()))
             .and_then(Value::as_sequence)
         else {
             continue;
@@ -52,7 +52,7 @@ fn container_mount_paths(rendered: &str, container_name: &str) -> Vec<String> {
                 continue;
             };
             let Some(name) = container_mapping
-                .get(&Value::String("name".into()))
+                .get(Value::String("name".into()))
                 .and_then(Value::as_str)
             else {
                 continue;
@@ -61,7 +61,7 @@ fn container_mount_paths(rendered: &str, container_name: &str) -> Vec<String> {
                 continue;
             }
             let Some(mounts) = container_mapping
-                .get(&Value::String("volumeMounts".into()))
+                .get(Value::String("volumeMounts".into()))
                 .and_then(Value::as_sequence)
             else {
                 continue;
@@ -71,7 +71,7 @@ fn container_mount_paths(rendered: &str, container_name: &str) -> Vec<String> {
                     continue;
                 };
                 let Some(path) = mount_mapping
-                    .get(&Value::String("mountPath".into()))
+                    .get(Value::String("mountPath".into()))
                     .and_then(Value::as_str)
                 else {
                     continue;

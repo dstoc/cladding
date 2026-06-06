@@ -740,12 +740,10 @@ fn run_podman_exec(
         signal_handle = Some(signals.handle());
         let container_name = container_name.to_string();
         signal_thread = Some(thread::spawn(move || {
-            if signals.forever().next().is_some() {
-                if !kill_pattern.is_empty() {
-                    let _ = Command::new("podman")
-                        .args(["exec", &container_name, "pkill", "-f", &kill_pattern])
-                        .status();
-                }
+            if signals.forever().next().is_some() && !kill_pattern.is_empty() {
+                let _ = Command::new("podman")
+                    .args(["exec", &container_name, "pkill", "-f", &kill_pattern])
+                    .status();
             }
         }));
     }
@@ -1019,21 +1017,19 @@ fn select_available_network_settings(name: &str) -> Result<cladding::network::Ne
     }
 
     let mut mismatched = 0usize;
-    let mut attempted = 0usize;
     let mut conflicts = 0usize;
     for index in 0u16..=255 {
         let index = index as u8;
         if !used.contains(&index) {
             let candidate_subnet = format!("10.90.{index}.0/24");
             let candidate_network = format!("cladding-{index}");
-            if let Some(names) = subnet_to_networks.get(&candidate_subnet) {
-                if names.iter().any(|name| name != &candidate_network) {
-                    conflicts += 1;
-                    continue;
-                }
+            if let Some(names) = subnet_to_networks.get(&candidate_subnet)
+                && names.iter().any(|name| name != &candidate_network)
+            {
+                conflicts += 1;
+                continue;
             }
             let candidate = resolve_network_settings(name, index)?;
-            attempted += 1;
             match ensure_pool_network_settings(&candidate)? {
                 EnsureNetworkOutcome::Ready => return Ok(candidate),
                 EnsureNetworkOutcome::SubnetMismatch => {
@@ -1053,8 +1049,6 @@ fn select_available_network_settings(name: &str) -> Result<cladding::network::Ne
         eprintln!(
             "hint: {conflicts} pool subnets are already used by non-cladding networks; free those subnets or remove the conflicting networks"
         );
-    } else if attempted == 0 {
-        eprintln!("hint: run 'cladding ps' and stop a running project with 'cladding down'");
     } else {
         eprintln!("hint: run 'cladding ps' and stop a running project with 'cladding down'");
     }

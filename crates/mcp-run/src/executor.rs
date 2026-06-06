@@ -433,7 +433,7 @@ mod tests {
 
         assert_ne!(merged.get("PATH").map(String::as_str), Some("user-path"));
         if std::env::var_os("PATH").is_some() {
-            assert!(merged.get("PATH").is_some());
+            assert!(merged.contains_key("PATH"));
         } else {
             assert!(!merged.contains_key("PATH"));
         }
