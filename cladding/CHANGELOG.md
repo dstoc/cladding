@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/dstoc/cladding/compare/v0.1.1...v0.1.2) (2026-06-06)
+
+
+### Miscellaneous Chores
+
+* force 0.1.2 release for working binary pipeline ([95284f7](https://github.com/dstoc/cladding/commit/95284f77e99e278321c1f8a7fe3d835d9da90419))
+
 ## [0.1.1](https://github.com/dstoc/cladding/compare/v0.1.0...v0.1.1) (2026-06-06)
 
 
