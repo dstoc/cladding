@@ -1,0 +1,34 @@
+# Changelog
+
+## [0.1.1](https://github.com/dstoc/cladding/compare/v0.1.0...v0.1.1) (2026-06-06)
+
+
+### Features
+
+* `up` and `run` check project status, error on conflict ([ecc4737](https://github.com/dstoc/cladding/commit/ecc47373f3180c49ab3f435e7bae4a14f8d1ef5c))
+* add `cladding ps` ([6a9c13c](https://github.com/dstoc/cladding/commit/6a9c13ca895e315dc609b912278280ad23f61899))
+* add cladding expose &lt;cli-port&gt; [host-port] ([a661cb5](https://github.com/dstoc/cladding/commit/a661cb5a392fef05aee3c4731a368e7bedb474a8))
+* add run-with-scissors ([7ca34f6](https://github.com/dstoc/cladding/commit/7ca34f6bb278da9ef71b92c3ccf73a3d251c6435))
+* add sandbox-only mounts ([91c94c6](https://github.com/dstoc/cladding/commit/91c94c65c644028da03222d323fda13b323178dd))
+* add user configurable volumes/mounts ([bbca499](https://github.com/dstoc/cladding/commit/bbca499dba705b8475ea91e08781e4d0a7fb6764))
+* allocate network dynamically during `up` ([433418b](https://github.com/dstoc/cladding/commit/433418b4cfa1260bb77958327800dd0defcfb2e0))
+* allow ignore of default mounts ([730652f](https://github.com/dstoc/cladding/commit/730652fd6eec5c7ee45577adf1da5a6e4d85da4b))
+* check identifies missing scripts ([b869a92](https://github.com/dstoc/cladding/commit/b869a927e85e9ceb6e5750414c27f1e99e6b6de3))
+* cladding run hooks sigint/term to pass to container process ([fa54888](https://github.com/dstoc/cladding/commit/fa54888660f79b4ac91edf9ec7a6c055dd9be21e))
+* detect script changes and add `..init --update-scripts` ([e4d6a5d](https://github.com/dstoc/cladding/commit/e4d6a5d82d150c4e15e58b49aecaf0fa74d534e3))
+* init creates home, tools ([f031969](https://github.com/dstoc/cladding/commit/f0319695484e99000d2de278c0f7e0a3cf6901b6))
+* port cladding to rust ([5c4f5d5](https://github.com/dstoc/cladding/commit/5c4f5d57de099f2d58a3dab0eee030baaf058abc))
+* **run:** pass through --env X --env Y=Z ([ae3d76f](https://github.com/dstoc/cladding/commit/ae3d76f11bcfd0cd893b4fc5331ccb527fe591f8))
+
+
+### Bug Fixes
+
+* always pass -t in run ([74dc557](https://github.com/dstoc/cladding/commit/74dc55706d0c60c1e37baf2847927b15b4f32bcc))
+* cladding build always writes mcp-run/run-with-network ([a90cce8](https://github.com/dstoc/cladding/commit/a90cce83801aeb6e14aadc325fdf42b6bf96a959))
+* cladding run cwd resolution when /home/user/workspace is overridden ([3054a09](https://github.com/dstoc/cladding/commit/3054a0981bfe1fa51ba5f49d32671aea18be96be))
+* materialize directories recursively ([276b3f8](https://github.com/dstoc/cladding/commit/276b3f8a1032516787e5f70de43ba32e547cacb2))
+* only use pkill for non-interactive runs ([4176978](https://github.com/dstoc/cladding/commit/4176978bbefd6d00716070c5cc76a8fd29aabab7))
+* remove explicit path checks in favor of hostPath ([86fcc99](https://github.com/dstoc/cladding/commit/86fcc99da534a649c0749eed0ad924e6cae62d98))
+* revert to no tty for non-interactive run ([4d8093e](https://github.com/dstoc/cladding/commit/4d8093e6120474f850b7400605c5bea88e73ca26))
+* use empty config map instead of emptyDir for masking due to forced "tmpcopyup" ([37725f0](https://github.com/dstoc/cladding/commit/37725f0ccc7d362b74aef624a002236bcef9927c))
+* use podman if we need to cross-compile mcp-run for linux ([f85db77](https://github.com/dstoc/cladding/commit/f85db77e8e0245d2c75a01a8a6ddb60066162e87))
