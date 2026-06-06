@@ -9,12 +9,27 @@ fn main() {
 
     println!("cargo:rerun-if-changed=../crates/mcp-run/Cargo.toml");
     println!("cargo:rerun-if-changed=../crates/mcp-run/src");
+    println!("cargo:rerun-if-env-changed=CLADDING_MCP_RUN_BIN");
+    println!("cargo:rerun-if-env-changed=CLADDING_RUN_REMOTE_BIN");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // Escape hatch: when prebuilt Linux helpers are provided (e.g. a macOS
+    // release build that cannot run a Linux container), copy them straight in
+    // and skip building mcp-run. Both must be set together.
+    if let (Ok(mcp_run), Ok(run_remote)) = (
+        env::var("CLADDING_MCP_RUN_BIN"),
+        env::var("CLADDING_RUN_REMOTE_BIN"),
+    ) {
+        copy_bin(Path::new(&mcp_run), &out_dir.join("mcp-run"));
+        copy_bin(Path::new(&run_remote), &out_dir.join("run-remote"));
+        return;
+    }
 
     let target_triple = env::var("TARGET").ok();
     let build_target = env::var("CARGO_BUILD_TARGET").ok();
     let effective_target = build_target.or(target_triple);
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let (target_dir, release_target) = if cfg!(target_os = "linux") {
         let target_dir = out_dir.join("mcp-run-target");
         build_locally(workspace_root, &target_dir, effective_target.as_deref());
