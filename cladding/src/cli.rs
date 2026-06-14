@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 use cladding::assets::{
-    config_top_level_entries, materialize_config, materialize_scripts, materialize_scripts_force,
-    scripts_files, scripts_top_level_entries, write_embedded_tools,
+    materialize_config, materialize_scripts, materialize_scripts_force, scripts_files,
+    scripts_top_level_entries, write_embedded_tools,
 };
 use cladding::config::{Config, load_cladding_config, write_default_cladding_config};
 use cladding::error::{Error, Result};
@@ -64,7 +64,7 @@ enum CommandSpec {
     Down,
     /// Force-remove running containers
     Destroy,
-    /// Run a command in the cli container
+    /// Run a command in the agent container
     Run {
         #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
         env: Vec<String>,
@@ -82,7 +82,7 @@ enum CommandSpec {
     ReloadProxy,
     /// Show running cladding projects
     Ps,
-    /// Publish a cli-app TCP port to the host
+    /// Publish an agent TCP port to the host
     Expose(ExposeArgs),
 }
 
@@ -202,30 +202,30 @@ fn cmd_build(context: &Context) -> Result<()> {
 
     write_embedded_tools(&tools_bin_dir)?;
 
-    let mut cli_image_built = false;
-    if config.cli_image == DEFAULT_CLI_BUILD_IMAGE {
-        podman_build_image(&config.cli_image, host_uid, host_gid)?;
-        cli_image_built = true;
+    let mut agent_image_built = false;
+    if config.agent_image == DEFAULT_CLI_BUILD_IMAGE {
+        podman_build_image(&config.agent_image, host_uid, host_gid)?;
+        agent_image_built = true;
     } else {
         println!(
-            "skip: not building cli image (config cli_image is {}, build target is {})",
-            config.cli_image, DEFAULT_CLADDING_BUILD_IMAGE
+            "skip: not building agent image (config agent_image is {}, build target is {})",
+            config.agent_image, DEFAULT_CLADDING_BUILD_IMAGE
         );
     }
 
-    if config.sandbox_image == DEFAULT_SANDBOX_BUILD_IMAGE {
-        if config.sandbox_image == config.cli_image && cli_image_built {
+    if config.nw_sandbox_image == DEFAULT_SANDBOX_BUILD_IMAGE {
+        if config.nw_sandbox_image == config.agent_image && agent_image_built {
             println!(
-                "skip: sandbox image already built (config cli_image and sandbox_image are both {})",
-                config.sandbox_image
+                "skip: nw sandbox image already built (config agent_image and nw_sandbox_image are both {})",
+                config.nw_sandbox_image
             );
         } else {
-            podman_build_image(&config.sandbox_image, host_uid, host_gid)?;
+            podman_build_image(&config.nw_sandbox_image, host_uid, host_gid)?;
         }
     } else {
         println!(
-            "skip: not building sandbox image (config sandbox_image is {}, build target is {})",
-            config.sandbox_image, DEFAULT_CLADDING_BUILD_IMAGE
+            "skip: not building nw sandbox image (config nw_sandbox_image is {}, build target is {})",
+            config.nw_sandbox_image, DEFAULT_CLADDING_BUILD_IMAGE
         );
     }
 
@@ -319,10 +319,20 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
 
 fn cmd_check(context: &Context) -> Result<()> {
     check_required_binaries(context)?;
-    let config = load_cladding_config(&context.project_root)?;
+    let config_files_result = check_required_config_files(context);
+    let config_result = load_cladding_config(&context.project_root);
+    let config = match config_result {
+        Ok(config) => config,
+        Err(err) => {
+            if config_files_result.is_err() {
+                return Err(Error::message("check failed"));
+            }
+            return Err(err);
+        }
+    };
+    config_files_result?;
     let network_settings = resolve_network_settings(&config.name, 0)?;
     check_required_host_paths(context, &config, &network_settings)?;
-    check_required_config_files(context)?;
     check_required_scripts_files(context)?;
     check_required_images(&config)?;
     println!("check: ok");
@@ -352,13 +362,30 @@ fn check_required_binaries(context: &Context) -> Result<()> {
 fn check_required_config_files(context: &Context) -> Result<()> {
     let dst = context.project_root.join("config");
     let mut missing = false;
+    let mut legacy = false;
 
-    for name in config_top_level_entries() {
-        let path = dst.join(&name);
+    for (legacy_name, replacement) in legacy_config_entries() {
+        let path = dst.join(*legacy_name);
+        if path.exists() {
+            eprintln!(
+                "error: legacy config/{legacy_name} exists ({})",
+                path.display()
+            );
+            eprintln!("hint: replace config/{legacy_name} with config/{replacement}");
+            legacy = true;
+        }
+    }
+
+    for name in required_config_entries() {
+        let path = dst.join(name);
         if !path.exists() {
             eprintln!("missing: config/{name} ({})", path.display());
             missing = true;
         }
+    }
+
+    if legacy {
+        return Err(Error::message("legacy config entries"));
     }
 
     if missing {
@@ -370,6 +397,25 @@ fn check_required_config_files(context: &Context) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn required_config_entries() -> &'static [&'static str] {
+    &[
+        "agent_domains.lst",
+        "agent_host_ports.lst",
+        "nw_sandbox",
+        "nw_sandbox_domains.lst",
+        "squid.conf",
+    ]
+}
+
+fn legacy_config_entries() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("sandbox_commands", "nw_sandbox"),
+        ("sandbox_domains.lst", "nw_sandbox_domains.lst"),
+        ("cli_domains.lst", "agent_domains.lst"),
+        ("cli_host_ports.lst", "agent_host_ports.lst"),
+    ]
 }
 
 fn check_required_scripts_files(context: &Context) -> Result<()> {
@@ -455,7 +501,7 @@ fn check_required_host_paths(
 
 fn check_required_images(config: &Config) -> Result<()> {
     let mut missing = false;
-    for image in [&config.cli_image, &config.sandbox_image] {
+    for image in [&config.agent_image, &config.nw_sandbox_image] {
         let status = Command::new("podman")
             .args(["image", "exists", image])
             .status();
@@ -569,9 +615,11 @@ fn cmd_down(context: &Context) -> Result<()> {
         resolve_active_project_network_settings(context, &config, "cladding down")?;
     let rendered = render_pods_yaml(&context.project_root, &config, &network_settings);
     let pod_result = podman_play_kube(&rendered, &network_settings, true);
+    let legacy_cleanup_result = remove_legacy_runtime_pods(&config);
     let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
 
     pod_result?;
+    legacy_cleanup_result?;
     cleanup_result
 }
 
@@ -585,17 +633,19 @@ fn cmd_destroy(context: &Context) -> Result<()> {
         .args([
             "rm",
             "-f",
-            &network_settings.cli_pod_name,
-            &network_settings.sandbox_pod_name,
-            &network_settings.proxy_pod_name,
+            &format!("{}-agent", network_settings.agent_name),
+            &format!("{}-nw-sandbox", network_settings.sandbox_name),
+            &format!("{}-proxy", network_settings.proxy_name),
         ])
         .status()
         .with_context(|| "failed to run podman rm")?;
 
     let destroy_result = cladding::podman::ensure_success(status, "podman rm");
+    let legacy_cleanup_result = remove_legacy_runtime_pods(&config);
     let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
 
     destroy_result?;
+    legacy_cleanup_result?;
     cleanup_result
 }
 
@@ -635,7 +685,7 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
     let config = load_cladding_config(&context.project_root)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding run")?;
-    let container_name = format!("{}-cli-app", network_settings.cli_pod_name);
+    let container_name = format!("{}-agent", network_settings.agent_name);
     run_podman_exec(context, &config, "run", &container_name, env_vars, args)
 }
 
@@ -643,7 +693,7 @@ fn cmd_run_with_scissors(context: &Context, env_vars: &[String], args: &[String]
     let config = load_cladding_config(&context.project_root)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding run-with-scissors")?;
-    let container_name = format!("{}-sandbox-app", network_settings.sandbox_pod_name);
+    let container_name = format!("{}-nw-sandbox", network_settings.sandbox_name);
     run_podman_exec(
         context,
         &config,
@@ -781,7 +831,7 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
     let status = Command::new("podman")
         .args([
             "exec",
-            &format!("{}-proxy", network_settings.proxy_pod_name),
+            &format!("{}-proxy", network_settings.proxy_name),
             "squid",
             "-k",
             "reconfigure",
@@ -801,15 +851,15 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
     let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding expose")?;
-    let cli_container_name = format!("{}-cli-app", network_settings.cli_pod_name);
+    let agent_container_name = format!("{}-agent", network_settings.agent_name);
 
-    if !podman_container_exists(&cli_container_name)? {
+    if !podman_container_exists(&agent_container_name)? {
         eprintln!(
             "error: target container '{}' is missing for project '{}'",
-            cli_container_name, config.name
+            agent_container_name, config.name
         );
         eprintln!("hint: run 'cladding up'");
-        return Err(Error::message("missing cli container"));
+        return Err(Error::message("missing agent container"));
     }
 
     let existing = list_project_expose_proxies(&config.name, &project_root, false)?;
@@ -840,7 +890,7 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
             ExposeCreateOutcome::Started => {
                 println!(
                     "exposed: localhost:{candidate_host_port} -> {}:{container_port}",
-                    cli_container_name
+                    agent_container_name
                 );
                 return Ok(());
             }
@@ -910,6 +960,34 @@ fn remove_project_expose_proxies(config: &Config, project_root: &str, force: boo
     podman_remove_containers(&ids, force, true)
 }
 
+fn remove_legacy_runtime_pods(config: &Config) -> Result<()> {
+    let legacy_names = [
+        format!("{}-cli-pod", config.name),
+        format!("{}-sandbox-pod", config.name),
+        format!("{}-proxy-pod", config.name),
+    ];
+
+    for name in legacy_names {
+        let output = Command::new("podman")
+            .args(["pod", "rm", "-f", &name])
+            .output()
+            .with_context(|| "failed to run podman pod rm")?;
+        if output.status.success() || podman_pod_rm_output_is_missing(&output) {
+            continue;
+        }
+        return cladding::podman::ensure_success_output(&output, "podman pod rm");
+    }
+
+    Ok(())
+}
+
+fn podman_pod_rm_output_is_missing(output: &std::process::Output) -> bool {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    stderr.contains("no such pod")
+        || stderr.contains("no pod with name or id")
+        || stderr.contains("no pod with id or name")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExposeCreateOutcome {
     Started,
@@ -968,7 +1046,7 @@ fn expose_proxy_labels(
         ("cladding", project_name.to_string()),
         ("project_root", project_root.to_string()),
         ("cladding_expose", "true".to_string()),
-        ("cladding_expose_target", "cli-app".to_string()),
+        ("cladding_expose_target", "agent".to_string()),
         ("cladding_expose_container_port", container_port.to_string()),
         ("cladding_expose_host_port", host_port.to_string()),
     ]
@@ -1155,7 +1233,7 @@ fn effective_cli_workspace_host_path(config: &Config) -> Option<PathBuf> {
     let custom_mount = config
         .mounts
         .iter()
-        .find(|mount| mount.mount_path == CONTAINER_WORKSPACE_DIR && !mount.sandbox_only)?;
+        .find(|mount| mount.mount_path == CONTAINER_WORKSPACE_DIR && !mount.nw_sandbox_only)?;
 
     if custom_mount.ignore {
         return None;
@@ -1231,8 +1309,8 @@ mod tests {
 
         let config = Config {
             name: "demo".to_string(),
-            sandbox_image: "sandbox:image".to_string(),
-            cli_image: "cli:image".to_string(),
+            nw_sandbox_image: "sandbox:image".to_string(),
+            agent_image: "agent:image".to_string(),
             mounts: Vec::new(),
         };
 
@@ -1254,15 +1332,15 @@ mod tests {
 
         let config = Config {
             name: "demo".to_string(),
-            sandbox_image: "sandbox:image".to_string(),
-            cli_image: "cli:image".to_string(),
+            nw_sandbox_image: "sandbox:image".to_string(),
+            agent_image: "agent:image".to_string(),
             mounts: vec![MountConfig {
                 mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
                 // `hostPath: "../workspace"` has already been resolved relative to `.cladding`.
                 host_path: Some(custom_root.clone()),
                 volume: None,
                 read_only: false,
-                sandbox_only: false,
+                nw_sandbox_only: false,
                 ignore: false,
             }],
         };

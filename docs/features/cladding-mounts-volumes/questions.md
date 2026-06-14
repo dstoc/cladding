@@ -1,7 +1,7 @@
 # Questions: Cladding mounts + volumes
 
-1. Q: Which containers should apply the new `volumes` and `mounts` from `cladding.json` (e.g., `sandbox-app` only, `cli-app` only, both, or also proxy/init containers)?
-   A: Only `cli-app` and `sandbox-app`, with identical treatment.
+1. Q: Which containers should apply the new `volumes` and `mounts` from `cladding.json` (e.g., `nw-sandbox` only, `agent` only, both, or also proxy/init containers)?
+   A: Only `agent` and `nw-sandbox`, with identical treatment.
 2. Q: Should `volumes` create named Podman volumes (K8s `persistentVolumeClaim`-like), or should they be `hostPath` mounts? If named volumes, what naming scheme do you want (e.g., `<cladding_name>_<volume_name>`)?
    A: Podman volumes, named `<cladding_name>-<volume_name>`.
 3. Q: For the new `mounts` entries, should `mount` (mountPath) be required and unique per list, and should we error if two mounts target the same `mount` path?

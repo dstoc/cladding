@@ -2,7 +2,7 @@
 
 ## Objective
 Enable users to configure additional container mounts in `cladding.json` via a single `mounts` list, supporting:
-- Named Podman volumes mounted into both `cli-app` and `sandbox-app`.
+- Named Podman volumes mounted into both `agent` and `nw-sandbox`.
 - Bind mounts with explicit `mountPath`, optional `hostPath`, and `readOnly` semantics.
 - EmptyDir mounts when neither `hostPath` nor `volume` is provided.
 
@@ -23,7 +23,7 @@ This should extend the current fixed mount set without breaking existing behavio
        - `readOnly` (optional, default `false`).
        - `hostPath` and `volume` are mutually exclusive; error if both are set.
 2. **Containers targeted**
-   - Apply `volumes` and `mounts` only to `cli-app` and `sandbox-app`.
+   - Apply `volumes` and `mounts` only to `agent` and `nw-sandbox`.
    - Both pods receive identical mounts.
 3. **Named volumes**
    - A mount with `volume` creates/uses named Podman volume: `<cladding_name>-<volume>`.
@@ -49,7 +49,7 @@ This should extend the current fixed mount set without breaking existing behavio
    - Duplicate mount paths should be a hard error.
 
 ## Non-Goals
-- Changing which pods receive mounts beyond `cli-app` and `sandbox-app`.
+- Changing which pods receive mounts beyond `agent` and `nw-sandbox`.
 - Adding read-only options to named volumes.
 - Introducing mount propagation, subPath, or SELinux options.
 - Altering the existing default mount set (other than allowing overrides by path).

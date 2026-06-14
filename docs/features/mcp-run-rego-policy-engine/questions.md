@@ -36,7 +36,7 @@
   1. Policy directory with multiple `.rego` files.
   2. Single entrypoint file.
   3. Support both.
-- Answer: A folder (for example, `config/sandbox_commands`) containing `.rego` files.
+- Answer: A folder (for example, `config/nw_sandbox`) containing `.rego` files.
 - Decision/Impact: Superseded by Q7. Final contract uses `POLICY_DIR` for Rego directory policies, while `POLICY_FILE` remains for legacy JSON during transition.
 
 ## Q5 (resolved)

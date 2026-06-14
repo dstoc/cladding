@@ -387,7 +387,7 @@ pub fn list_project_expose_proxies(
         if item.project_root != project_root {
             continue;
         }
-        if item.target != "cli-app" {
+        if item.target != "agent" {
             continue;
         }
         results.push(item.proxy);
@@ -778,7 +778,7 @@ mod tests {
                     "cladding": "demo",
                     "project_root": "/tmp/demo/.cladding",
                     "cladding_expose": "true",
-                    "cladding_expose_target": "cli-app",
+                    "cladding_expose_target": "agent",
                     "cladding_expose_container_port": "3000",
                     "cladding_expose_host_port": "9000"
                 }
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(items[0].proxy.container_port, 3000);
         assert_eq!(items[0].proxy.host_port, 9000);
         assert_eq!(items[0].project_root, "/tmp/demo/.cladding");
-        assert_eq!(items[0].target, "cli-app");
+        assert_eq!(items[0].target, "agent");
     }
 
     #[test]
@@ -809,7 +809,7 @@ mod tests {
             "ID": "xyz789",
             "Names": "demo-expose-4000-9100",
             "State": "running",
-            "Labels": "cladding=demo,project_root=/tmp/demo/.cladding,cladding_expose=true,cladding_expose_target=cli-app,cladding_expose_container_port=4000,cladding_expose_host_port=9100"
+            "Labels": "cladding=demo,project_root=/tmp/demo/.cladding,cladding_expose=true,cladding_expose_target=agent,cladding_expose_container_port=4000,cladding_expose_host_port=9100"
         });
 
         let item = parse_expose_proxy_item(&parsed).expect("proxy item");

@@ -11,23 +11,30 @@ data: {}
 apiVersion: v1
 kind: Pod
 metadata:
-  name: REPLACE_PROXY_POD_NAME
+  name: REPLACE_PROXY_NAME
   labels:
     app: proxy
     cladding: CLADDING_NAME
     project_root: "PROJECT_ROOT"
 spec:
   hostAliases:
-  - ip: "REPLACE_CLI_IP"
+  - ip: "REPLACE_AGENT_IP"
     hostnames:
-    - cli-pod
+    - REPLACE_AGENT_NAME
   - ip: "REPLACE_SANDBOX_IP"
     hostnames:
-    - sandbox-pod
+    - REPLACE_SANDBOX_NAME
   containers:
   - name: proxy
     image: docker.io/ubuntu/squid:latest
     command: ["/bin/sh", "/opt/scripts/proxy_startup.sh"]
+    env:
+    - name: CLADDING_PROXY_NAME
+      value: "REPLACE_PROXY_NAME"
+    - name: CLADDING_SANDBOX_NAME
+      value: "REPLACE_SANDBOX_NAME"
+    - name: CLADDING_AGENT_NAME
+      value: "REPLACE_AGENT_NAME"
     
     volumeMounts:
     - name: config-dir
@@ -52,14 +59,14 @@ spec:
 
 ---
 # ==========================================
-# POD 2: THE SANDBOX
+# POD 2: THE NETWORK SANDBOX
 # ==========================================
 apiVersion: v1
 kind: Pod
 metadata:
-  name: REPLACE_SANDBOX_POD_NAME
+  name: REPLACE_SANDBOX_NAME
   labels:
-    app: sandbox
+    app: nw-sandbox
     cladding: CLADDING_NAME
     project_root: "PROJECT_ROOT"
   annotations:
@@ -68,7 +75,7 @@ spec:
   hostAliases:
   - ip: "REPLACE_PROXY_IP"
     hostnames:
-    - proxy-pod
+    - REPLACE_PROXY_NAME
   initContainers:
   # 1. Jailer
   - name: sandbox-node
@@ -82,12 +89,19 @@ spec:
     - name: scripts-dir
       mountPath: /opt/scripts
       readOnly: true
-    command: ["/bin/sh", "/opt/scripts/jail_sandbox.sh"]
+    env:
+    - name: CLADDING_PROXY_NAME
+      value: "REPLACE_PROXY_NAME"
+    - name: CLADDING_SANDBOX_NAME
+      value: "REPLACE_SANDBOX_NAME"
+    - name: CLADDING_AGENT_NAME
+      value: "REPLACE_AGENT_NAME"
+    command: ["/bin/sh", "/opt/scripts/jail_nw_sandbox.sh"]
 
   containers:
   # 2. App
-  - name: sandbox-app
-    image: REPLACE_SANDBOX_IMAGE
+  - name: nw-sandbox
+    image: REPLACE_NW_SANDBOX_IMAGE
     imagePullPolicy: Never
     command: ["mcp-run"]
     ports:
@@ -113,19 +127,25 @@ spec:
     - name: MCP_BIND_ADDR
       value: "0.0.0.0:3000"
     - name: POLICY_DIR
-      value: "/opt/config/sandbox_commands"
+      value: "/opt/config/nw_sandbox"
+    - name: CLADDING_PROXY_NAME
+      value: "REPLACE_PROXY_NAME"
+    - name: CLADDING_SANDBOX_NAME
+      value: "REPLACE_SANDBOX_NAME"
+    - name: CLADDING_AGENT_NAME
+      value: "REPLACE_AGENT_NAME"
     - name: http_proxy
-      value: "http://proxy-pod:8080"
+      value: "http://REPLACE_PROXY_NAME:8080"
     - name: https_proxy
-      value: "http://proxy-pod:8080"
+      value: "http://REPLACE_PROXY_NAME:8080"
     - name: HTTP_PROXY
-      value: "http://proxy-pod:8080"
+      value: "http://REPLACE_PROXY_NAME:8080"
     - name: HTTPS_PROXY
-      value: "http://proxy-pod:8080"
+      value: "http://REPLACE_PROXY_NAME:8080"
     - name: no_proxy
-      value: "sandbox-pod,localhost,127.0.0.1"
+      value: "REPLACE_SANDBOX_NAME,localhost,127.0.0.1"
     - name: NO_PROXY
-      value: "sandbox-pod,localhost,127.0.0.1"
+      value: "REPLACE_SANDBOX_NAME,localhost,127.0.0.1"
 
   volumes:
   - name: scripts-dir
@@ -154,14 +174,14 @@ spec:
 
 ---
 # ==========================================
-# POD 3: THE CLI
+# POD 3: THE AGENT
 # ==========================================
 apiVersion: v1
 kind: Pod
 metadata:
-  name: REPLACE_CLI_POD_NAME
+  name: REPLACE_AGENT_NAME
   labels:
-    app: cli
+    app: agent
     cladding: CLADDING_NAME
     project_root: "PROJECT_ROOT"
   annotations:
@@ -170,13 +190,13 @@ spec:
   hostAliases:
   - ip: "REPLACE_PROXY_IP"
     hostnames:
-    - proxy-pod
+    - REPLACE_PROXY_NAME
   - ip: "REPLACE_SANDBOX_IP"
     hostnames:
-    - sandbox-pod
+    - REPLACE_SANDBOX_NAME
   initContainers:
   # 1. Jailer
-  - name: cli-node
+  - name: agent-node
     image: alpine:latest
     securityContext:
       runAsUser: 0
@@ -190,12 +210,19 @@ spec:
     - name: config-dir
       mountPath: /opt/config
       readOnly: true
-    command: ["/bin/sh", "/opt/scripts/jail_cli.sh"]
+    env:
+    - name: CLADDING_PROXY_NAME
+      value: "REPLACE_PROXY_NAME"
+    - name: CLADDING_SANDBOX_NAME
+      value: "REPLACE_SANDBOX_NAME"
+    - name: CLADDING_AGENT_NAME
+      value: "REPLACE_AGENT_NAME"
+    command: ["/bin/sh", "/opt/scripts/jail_agent.sh"]
 
   containers:
   # 2. App
-  - name: cli-app
-    image: REPLACE_CLI_IMAGE
+  - name: agent
+    image: REPLACE_AGENT_IMAGE
     imagePullPolicy: Never
     command: ["sleep", "infinity"]
     workingDir: /home/user/workspace
@@ -218,20 +245,26 @@ spec:
     env:
     - name: PATH
       value: "/opt/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    - name: CLADDING_PROXY_NAME
+      value: "REPLACE_PROXY_NAME"
+    - name: CLADDING_SANDBOX_NAME
+      value: "REPLACE_SANDBOX_NAME"
+    - name: CLADDING_AGENT_NAME
+      value: "REPLACE_AGENT_NAME"
     - name: http_proxy
-      value: "http://proxy-pod:8080"
+      value: "http://REPLACE_PROXY_NAME:8080"
     - name: https_proxy
-      value: "http://proxy-pod:8080"
+      value: "http://REPLACE_PROXY_NAME:8080"
     - name: HTTP_PROXY
-      value: "http://proxy-pod:8080"
+      value: "http://REPLACE_PROXY_NAME:8080"
     - name: HTTPS_PROXY
-      value: "http://proxy-pod:8080"
+      value: "http://REPLACE_PROXY_NAME:8080"
     - name: no_proxy
-      value: "sandbox-pod,host.containers.internal,localhost,127.0.0.1"
+      value: "REPLACE_SANDBOX_NAME,host.containers.internal,localhost,127.0.0.1"
     - name: NO_PROXY
-      value: "sandbox-pod,host.containers.internal,localhost,127.0.0.1"
+      value: "REPLACE_SANDBOX_NAME,host.containers.internal,localhost,127.0.0.1"
     - name: RUN_REMOTE_SERVER
-      value: "http://sandbox-pod:3000/raw"
+      value: "http://REPLACE_SANDBOX_NAME:3000/raw"
 
   volumes:
   - name: scripts-dir

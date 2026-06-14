@@ -10,18 +10,42 @@ use std::path::PathBuf;
 #[test]
 fn render_pods_yaml_replaces_placeholders() {
     let settings = resolve_network_settings("demo", 1).unwrap();
+    assert_eq!(settings.proxy_name, "demo-proxy");
+    assert_eq!(settings.sandbox_name, "demo-nw-sandbox");
+    assert_eq!(settings.agent_name, "demo-agent");
+
     let config = Config {
         name: "demo".to_string(),
-        sandbox_image: "sandbox:image".to_string(),
-        cli_image: "cli:image".to_string(),
+        nw_sandbox_image: "sandbox:image".to_string(),
+        agent_image: "agent:image".to_string(),
         mounts: Vec::new(),
     };
     let rendered = render_pods_yaml(Path::new("/tmp/project/.cladding"), &config, &settings);
 
-    assert!(!rendered.contains("REPLACE_PROXY_POD_NAME"));
-    assert!(!rendered.contains("REPLACE_CLI_IMAGE"));
-    assert!(rendered.contains("demo-proxy-pod"));
+    assert!(!rendered.contains("REPLACE_PROXY_NAME"));
+    assert!(!rendered.contains("REPLACE_NW_SANDBOX_IMAGE"));
+    assert!(!rendered.contains("REPLACE_AGENT_IMAGE"));
+    assert!(rendered.contains("demo-proxy"));
+    assert!(rendered.contains("demo-nw-sandbox"));
+    assert!(rendered.contains("demo-agent"));
+    assert!(rendered.contains("nw-sandbox"));
+    assert!(rendered.contains("agent"));
+    assert!(rendered.contains("RUN_REMOTE_SERVER"));
+    assert!(rendered.contains("http://demo-nw-sandbox:3000/raw"));
     assert!(rendered.contains("sandbox:image"));
+    assert!(rendered.contains("agent:image"));
+    for old_name in [
+        "proxy-pod",
+        "sandbox-pod",
+        "cli-pod",
+        "sandbox-app",
+        "cli-app",
+    ] {
+        assert!(
+            !rendered.contains(old_name),
+            "rendered YAML contains {old_name}"
+        );
+    }
 }
 
 fn container_mount_paths(rendered: &str, container_name: &str) -> Vec<String> {
@@ -85,27 +109,27 @@ fn container_mount_paths(rendered: &str, container_name: &str) -> Vec<String> {
 }
 
 #[test]
-fn sandbox_only_mounts_skip_cli() {
+fn nw_sandbox_only_mounts_skip_agent() {
     let settings = resolve_network_settings("demo", 1).unwrap();
     let config = Config {
         name: "demo".to_string(),
-        sandbox_image: "sandbox:image".to_string(),
-        cli_image: "cli:image".to_string(),
+        nw_sandbox_image: "sandbox:image".to_string(),
+        agent_image: "agent:image".to_string(),
         mounts: vec![MountConfig {
-            mount_path: "/opt/sandbox-only".to_string(),
-            host_path: Some(PathBuf::from("/tmp/sandbox-only")),
+            mount_path: "/opt/nw-sandbox-only".to_string(),
+            host_path: Some(PathBuf::from("/tmp/nw-sandbox-only")),
             volume: None,
             read_only: true,
-            sandbox_only: true,
+            nw_sandbox_only: true,
             ignore: false,
         }],
     };
     let rendered = render_pods_yaml(Path::new("/tmp/project/.cladding"), &config, &settings);
-    let sandbox_mounts = container_mount_paths(&rendered, "sandbox-app");
-    let cli_mounts = container_mount_paths(&rendered, "cli-app");
+    let sandbox_mounts = container_mount_paths(&rendered, "nw-sandbox");
+    let agent_mounts = container_mount_paths(&rendered, "agent");
 
-    assert!(sandbox_mounts.contains(&"/opt/sandbox-only".to_string()));
-    assert!(!cli_mounts.contains(&"/opt/sandbox-only".to_string()));
+    assert!(sandbox_mounts.contains(&"/opt/nw-sandbox-only".to_string()));
+    assert!(!agent_mounts.contains(&"/opt/nw-sandbox-only".to_string()));
 }
 
 #[test]
@@ -113,45 +137,45 @@ fn ignore_mount_removes_default_mount() {
     let settings = resolve_network_settings("demo", 1).unwrap();
     let config = Config {
         name: "demo".to_string(),
-        sandbox_image: "sandbox:image".to_string(),
-        cli_image: "cli:image".to_string(),
+        nw_sandbox_image: "sandbox:image".to_string(),
+        agent_image: "agent:image".to_string(),
         mounts: vec![MountConfig {
             mount_path: "/opt/config".to_string(),
             host_path: None,
             volume: None,
             read_only: true,
-            sandbox_only: false,
+            nw_sandbox_only: false,
             ignore: true,
         }],
     };
     let rendered = render_pods_yaml(Path::new("/tmp/project/.cladding"), &config, &settings);
-    let sandbox_mounts = container_mount_paths(&rendered, "sandbox-app");
-    let cli_mounts = container_mount_paths(&rendered, "cli-app");
+    let sandbox_mounts = container_mount_paths(&rendered, "nw-sandbox");
+    let agent_mounts = container_mount_paths(&rendered, "agent");
 
     assert!(!sandbox_mounts.contains(&"/opt/config".to_string()));
-    assert!(!cli_mounts.contains(&"/opt/config".to_string()));
+    assert!(!agent_mounts.contains(&"/opt/config".to_string()));
 }
 
 #[test]
-fn sandbox_only_ignore_keeps_cli_default_mount() {
+fn nw_sandbox_only_ignore_keeps_agent_default_mount() {
     let settings = resolve_network_settings("demo", 1).unwrap();
     let config = Config {
         name: "demo".to_string(),
-        sandbox_image: "sandbox:image".to_string(),
-        cli_image: "cli:image".to_string(),
+        nw_sandbox_image: "sandbox:image".to_string(),
+        agent_image: "agent:image".to_string(),
         mounts: vec![MountConfig {
             mount_path: "/opt/config".to_string(),
             host_path: None,
             volume: None,
             read_only: true,
-            sandbox_only: true,
+            nw_sandbox_only: true,
             ignore: true,
         }],
     };
     let rendered = render_pods_yaml(Path::new("/tmp/project/.cladding"), &config, &settings);
-    let sandbox_mounts = container_mount_paths(&rendered, "sandbox-app");
-    let cli_mounts = container_mount_paths(&rendered, "cli-app");
+    let sandbox_mounts = container_mount_paths(&rendered, "nw-sandbox");
+    let agent_mounts = container_mount_paths(&rendered, "agent");
 
     assert!(!sandbox_mounts.contains(&"/opt/config".to_string()));
-    assert!(cli_mounts.contains(&"/opt/config".to_string()));
+    assert!(agent_mounts.contains(&"/opt/config".to_string()));
 }

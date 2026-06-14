@@ -1,9 +1,21 @@
 #!/bin/sh
 set -e
 
-echo "Starting Firewall Setup for CLI..."
+echo "Starting Firewall Setup for agent..."
 
-# Install nftables (we don't need bind-tools/dig anymore!)
+require_env() {
+  name="$1"
+  eval "value=\${$name:-}"
+  if [ -z "$value" ]; then
+    echo "Missing required environment variable: $name" >&2
+    exit 1
+  fi
+}
+
+require_env CLADDING_PROXY_NAME
+require_env CLADDING_SANDBOX_NAME
+
+# Install nftables.
 apk add --no-cache nftables
 
 # 1. Resolve Internal Services
@@ -13,16 +25,16 @@ PROXY_IP=""
 HOST_IP=""
 
 while [ -z "$SANDBOX_IP" ] || [ -z "$PROXY_IP" ] || [ -z "$HOST_IP" ]; do
-  echo "Waiting for sandbox, proxy, and host gateway..."
-  SANDBOX_IP=$(getent hosts sandbox-pod | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
-  PROXY_IP=$(getent hosts proxy-pod | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
+  echo "Waiting for network sandbox, proxy, and host gateway..."
+  SANDBOX_IP=$(getent hosts "$CLADDING_SANDBOX_NAME" | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
+  PROXY_IP=$(getent hosts "$CLADDING_PROXY_NAME" | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
   HOST_IP=$(getent hosts host.containers.internal | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
   sleep 2
 done
 
-echo "Sandbox detected at: $SANDBOX_IP"
-echo "Proxy detected at:   $PROXY_IP"
-echo "Host detected at:    $HOST_IP"
+echo "Network sandbox ($CLADDING_SANDBOX_NAME) detected at: $SANDBOX_IP"
+echo "Proxy ($CLADDING_PROXY_NAME) detected at:             $PROXY_IP"
+echo "Host detected at:                                      $HOST_IP"
 
 # 2. Flush and Start Fresh
 nft flush ruleset
@@ -44,7 +56,7 @@ nft add rule ip filter OUTPUT ip daddr $SANDBOX_IP tcp dport 3000 accept
 
 # D. Allow Outbound to Host (Direct Access)
 # Allow host gateway access; use allowlist if present.
-HOST_PORTS_FILE="/opt/config/cli_host_ports.lst"
+HOST_PORTS_FILE="/opt/config/agent_host_ports.lst"
 HOST_PORTS=""
 if [ -r "$HOST_PORTS_FILE" ]; then
   HOST_PORTS=$(awk 'NF && $1 !~ /^#/ { print $1 }' "$HOST_PORTS_FILE")
@@ -57,17 +69,17 @@ if [ -n "$HOST_PORTS" ]; then
 fi
 
 # E. Allow Outbound to Proxy (Internet Access)
-# The CLI will send all Google traffic here
+# The agent sends allowed internet traffic through the proxy.
 nft add rule ip filter OUTPUT ip daddr $PROXY_IP tcp dport 8080 accept
 
 # F. Drop Everything Else
-# If it's not Sandbox or Proxy, it's blocked.
-nft add rule ip filter OUTPUT log prefix \"BLOCKED_CLI: \" drop
+# If it's not the network sandbox or proxy, it's blocked.
+nft add rule ip filter OUTPUT log prefix \"BLOCKED_AGENT: \" drop
 nft add rule ip filter OUTPUT drop
 
 if [ "${JAILER_HOLD:-0}" = "1" ]; then
-  echo "CLI Firewall Locked. Traffic restricted to Sandbox & Proxy. Sleeping infinity..."
+  echo "Agent firewall locked. Traffic restricted to network sandbox and proxy. Sleeping infinity..."
   exec sleep infinity
 fi
 
-echo "CLI Firewall Locked. Traffic restricted to Sandbox & Proxy. Exiting."
+echo "Agent firewall locked. Traffic restricted to network sandbox and proxy. Exiting."

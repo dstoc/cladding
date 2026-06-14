@@ -34,7 +34,7 @@ Example:
 
 ```bash
 export MCP_BIND_ADDR=0.0.0.0:3000
-export POLICY_DIR=/opt/config/sandbox_commands
+export POLICY_DIR=/opt/config/nw_sandbox
 mcp-run
 ```
 
@@ -61,7 +61,7 @@ cargo build --release
 Minimal layout:
 
 ```text
-sandbox_commands/
+nw_sandbox/
   main.rego
   curl.rego
 ```
@@ -69,7 +69,7 @@ sandbox_commands/
 Larger layout (examples below):
 
 ```text
-sandbox_commands/
+nw_sandbox/
   main.rego
   curl.rego
   python.rego

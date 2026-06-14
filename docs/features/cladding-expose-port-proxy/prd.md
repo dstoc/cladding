@@ -1,7 +1,7 @@
 # PRD: Cladding Expose Port Proxy
 
 ## Objective
-Add a project-scoped port exposure feature to `cladding` that lets a developer publish a port from the current project’s `cli-pod-cli-app` container to the host.
+Add a project-scoped port exposure feature to `cladding` that lets a developer publish a port from the current project’s `agent` container to the host.
 
 The feature should provide a simple CLI for creating, listing, and removing exposed ports, while keeping the lifecycle managed by `cladding`:
 - `cladding expose <containerport> [hostport]`
@@ -11,7 +11,7 @@ The feature should provide a simple CLI for creating, listing, and removing expo
 Exposed-port proxy containers must be cleaned up automatically when the project is stopped with `cladding down` or force-removed with `cladding destroy`.
 
 ## Use Cases
-1. A developer wants temporary host access to a service running inside `cli-pod-cli-app` without changing `pods.yaml` or permanently publishing ports.
+1. A developer wants temporary host access to a service running inside `agent` without changing `pods.yaml` or permanently publishing ports.
 2. A developer runs `cladding expose 3000` and gets a host port mapping such as `localhost:3000` or the next available port if `3000` is already taken.
 3. A developer wants a predictable preferred host port and runs `cladding expose 3000 9000`, allowing cladding to start at `9000` and increment if needed.
 4. A developer runs `cladding expose list` to see which host ports are currently mapped for the current project.
@@ -27,15 +27,15 @@ Exposed-port proxy containers must be cleaned up automatically when the project 
      - `cladding expose list`
    - `start` is not required for the initial version.
 2. **Target scope**
-   - `cladding expose` only supports exposing ports from the current project’s `cli-pod-cli-app` container.
+   - `cladding expose` only supports exposing ports from the current project’s `agent` container.
    - No container selector argument is supported.
    - Attempts to expose ports from any other container are out of scope.
 3. **Project scoping**
    - Expose operations are scoped to the current `.cladding` project, using the same project identity model already used by `cladding` (`name` plus canonical `project_root`).
    - `list` and `stop` must only operate on expose proxies belonging to the current project.
 4. **Create behavior**
-   - `cladding expose <containerport> [hostport]` requires the current project to be running and the current project’s `cli-pod-cli-app` container to exist.
-   - `<containerport>` is the target port inside `cli-pod-cli-app`.
+   - `cladding expose <containerport> [hostport]` requires the current project to be running and the current project’s `agent` container to exist.
+   - `<containerport>` is the target port inside `agent`.
    - `[hostport]` is optional.
    - If `[hostport]` is omitted, cladding starts searching from `<containerport>` on the host.
    - If `[hostport]` is provided, cladding starts searching from that host port.
@@ -73,7 +73,7 @@ Exposed-port proxy containers must be cleaned up automatically when the project 
      - Podman container create/start/inspect failures
 
 ## Non-Goals
-1. Exposing ports from `sandbox-app`, `proxy`, or any other container besides `cli-pod-cli-app`.
+1. Exposing ports from `nw-sandbox`, `proxy`, or any other container besides `agent`.
 2. Adding permanent port-publishing configuration to `cladding.json` or `pods.yaml`.
 3. Supporting UDP, Unix sockets, or protocols beyond simple TCP port forwarding.
 4. Supporting multiple host-port mappings for the same container port within one project.
@@ -95,7 +95,7 @@ Exposed-port proxy containers must be cleaned up automatically when the project 
    - Users need to understand where to connect from the host and what is currently published.
    - `list` output should make the mapping obvious without exposing low-value implementation details.
 5. **Narrow scope**
-   - Restricting the feature to `cli-pod-cli-app` keeps the security and UX model simple for the first version.
+   - Restricting the feature to `agent` keeps the security and UX model simple for the first version.
 
 ## Technical Considerations
 1. **CLI parsing**
@@ -106,7 +106,7 @@ Exposed-port proxy containers must be cleaned up automatically when the project 
    - The parsing design should preserve straightforward help/usage output.
 2. **Discovering the target container**
    - The target container name can be derived from the current project’s active network settings:
-     - `<name>-cli-pod-cli-app`
+     - `<name>-agent-agent`
    - Creation should reuse existing “project is running” and active project resolution logic where possible.
 3. **Expose proxy discovery model**
    - Add helper(s) in `cladding/src/podman.rs` to list expose proxy containers by labels rather than by name prefix.
@@ -114,7 +114,7 @@ Exposed-port proxy containers must be cleaned up automatically when the project 
      - `cladding=<project name>`
      - `project_root=<canonical .cladding path>`
      - `cladding_expose=true`
-     - `cladding_expose_target=cli-app`
+     - `cladding_expose_target=agent`
      - `cladding_expose_container_port=<containerport>`
      - `cladding_expose_host_port=<hostport>`
    - This supports:
@@ -127,7 +127,7 @@ Exposed-port proxy containers must be cleaned up automatically when the project 
      - run a detached helper container
      - use `socat`
      - publish a host port with `-p`
-     - forward host traffic to the CLI container
+     - forward host traffic to the agent container
    - The script’s useful ideas are:
      - dynamic host-port allocation by incrementing from a base port
      - detached standalone helper container
@@ -138,7 +138,7 @@ Exposed-port proxy containers must be cleaned up automatically when the project 
      - start a helper container that shares the target container namespace via `--network container:<cli-container>`, if Podman allows that together with host port publishing in the supported environments.
    - If that mode does not support `-p` in practice, a fallback is:
      - run the helper container on the same `cladding-N` network
-     - discover the active CLI container IP
+     - discover the active agent container IP
      - proxy to that IP:port
    - This should be validated during implementation; the PRD does not require exposing ports from arbitrary project networks or containers.
 6. **Image/build strategy**
@@ -167,10 +167,10 @@ Exposed-port proxy containers must be cleaned up automatically when the project 
    - Tests that depend on Podman networking details may need to be integration-only.
 10. **Documentation**
    - Update README command list and usage examples.
-   - Document that the feature is temporary/runtime-only and scoped to the current project’s `cli-pod-cli-app`.
+   - Document that the feature is temporary/runtime-only and scoped to the current project’s `agent`.
 
 ## Success Metrics
-1. A running project can expose a TCP port from `cli-pod-cli-app` to the host with a single command.
+1. A running project can expose a TCP port from `agent` to the host with a single command.
 2. When no host port is specified, cladding successfully picks the first available host port starting at the requested container port.
 3. `cladding expose stop <hostport>` reliably removes the matching current-project mapping.
 4. `cladding expose list` accurately reports active mappings for the current project.

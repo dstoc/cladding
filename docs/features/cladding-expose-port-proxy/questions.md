@@ -4,7 +4,7 @@
 - Question: When the user runs `cladding expose start <port>`, should cladding try to bind that same host port exactly, or should it treat `<port>` as the internal target port and auto-pick an available host port when needed?
 - Why it matters: This changes the command contract, the `list`/`stop` UX, error handling, and whether users can rely on deterministic `localhost:<port>` behavior.
 - Answer: Treat `<port>` as the container port and auto-pick a free host port when needed. Support `cladding expose <containerport> [<hostport>]`. `start` can likely be omitted.
-- Decision/Impact: The PRD should define the primary create command as `cladding expose <containerport> [<hostport>]`, with `<containerport>` always targeting `cli-pod-cli-app`. Host-port selection should default to “first available at or above the requested/default host port” rather than strict same-port binding.
+- Decision/Impact: The PRD should define the primary create command as `cladding expose <containerport> [<hostport>]`, with `<containerport>` always targeting `agent`. Host-port selection should default to “first available at or above the requested/default host port” rather than strict same-port binding.
 
 ## Q2 (resolved)
 - Question: For stopping an expose proxy, should `cladding expose stop` identify the proxy by host port, by generated proxy name/id, or should the CLI avoid `stop` entirely and instead support only `cladding expose list` plus `cladding down` cleanup?

@@ -1,11 +1,11 @@
-# Proxy CONNECT Failures in `cli-app` (2026-02-17)
+# Proxy CONNECT Failures in `agent` (2026-02-17)
 
 ## Status
 - Resolved.
 - Current proxy path is Squid-based, not HAProxy-based.
 
 ## Final Outcome
-1. `cli-app` can establish HTTPS tunnels through `proxy-pod:8080`.
+1. `agent` can establish HTTPS tunnels through `<name>-proxy:8080`.
 2. Confirmed by Squid access log result:
 - `TCP_TUNNEL/200 ... CONNECT googleapis.com:443 ...`
 3. Proxy process starts cleanly with generated runtime config (`/tmp/squid_generated.conf`).
@@ -19,14 +19,14 @@
 1. Proxy engine switched from HAProxy to Squid in `pods.yaml`.
 2. Added Squid config template at `config/squid.conf`.
 3. Updated `scripts/proxy_startup.sh` to:
-- discover CLI/Sandbox IPv4 addresses
-- write `/tmp/cli_ips.lst` and `/tmp/sandbox_ips.lst`
+- discover agent/network-sandbox IPv4 addresses
+- write `/tmp/agent_ips.lst` and `/tmp/nw_sandbox_ips.lst`
 - inject runtime DNS into generated config
 - start Squid in foreground with `/tmp/squid_generated.conf`
 4. Updated `reload-proxy-config` to use Squid reconfigure command.
 5. Kept domain allow-lists in:
-- `config/cli_domains.lst`
-- `config/sandbox_domains.lst`
+- `config/agent_domains.lst`
+- `config/nw_sandbox_domains.lst`
 
 ## Notes
 1. Squid logs may include ICMP pinger warnings in this containerized environment.

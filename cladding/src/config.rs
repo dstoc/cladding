@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub name: String,
-    pub sandbox_image: String,
-    pub cli_image: String,
+    pub nw_sandbox_image: String,
+    pub agent_image: String,
     pub mounts: Vec<MountConfig>,
 }
 
@@ -20,7 +20,7 @@ pub struct MountConfig {
     pub host_path: Option<PathBuf>,
     pub volume: Option<String>,
     pub read_only: bool,
-    pub sandbox_only: bool,
+    pub nw_sandbox_only: bool,
     pub ignore: bool,
 }
 
@@ -41,9 +41,11 @@ pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
         Error::message("invalid cladding.json")
     })?;
 
+    validate_top_level_keys(&parsed, &config_path)?;
+
     let name = get_config_string(&parsed, "name", &config_path)?;
-    let sandbox_image = get_config_string(&parsed, "sandbox_image", &config_path)?;
-    let cli_image = get_config_string(&parsed, "cli_image", &config_path)?;
+    let nw_sandbox_image = get_config_string(&parsed, "nw_sandbox_image", &config_path)?;
+    let agent_image = get_config_string(&parsed, "agent_image", &config_path)?;
     let mut used_mount_paths = HashSet::new();
     let mounts = parse_mounts(project_root, &parsed, &config_path, &mut used_mount_paths)?;
 
@@ -55,8 +57,8 @@ pub fn load_cladding_config(project_root: &Path) -> Result<Config> {
 
     Ok(Config {
         name,
-        sandbox_image,
-        cli_image,
+        nw_sandbox_image,
+        agent_image,
         mounts,
     })
 }
@@ -73,9 +75,52 @@ pub fn write_default_cladding_config(
     };
 
     Ok(format!(
-        "{{\n  \"sandbox_image\": \"{}\",\n  \"cli_image\": \"{}\",\n  \"name\": \"{}\"\n}}\n",
+        "{{\n  \"nw_sandbox_image\": \"{}\",\n  \"agent_image\": \"{}\",\n  \"name\": \"{}\"\n}}\n",
         default_sandbox_image, default_cli_image, name
     ))
+}
+
+fn validate_top_level_keys(parsed: &serde_json::Value, config_path: &Path) -> Result<()> {
+    let Some(object) = parsed.as_object() else {
+        eprintln!("error: cladding.json must be a JSON object");
+        eprintln!("file: {}", config_path.display());
+        return Err(Error::message("invalid cladding.json"));
+    };
+
+    let allowed = ["name", "nw_sandbox_image", "agent_image", "mounts"];
+    let mut invalid = false;
+    for key in object.keys() {
+        if allowed.contains(&key.as_str()) {
+            continue;
+        }
+        eprintln!("error: cladding.json unknown key: {key}");
+        if let Some(replacement) = legacy_config_key_replacement(key) {
+            eprintln!("hint: replace '{key}' with '{replacement}'");
+        }
+        eprintln!("file: {}", config_path.display());
+        invalid = true;
+    }
+
+    if invalid {
+        return Err(Error::message("invalid cladding.json"));
+    }
+
+    Ok(())
+}
+
+fn legacy_config_key_replacement(key: &str) -> Option<&'static str> {
+    match key {
+        "sandbox_image" => Some("nw_sandbox_image"),
+        "cli_image" => Some("agent_image"),
+        _ => None,
+    }
+}
+
+fn legacy_mount_key_replacement(key: &str) -> Option<&'static str> {
+    match key {
+        "sandboxOnly" => Some("nwSandboxOnly"),
+        _ => None,
+    }
 }
 
 fn get_config_string(parsed: &serde_json::Value, key: &str, config_path: &Path) -> Result<String> {
@@ -113,6 +158,7 @@ fn parse_mounts(
             eprintln!("file: {}", config_path.display());
             return Err(Error::message("invalid cladding.json"));
         };
+        validate_mount_keys(object, index, config_path)?;
 
         let mount_path = object
             .get("mount")
@@ -175,9 +221,9 @@ fn parse_mounts(
             None => false,
         };
 
-        let sandbox_only = match object.get("sandboxOnly") {
+        let nw_sandbox_only = match object.get("nwSandboxOnly") {
             Some(value) => value.as_bool().ok_or_else(|| {
-                eprintln!("error: cladding.json invalid field 'mounts[{index}].sandboxOnly' (expected boolean)");
+                eprintln!("error: cladding.json invalid field 'mounts[{index}].nwSandboxOnly' (expected boolean)");
                 eprintln!("file: {}", config_path.display());
                 Error::message("invalid cladding.json")
             })?,
@@ -230,12 +276,45 @@ fn parse_mounts(
             host_path,
             volume,
             read_only,
-            sandbox_only,
+            nw_sandbox_only,
             ignore,
         });
     }
 
     Ok(mounts)
+}
+
+fn validate_mount_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    index: usize,
+    config_path: &Path,
+) -> Result<()> {
+    let allowed = [
+        "mount",
+        "hostPath",
+        "volume",
+        "readOnly",
+        "nwSandboxOnly",
+        "ignore",
+    ];
+    let mut invalid = false;
+    for key in object.keys() {
+        if allowed.contains(&key.as_str()) {
+            continue;
+        }
+        eprintln!("error: cladding.json unknown key: mounts[{index}].{key}");
+        if let Some(replacement) = legacy_mount_key_replacement(key) {
+            eprintln!("hint: replace 'mounts[{index}].{key}' with 'mounts[{index}].{replacement}'");
+        }
+        eprintln!("file: {}", config_path.display());
+        invalid = true;
+    }
+
+    if invalid {
+        return Err(Error::message("invalid cladding.json"));
+    }
+
+    Ok(())
 }
 
 fn ensure_absolute_mount_path(config_path: &Path, field: &str, mount_path: &str) -> Result<()> {

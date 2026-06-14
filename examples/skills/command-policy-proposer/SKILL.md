@@ -1,6 +1,6 @@
 ---
 name: command-policy-proposer
-description: Propose or modify Rego sandbox command policies for mcp-run (PROPOSAL_DIR ~/proposed-sandbox-commands; runtime POLICY_DIR /opt/config/sandbox_commands). Use when asked to draft new .rego files, update existing policy logic, or review command allowlists with safe argument constraints and network/data-exfiltration safeguards.
+description: Propose or modify Rego sandbox command policies for mcp-run (PROPOSAL_DIR ~/proposed-sandbox-commands; runtime POLICY_DIR /opt/config/nw_sandbox). Use when asked to draft new .rego files, update existing policy logic, or review command allowlists with safe argument constraints and network/data-exfiltration safeguards.
 ---
 
 # Command Policy Proposer
@@ -33,8 +33,8 @@ description: Propose or modify Rego sandbox command policies for mcp-run (PROPOS
 
 ## Rego Contract (mcp-run)
 
-- Write proposal files under `~/proposed-sandbox-commands` (not `/opt/config/sandbox_commands`, which may be read-only).
-- Treat `/opt/config/sandbox_commands` as the runtime reference location to inspect existing effective policies.
+- Write proposal files under `~/proposed-sandbox-commands` (not `/opt/config/nw_sandbox`, which may be read-only).
+- Treat `/opt/config/nw_sandbox` as the runtime reference location to inspect existing effective policies.
 - Decision query: `data.sandbox.main.allow`
 - Rego input shape:
   - `input.command`: executable token

@@ -14,17 +14,14 @@ pub fn render_pods_yaml(
     let rendered = PODS_YAML
         .replace("PROJECT_ROOT", &project_root.display().to_string())
         .replace("CLADDING_NAME", &config.name)
-        .replace("REPLACE_PROXY_POD_NAME", &network_settings.proxy_pod_name)
-        .replace(
-            "REPLACE_SANDBOX_POD_NAME",
-            &network_settings.sandbox_pod_name,
-        )
-        .replace("REPLACE_CLI_POD_NAME", &network_settings.cli_pod_name)
-        .replace("REPLACE_SANDBOX_IMAGE", &config.sandbox_image)
-        .replace("REPLACE_CLI_IMAGE", &config.cli_image)
+        .replace("REPLACE_PROXY_NAME", &network_settings.proxy_name)
+        .replace("REPLACE_SANDBOX_NAME", &network_settings.sandbox_name)
+        .replace("REPLACE_AGENT_NAME", &network_settings.agent_name)
+        .replace("REPLACE_NW_SANDBOX_IMAGE", &config.nw_sandbox_image)
+        .replace("REPLACE_AGENT_IMAGE", &config.agent_image)
         .replace("REPLACE_PROXY_IP", &network_settings.proxy_ip)
         .replace("REPLACE_SANDBOX_IP", &network_settings.sandbox_ip)
-        .replace("REPLACE_CLI_IP", &network_settings.cli_ip);
+        .replace("REPLACE_AGENT_IP", &network_settings.cli_ip);
 
     let mut docs = match serde_yaml::Deserializer::from_str(&rendered)
         .map(|doc| Value::deserialize(doc).map_err(|_| ()))
@@ -80,7 +77,7 @@ struct CustomMount {
     mount_path: String,
     read_only: bool,
     volume: CustomVolume,
-    sandbox_only: bool,
+    nw_sandbox_only: bool,
     ignore: bool,
 }
 
@@ -99,7 +96,7 @@ fn build_custom_mounts(config: &Config) -> Vec<CustomMount> {
         host_path,
         volume,
         read_only,
-        sandbox_only,
+        nw_sandbox_only,
         ignore,
     } in &config.mounts
     {
@@ -117,7 +114,7 @@ fn build_custom_mounts(config: &Config) -> Vec<CustomMount> {
             mount_path: mount_path.clone(),
             read_only: *read_only,
             volume,
-            sandbox_only: *sandbox_only,
+            nw_sandbox_only: *nw_sandbox_only,
             ignore: *ignore,
         });
     }
@@ -161,7 +158,7 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
                 Some(name) => name.to_string(),
                 None => continue,
             };
-        if container_name != "sandbox-app" && container_name != "cli-app" {
+        if container_name != "nw-sandbox" && container_name != "agent" {
             continue;
         }
 
@@ -174,7 +171,7 @@ fn apply_custom_mounts(doc: &mut Value, custom_mounts: &[CustomMount]) {
         let mut next_custom_index = 0usize;
 
         for custom in custom_mounts {
-            if custom.sandbox_only && container_name != "sandbox-app" {
+            if custom.nw_sandbox_only && container_name != "nw-sandbox" {
                 continue;
             }
             if let Some(&idx) = mount_index.get(&custom.mount_path) {

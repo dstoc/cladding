@@ -8,7 +8,7 @@
   - `PROJECT_ROOT` = `.cladding` directory in project.
   - `config` expected at `.cladding/config`, `home` at `.cladding/home`, `tools` at `.cladding/tools`.
 - Uses `cladding.json` in `.cladding/` for:
-  - `name` (lowercase alnum), `subnet` (CIDR), `sandbox_image`, `cli_image`.
+  - `name` (lowercase alnum), `subnet` (CIDR), `nw_sandbox_image`, `agent_image`.
 - `build`:
   - Builds `mcp-run` and `run-remote` using a `rust:latest` container; installs into `.cladding/tools/bin/` (`run-remote` renamed to `run-with-network`).
   - Builds default images using `Containerfile.cladding` if images match default `localhost/cladding-default:latest`.
@@ -25,19 +25,19 @@
 - `destroy`:
   - `podman rm -f` on the three pods by name.
 - `run`:
-  - Executes command in `cli` container with cwd mapped relative to project root; TTY handling for interactive vs non-interactive.
+  - Executes command in `agent` container with cwd mapped relative to project root; TTY handling for interactive vs non-interactive.
 - `reload-proxy`:
   - `podman exec` into proxy container to reload Squid config.
 
 ## Related files
 - `Containerfile.cladding`: Debian-based image with tooling (zsh, npm, curl, build tools, jq, python, ripgrep). Installs `@openai/codex` and `@google/gemini-cli`, creates user with host UID/GID.
-- `pods.yaml`: Podman pods for `proxy`, `sandbox`, `cli` with explicit IPs, host mounts for `.cladding` config/home/tools, and initContainers for nftables jailers.
+- `pods.yaml`: Podman pods for `proxy`, `nw-sandbox`, `agent` with explicit IPs, host mounts for `.cladding` config/home/tools, and initContainers for nftables jailers.
 - `scripts/proxy_startup.sh`: resolves pod IPs, writes `/tmp/cli_ips.lst` and `/tmp/sandbox_ips.lst`, injects DNS into Squid config, starts Squid.
-- `scripts/jail_cli.sh` + `scripts/jail_sandbox.sh`: nftables jailer scripts (not inspected yet in this feature).
+- `scripts/jail_agent.sh` + `scripts/jail_nw_sandbox.sh`: nftables jailer scripts (not inspected yet in this feature).
 - `config-template/`:
   - `squid.conf` with placeholders for DNS and ACLs.
-  - `cli_domains.lst`, `sandbox_domains.lst`, `cli_host_ports.lst` allowlist files.
-  - `sandbox_commands/` rego policy modules.
+  - `agent_domains.lst`, `nw_sandbox_domains.lst`, `agent_host_ports.lst` allowlist files.
+  - `nw_sandbox/` rego policy modules.
 - `README.md` documents cladding usage, mounts, and architecture.
 
 ## Constraints implied by request

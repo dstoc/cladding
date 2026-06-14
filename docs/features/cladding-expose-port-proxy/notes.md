@@ -1,9 +1,9 @@
 # Notes: Cladding Expose Port Proxy
 
 ## Research Scope
-- Feature request: add `cladding expose start <port>` to proxy a port from `cli-pod-cli-app` out to the host.
+- Feature request: add `cladding expose start <port>` to proxy a port from `agent` out to the host.
 - Requested behavior:
-  - only support ports on `cli-pod-cli-app`; no support for other containers.
+  - only support ports on `agent`; no support for other containers.
   - provide similar lifecycle commands: `start`, `stop`, `list`.
   - ensure exposed-port proxy containers are also shut down when `cladding down` runs.
   - use `./expose.sh` only as a temporary reference; summarize useful design/implementation details rather than treating it as final product behavior.
@@ -40,7 +40,7 @@
 - `cladding destroy`:
   - force-removes only the three pod names derived from `NetworkSettings`
   - does not clean up any extra standalone containers
-- Current cleanup therefore only knows about the proxy pod, sandbox pod, and cli pod. Any new standalone expose container will require explicit cleanup logic.
+- Current cleanup therefore only knows about the proxy, network sandbox, and agent pods. Any new standalone expose container will require explicit cleanup logic.
 
 ### How cladding identifies running projects
 - File: `cladding/src/podman.rs`
@@ -52,19 +52,19 @@
 
 ### Current container naming and active-container lookup
 - File: `cladding/src/network.rs`
-- For a project named `<name>`, pod names are derived as:
-  - `<name>-proxy-pod`
-  - `<name>-sandbox-pod`
-  - `<name>-cli-pod`
-- In `cmd_run`, the target cli container name is computed as `<cli_pod_name>-cli-app`.
-- For this feature, the only supported target container is therefore the existing `cli-app` container for the current project: `<name>-cli-pod-cli-app`.
+- For a project named `<name>`, runtime names are derived as:
+  - `<name>-proxy`
+  - `<name>-nw-sandbox`
+  - `<name>-agent`
+- In `cmd_run`, the target agent container name is computed from `<name>-agent` and `agent`.
+- For this feature, the only supported target container is therefore the existing `agent` container for the current project: `<name>-agent-agent`.
 
 ### Network/runtime assumptions in the current product
-- `pods.yaml` gives `cli-app` no published host ports.
-- `cli-app` and `sandbox-app` rely on fixed in-network hostnames and IPs inside the selected `cladding-N` network.
-- README states direct egress from `cli-pod` is blocked except to:
-  - `sandbox-pod:3000`
-  - `proxy-pod:8080`
+- `pods.yaml` gives `agent` no published host ports.
+- `agent` and `nw-sandbox` rely on fixed in-network hostnames and IPs inside the selected `cladding-N` network.
+- README states direct egress from `<name>-agent` is blocked except to:
+  - `<name>-nw-sandbox:3000`
+  - `<name>-proxy:8080`
   - `host.containers.internal` on explicitly configured ports
 - Exposing a port to the host is therefore an intentional escape hatch for host access, and should remain explicit and narrow.
 
@@ -82,7 +82,7 @@
 
 ### Build and image model constraints
 - File: `Containerfile.cladding`
-- Current default image is a single general-purpose image used for `cli_image` and `sandbox_image` defaults.
+- Current default image is a single general-purpose image used for `agent_image` and `nw_sandbox_image` defaults.
 - File: `cladding/src/assets.rs`
 - `cladding build` currently refreshes embedded tools and builds only the main cladding image(s); there is no helper image build pipeline for auxiliary containers.
 - Implication for this feature:
@@ -97,7 +97,7 @@
   - `stop <proxy_container_name>`
   - `list`
 - The script defaults:
-  - base container: `v1-cli-pod-cli-app`
+  - base container: `v1-agent-agent`
   - starting host port: `8080`
 - Current script implementation:
   - inspects the base container IP
@@ -133,7 +133,7 @@
   - `cladding expose <containerport> [hostport]`
   - `cladding expose stop ...`
   - `cladding expose list`
-- Since only `cli-pod-cli-app` is in scope, the command does not need a container selector.
+- Since only `agent` is in scope, the command does not need a container selector.
 - User decision:
   - the primary create command should treat the first positional port as the container port, not a strict host-port binding.
   - host port may be optional and can be auto-selected.

@@ -2,7 +2,7 @@
 
 ## Codebase
 - `cladding.json` is read from `.cladding/cladding.json` by `cladding/src/config.rs`.
-  - Schema currently expects string keys only: `name`, `subnet`, `sandbox_image`, `cli_image`.
+  - Schema currently expects string keys only: `name`, `subnet`, `nw_sandbox_image`, `agent_image`.
   - `Config` struct only includes those four fields.
 - `cladding init` writes `.cladding/cladding.json` and materializes `.cladding/config/` + `.cladding/scripts/` from embedded templates.
 - `pods.yaml` is embedded as a raw string and rendered via simple `String::replace` in `cladding/src/assets.rs::render_pods_yaml`.
@@ -10,9 +10,9 @@
   - No YAML parsing or structural manipulation today.
 - Mounts in `pods.yaml` are currently fixed:
   - `proxy`: `config-dir` -> `/opt/config`, `scripts-dir` -> `/opt/scripts` (both `hostPath`).
-  - `sandbox-app` + `cli-app`:
+  - `nw-sandbox` + `agent`:
     - `/opt/config` (read-only), `/opt/tools` (read-only), `/home/user` (rw), `/home/user/workspace` (rw), `/home/user/workspace/.cladding` masked via `emptyDir`.
-  - `sandbox-node` + `cli-node`: `/opt/scripts` (read-only).
+  - `sandbox-node` + `agent-node`: `/opt/scripts` (read-only).
 - Workspace mount uses hostPath `PROJECT_ROOT/..` (project root’s parent) mapped to `/home/user/workspace`.
 - `.cladding` inside the workspace is masked by a separate `emptyDir` volume mounted at `/home/user/workspace/.cladding`.
 

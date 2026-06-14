@@ -15,7 +15,7 @@
 
 ### Config schema and init path
 - File: `cladding/src/config.rs`
-- `Config` currently requires: `name`, `subnet`, `sandbox_image`, `cli_image` (`mounts` optional).
+- `Config` currently requires: `name`, `subnet`, `nw_sandbox_image`, `agent_image` (`mounts` optional).
 - `load_cladding_config` hard-requires `subnet` and validates CIDR.
 - `write_default_cladding_config`:
   - checks for existing network named `<name>_cladding_net` via `podman network exists`.

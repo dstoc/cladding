@@ -8,9 +8,9 @@ pub struct NetworkSettings {
     pub proxy_ip: String,
     pub sandbox_ip: String,
     pub cli_ip: String,
-    pub proxy_pod_name: String,
-    pub sandbox_pod_name: String,
-    pub cli_pod_name: String,
+    pub proxy_name: String,
+    pub sandbox_name: String,
+    pub agent_name: String,
 }
 
 pub fn resolve_network_settings(name: &str, pool_index: u8) -> Result<NetworkSettings> {
@@ -28,9 +28,9 @@ pub fn resolve_network_settings(name: &str, pool_index: u8) -> Result<NetworkSet
         proxy_ip,
         sandbox_ip,
         cli_ip,
-        proxy_pod_name: format!("{}-proxy-pod", name),
-        sandbox_pod_name: format!("{}-sandbox-pod", name),
-        cli_pod_name: format!("{}-cli-pod", name),
+        proxy_name: format!("{}-proxy", name),
+        sandbox_name: format!("{}-nw-sandbox", name),
+        agent_name: format!("{}-agent", name),
     })
 }
 
@@ -96,6 +96,9 @@ mod tests {
         assert_eq!(settings.proxy_ip, "10.90.5.2");
         assert_eq!(settings.sandbox_ip, "10.90.5.3");
         assert_eq!(settings.cli_ip, "10.90.5.4");
+        assert_eq!(settings.proxy_name, "demo-proxy");
+        assert_eq!(settings.sandbox_name, "demo-nw-sandbox");
+        assert_eq!(settings.agent_name, "demo-agent");
     }
 
     #[test]

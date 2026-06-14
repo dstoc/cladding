@@ -24,7 +24,7 @@ This feature introduces:
 3. No changes to auth/trust model are introduced in this feature.
 
 ### 2. Policy Sources and Format
-1. `POLICY_DIR` points to a directory containing `.rego` files (for example `config/sandbox_commands`).
+1. `POLICY_DIR` points to a directory containing `.rego` files (for example `config/nw_sandbox`).
 2. Rego directory mode is the new preferred/default policy model.
 3. `POLICY_FILE` continues to represent the legacy JSON policy file during transition.
 4. JSON compatibility is explicitly transitional and slated for later removal.
@@ -102,7 +102,7 @@ This feature introduces:
 Example directory layout:
 
 ```text
-config/sandbox_commands/
+config/nw_sandbox/
   main.rego
   curl.rego
   python.rego
@@ -112,7 +112,7 @@ config/sandbox_commands/
   toolx.rego
 ```
 
-Example `config/sandbox_commands/main.rego`:
+Example `config/nw_sandbox/main.rego`:
 
 ```rego
 package sandbox.main
@@ -139,7 +139,7 @@ env_allowed {
 }
 ```
 
-Example `config/sandbox_commands/curl.rego`:
+Example `config/nw_sandbox/curl.rego`:
 
 ```rego
 package sandbox.curl
@@ -157,7 +157,7 @@ allow {
 # This command intentionally allows no forwarded env vars.
 ```
 
-Example `config/sandbox_commands/python.rego`:
+Example `config/nw_sandbox/python.rego`:
 
 ```rego
 package sandbox.python
@@ -177,7 +177,7 @@ allow {
 # }
 ```
 
-Example `config/sandbox_commands/date.rego` (no args allowed):
+Example `config/nw_sandbox/date.rego` (no args allowed):
 
 ```rego
 package sandbox.date
@@ -190,7 +190,7 @@ allow {
 }
 ```
 
-Example `config/sandbox_commands/build.rego` (must contain `["--target", "x86"]` in order, anywhere):
+Example `config/nw_sandbox/build.rego` (must contain `["--target", "x86"]` in order, anywhere):
 
 ```rego
 package sandbox.build
@@ -206,7 +206,7 @@ allow {
 }
 ```
 
-Example `config/sandbox_commands/echo.rego` (ban a specific argument):
+Example `config/nw_sandbox/echo.rego` (ban a specific argument):
 
 ```rego
 package sandbox.echo
@@ -224,7 +224,7 @@ banned_arg_present {
 }
 ```
 
-Example `config/sandbox_commands/toolx.rego` (allowlist of exactly 3 arguments, any order):
+Example `config/nw_sandbox/toolx.rego` (allowlist of exactly 3 arguments, any order):
 
 ```rego
 package sandbox.toolx
@@ -242,7 +242,7 @@ allow {
 }
 ```
 
-Example `config/sandbox_commands/toolx_flexible.rego` (allowlist of up to 3 arguments, any order, including none):
+Example `config/nw_sandbox/toolx_flexible.rego` (allowlist of up to 3 arguments, any order, including none):
 
 ```rego
 package sandbox.toolx_flexible
@@ -260,7 +260,7 @@ allow {
 }
 ```
 
-Example `config/sandbox_commands/toolx_segments.rego` (0 or more args from allowlist, where `["--target", "x86"]` is an allowed pair):
+Example `config/nw_sandbox/toolx_segments.rego` (0 or more args from allowlist, where `["--target", "x86"]` is an allowed pair):
 
 ```rego
 package sandbox.toolx_segments
