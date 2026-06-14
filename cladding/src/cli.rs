@@ -390,7 +390,7 @@ fn check_required_config_files(context: &Context) -> Result<()> {
 
     if missing {
         eprintln!(
-            "hint: run cladding init, or add missing top-level entries into {}",
+            "hint: run cladding init, or add missing config paths under {}",
             dst.display()
         );
         return Err(Error::message("missing config files"));
@@ -401,20 +401,24 @@ fn check_required_config_files(context: &Context) -> Result<()> {
 
 fn required_config_entries() -> &'static [&'static str] {
     &[
-        "agent_domains.lst",
-        "agent_host_ports.lst",
+        "agent/domains.lst",
+        "agent/host_ports.lst",
         "nw_sandbox",
-        "nw_sandbox_domains.lst",
-        "squid.conf",
+        "nw_sandbox/domains.lst",
+        "proxy/squid.conf",
     ]
 }
 
 fn legacy_config_entries() -> &'static [(&'static str, &'static str)] {
     &[
         ("sandbox_commands", "nw_sandbox"),
-        ("sandbox_domains.lst", "nw_sandbox_domains.lst"),
-        ("cli_domains.lst", "agent_domains.lst"),
-        ("cli_host_ports.lst", "agent_host_ports.lst"),
+        ("sandbox_domains.lst", "nw_sandbox/domains.lst"),
+        ("cli_domains.lst", "agent/domains.lst"),
+        ("cli_host_ports.lst", "agent/host_ports.lst"),
+        ("agent_domains.lst", "agent/domains.lst"),
+        ("agent_host_ports.lst", "agent/host_ports.lst"),
+        ("nw_sandbox_domains.lst", "nw_sandbox/domains.lst"),
+        ("squid.conf", "proxy/squid.conf"),
     ]
 }
 
@@ -1298,6 +1302,37 @@ mod tests {
     #[test]
     fn expose_requires_action_or_ports() {
         assert!(Cli::try_parse_from(["cladding", "expose"]).is_err());
+    }
+
+    #[test]
+    fn required_config_entries_use_normalized_layout() {
+        assert_eq!(
+            required_config_entries(),
+            &[
+                "agent/domains.lst",
+                "agent/host_ports.lst",
+                "nw_sandbox",
+                "nw_sandbox/domains.lst",
+                "proxy/squid.conf",
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_config_entries_cover_pre_rename_and_flat_layouts() {
+        assert_eq!(
+            legacy_config_entries(),
+            &[
+                ("sandbox_commands", "nw_sandbox"),
+                ("sandbox_domains.lst", "nw_sandbox/domains.lst"),
+                ("cli_domains.lst", "agent/domains.lst"),
+                ("cli_host_ports.lst", "agent/host_ports.lst"),
+                ("agent_domains.lst", "agent/domains.lst"),
+                ("agent_host_ports.lst", "agent/host_ports.lst"),
+                ("nw_sandbox_domains.lst", "nw_sandbox/domains.lst"),
+                ("squid.conf", "proxy/squid.conf"),
+            ]
+        );
     }
 
     #[test]

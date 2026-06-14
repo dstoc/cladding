@@ -35,8 +35,8 @@
 - `scripts/proxy_startup.sh`: resolves pod IPs, writes `/tmp/cli_ips.lst` and `/tmp/sandbox_ips.lst`, injects DNS into Squid config, starts Squid.
 - `scripts/jail_agent.sh` + `scripts/jail_nw_sandbox.sh`: nftables jailer scripts (not inspected yet in this feature).
 - `config-template/`:
-  - `squid.conf` with placeholders for DNS and ACLs.
-  - `agent_domains.lst`, `nw_sandbox_domains.lst`, `agent_host_ports.lst` allowlist files.
+  - `proxy/squid.conf` with placeholders for DNS and ACLs.
+  - `agent/domains.lst`, `nw_sandbox/domains.lst`, `agent/host_ports.lst` allowlist files.
   - `nw_sandbox/` rego policy modules.
 - `README.md` documents cladding usage, mounts, and architecture.
 

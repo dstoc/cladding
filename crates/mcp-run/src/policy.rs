@@ -410,6 +410,20 @@ allow if {
     }
 
     #[test]
+    fn policy_dir_ignores_non_rego_files() {
+        let dir = tempdir().expect("temp rego dir");
+        write_rego_bundle(dir.path(), "echo");
+        std::fs::write(
+            dir.path().join("domains.lst"),
+            "this is not rego and should not be parsed\n",
+        )
+        .expect("write domains list");
+
+        let engine = PolicyEngine::from_sources(Some(dir.path().to_path_buf()));
+        assert_eq!(engine.mode(), PolicyMode::Rego);
+    }
+
+    #[test]
     fn invalid_startup_policy_is_deny_all() {
         let dir = tempdir().expect("temp rego dir");
         std::fs::write(

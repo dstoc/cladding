@@ -56,7 +56,7 @@ nft add rule ip filter OUTPUT ip daddr $SANDBOX_IP tcp dport 3000 accept
 
 # D. Allow Outbound to Host (Direct Access)
 # Allow host gateway access; use allowlist if present.
-HOST_PORTS_FILE="/opt/config/agent_host_ports.lst"
+HOST_PORTS_FILE="/opt/config/agent/host_ports.lst"
 HOST_PORTS=""
 if [ -r "$HOST_PORTS_FILE" ]; then
   HOST_PORTS=$(awk 'NF && $1 !~ /^#/ { print $1 }' "$HOST_PORTS_FILE")
