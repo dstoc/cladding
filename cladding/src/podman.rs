@@ -216,16 +216,15 @@ pub fn podman_play_kube(rendered: &str, network: &NetworkSettings, down: bool) -
     if down {
         cmd.arg("--down");
     } else {
-        cmd.args([
-            "--network",
-            &network.network,
-            "--ip",
-            &network.proxy_ip,
-            "--ip",
-            &network.sandbox_ip,
-            "--ip",
-            &network.cli_ip,
-        ]);
+        cmd.args(["--network", &network.network]);
+        cmd.arg("--ip").arg(&network.proxy_ip);
+        if let Some(nw) = &network.nw_sandbox {
+            cmd.arg("--ip").arg(&nw.ip);
+        }
+        if let Some(fs) = &network.fs_sandbox {
+            cmd.arg("--ip").arg(&fs.ip);
+        }
+        cmd.arg("--ip").arg(&network.agent_ip);
     }
     cmd.arg("-");
     cmd.stdin(Stdio::piped());

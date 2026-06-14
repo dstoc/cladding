@@ -1,6 +1,6 @@
 ---
 name: npm-dependencies
-description: Manage npm package dependencies in this environment. Use when adding or updating npm packages, editing package.json/package-lock.json, or when network access must be constrained to `run-with-network -- npm install --no-scripts [--save | --save-dev] -- package-spec ...` followed by `npm rebuild` outside the sandbox.
+description: Manage npm package dependencies in this environment. Use when adding or updating npm packages, editing package.json/package-lock.json, or when network access must be constrained to `run-in-nw-sandbox -- npm install --no-scripts [--save | --save-dev] -- package-spec ...` followed by `npm rebuild` outside the sandbox.
 ---
 
 # Npm Dependencies
@@ -15,20 +15,20 @@ Add or update npm dependencies using the approved network-safe workflow, then ru
 2. Run the only approved network command:
 
 ```bash
-run-with-network -- npm install --no-scripts -- <package-spec> ...
+run-in-nw-sandbox -- npm install --no-scripts -- <package-spec> ...
 ```
 
 To install from `package.json` (no explicit package specs), run:
 
 ```bash
-run-with-network -- npm install --no-scripts
+run-in-nw-sandbox -- npm install --no-scripts
 ```
 
 3. For dependencies or devDependencies, include exactly one of `--save` or `--save-dev` before the `--` delimiter:
 
 ```bash
-run-with-network -- npm install --no-scripts --save -- <package-spec> ...
-run-with-network -- npm install --no-scripts --save-dev -- <package-spec> ...
+run-in-nw-sandbox -- npm install --no-scripts --save -- <package-spec> ...
+run-in-nw-sandbox -- npm install --no-scripts --save-dev -- <package-spec> ...
 ```
 
 4. After the networked install completes, run install scripts locally outside the sandbox:

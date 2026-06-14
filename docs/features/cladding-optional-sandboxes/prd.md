@@ -196,9 +196,16 @@ The `--target` option is optional and defaults to `nw-sandbox`. If `nw_sandbox` 
 - a clear error that `nw_sandbox` is disabled
 - a hint to enable it in `cladding.json` or choose `--target fs-sandbox` if available
 
-No new user-facing command is required for the first implementation.
+No new host-facing `cladding` subcommand is required for the first implementation.
 
-The existing `run-with-network` helper should be removed as part of this change. It names the old assumption that the only delegated execution target is the network sandbox. Users should invoke sandbox commands through `cladding run-with-scissors`, with `--target` when they need a target other than the default `nw-sandbox`.
+The existing `run-with-network` helper should be removed as part of this change. It names the old assumption that the only delegated execution target is the network sandbox.
+
+There are two command layers:
+
+- host/user CLI: `cladding run-with-scissors`, with `--target` when the user needs a target other than the default `nw-sandbox`
+- in-agent helpers: `run-in-nw-sandbox` and `run-in-fs-sandbox`
+
+The in-agent helpers should be small wrapper scripts that set the appropriate `RUN_REMOTE_SERVER` value for the child process and then delegate to the low-level `run-remote` client. Runtime pod env should still expose component-specific endpoint variables (`RUN_NW_SANDBOX_SERVER` and `RUN_FS_SANDBOX_SERVER`); it should not expose the legacy ambiguous `RUN_REMOTE_SERVER` variable directly.
 
 ### Mount targets
 Replace `mounts[].nwSandboxOnly` with `mounts[].targets`.
@@ -367,7 +374,7 @@ Using fixed slots avoids address churn when a project toggles one sandbox on or 
 6. Add `fs-sandbox` pod rendering with `mcp-run`, `POLICY_DIR=/opt/config/fs_sandbox`, and inbound-only jail behavior.
 7. Update `scripts/jail_agent.sh` to handle zero, one, or two sandbox endpoints.
 8. Add `scripts/jail_fs_sandbox.sh` for the filesystem sandbox's outbound restrictions.
-9. Stop installing `run-with-network` into `.cladding/tools/bin`.
+9. Stop installing `run-with-network` into `.cladding/tools/bin`; install `run-remote`, `run-in-nw-sandbox`, and `run-in-fs-sandbox` instead.
 10. Update `check_required_images()` and `check_required_config_files()` in `cladding/src/cli.rs` to consider only enabled components.
 11. Update `cladding run-with-scissors` to select a sandbox target and fail cleanly when that target is disabled.
 12. Update README, examples, and feature docs for the component-object config, target-based mounts, and removal of `run-with-network`.
@@ -455,7 +462,7 @@ To add a filesystem sandbox:
 12. Duplicate mount paths are allowed across different targets and rejected within the same target.
 13. `mounts[].nwSandboxOnly` and `mounts[].sandboxOnly` fail validation with migration hints.
 14. Old top-level image keys fail validation with migration hints.
-15. `.cladding/tools/bin/run-with-network` is no longer installed or documented.
+15. `.cladding/tools/bin/run-with-network` is no longer installed or documented; `.cladding/tools/bin/run-in-nw-sandbox` and `.cladding/tools/bin/run-in-fs-sandbox` are installed as wrappers around `run-remote`.
 16. `cargo fmt --check`, `cargo test --workspace`, and shell syntax checks for all jail scripts pass.
 
 ## Success criteria

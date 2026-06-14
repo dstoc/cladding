@@ -13,26 +13,84 @@ require_env() {
 }
 
 require_env CLADDING_PROXY_NAME
-require_env CLADDING_SANDBOX_NAME
 
 # Install nftables.
 apk add --no-cache nftables
 
+host_from_server() {
+  server="${1#*://}"
+  server="${server%%/*}"
+  printf '%s\n' "${server%%:*}"
+}
+
+resolve_host_ip() {
+  getent hosts "$1" 2>/dev/null | awk '$1 ~ /^[0-9]+\./ { print $1; exit }'
+}
+
+add_unique_host() {
+  host="$1"
+  if [ -z "$host" ]; then
+    return
+  fi
+  case " $SANDBOX_HOSTS " in
+    *" $host "*) ;;
+    *) SANDBOX_HOSTS="$SANDBOX_HOSTS $host" ;;
+  esac
+}
+
+SANDBOX_HOSTS=""
+if [ -n "${RUN_NW_SANDBOX_SERVER:-}" ]; then
+  add_unique_host "$(host_from_server "$RUN_NW_SANDBOX_SERVER")"
+fi
+if [ -n "${RUN_FS_SANDBOX_SERVER:-}" ]; then
+  add_unique_host "$(host_from_server "$RUN_FS_SANDBOX_SERVER")"
+fi
+if [ -n "${CLADDING_SANDBOX_NAME:-}" ]; then
+  add_unique_host "$CLADDING_SANDBOX_NAME"
+fi
+
 # 1. Resolve Internal Services
 # We need to know where our friends are.
-SANDBOX_IP=""
 PROXY_IP=""
 HOST_IP=""
+SANDBOX_IPS=""
 
-while [ -z "$SANDBOX_IP" ] || [ -z "$PROXY_IP" ] || [ -z "$HOST_IP" ]; do
-  echo "Waiting for network sandbox, proxy, and host gateway..."
-  SANDBOX_IP=$(getent hosts "$CLADDING_SANDBOX_NAME" | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
-  PROXY_IP=$(getent hosts "$CLADDING_PROXY_NAME" | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
-  HOST_IP=$(getent hosts host.containers.internal | awk '$1 ~ /^[0-9]+\./ { print $1; exit }')
+while :; do
+  if [ -z "$PROXY_IP" ]; then
+    PROXY_IP=$(resolve_host_ip "$CLADDING_PROXY_NAME")
+  fi
+  if [ -z "$HOST_IP" ]; then
+    HOST_IP=$(resolve_host_ip host.containers.internal)
+  fi
+
+  READY=1
+  RESOLVED_SANDBOX_IPS=""
+  for SANDBOX_HOST in $SANDBOX_HOSTS; do
+    SANDBOX_IP=$(resolve_host_ip "$SANDBOX_HOST")
+    if [ -z "$SANDBOX_IP" ]; then
+      READY=0
+      break
+    fi
+    case " $RESOLVED_SANDBOX_IPS " in
+      *" $SANDBOX_IP "*) ;;
+      *) RESOLVED_SANDBOX_IPS="$RESOLVED_SANDBOX_IPS $SANDBOX_IP" ;;
+    esac
+  done
+
+  if [ -n "$PROXY_IP" ] && [ -n "$HOST_IP" ] && [ "$READY" -eq 1 ]; then
+    SANDBOX_IPS="$RESOLVED_SANDBOX_IPS"
+    break
+  fi
+
+  echo "Waiting for proxy, host gateway, and enabled sandbox endpoints..."
   sleep 2
 done
 
-echo "Network sandbox ($CLADDING_SANDBOX_NAME) detected at: $SANDBOX_IP"
+if [ -n "$SANDBOX_IPS" ]; then
+  echo "Network sandbox endpoints: ${SANDBOX_IPS# }"
+else
+  echo "Network sandbox disabled"
+fi
 echo "Proxy ($CLADDING_PROXY_NAME) detected at:             $PROXY_IP"
 echo "Host detected at:                                      $HOST_IP"
 
@@ -52,7 +110,9 @@ nft add rule ip filter OUTPUT oifname "lo" accept
 nft add rule ip filter OUTPUT ct state established,related accept
 
 # C. Allow Outbound to Sandbox (Direct Access)
-nft add rule ip filter OUTPUT ip daddr $SANDBOX_IP tcp dport 3000 accept
+for SANDBOX_IP in $SANDBOX_IPS; do
+  nft add rule ip filter OUTPUT ip daddr "$SANDBOX_IP" tcp dport 3000 accept
+done
 
 # D. Allow Outbound to Host (Direct Access)
 # Allow host gateway access; use allowlist if present.

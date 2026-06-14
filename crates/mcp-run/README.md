@@ -323,9 +323,9 @@ Output schema:
 
 Output from MCP tool calls is capped at 1 MiB per stream; truncated output appends `...truncated...`.
 
-## `run-remote` Helper
+## `run-remote` Client
 
-`run-remote` calls `/raw` and streams stdout/stderr locally.
+`run-remote` is a low-level client for `/raw` that streams stdout/stderr locally. Cladding installs wrapper scripts such as `run-in-nw-sandbox` and `run-in-fs-sandbox` that set `RUN_REMOTE_SERVER` from the component-specific endpoint before calling `run-remote`.
 
 - Requires `RUN_REMOTE_SERVER` (full URL, usually `http://127.0.0.1:8000/raw`)
 - Requires `--` delimiter before executable

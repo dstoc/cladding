@@ -1,6 +1,6 @@
 ---
-name: run-with-network-tutor
-description: How to use the run-with-network helper to run commands with network access  
+name: sandbox-network-tutor
+description: How to use run-in-nw-sandbox to run commands with network access from inside the agent
 ---
 
 ## Core Usage Rules
@@ -14,16 +14,14 @@ description: How to use the run-with-network helper to run commands with network
 Use:
 
 ```bash
-run-with-network [--keep-env=VAR] -- <command> <args>
+run-in-nw-sandbox [--keep-env=VAR] -- <command> <args>
 ```
 
 E.g.
 
 ```bash
-run-with-network -- cargo fetch
+run-in-nw-sandbox -- cargo fetch
 ```
-
-Do not omit the `--` delimiter.
 
 ## Environment Forwarding
 
@@ -47,8 +45,8 @@ Do not omit the `--` delimiter.
 
 ## Error Patterns and Fixes
 
-- "missing required '--' delimiter": insert `--` before the command.
 - "local environment variable(s) are not set": export the missing variable before forwarding.
+- "missing required '--' delimiter": insert `--` before the command.
 - "Command not allowed": executable not in policy.
 - "Policy deny-all is active" or "Policy evaluation failed": fix Rego syntax or rule logic in `/opt/config/nw_sandbox/`.
 - Network timeouts or connection failures: check domain allowlist and use only listed domains.

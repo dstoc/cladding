@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sandbox Network Tutor"
+  short_description: "Fix sandboxed network command usage and policy errors"
+  default_prompt: "Use $sandbox-network-tutor to run a sandboxed network command and resolve any policy errors."

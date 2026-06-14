@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: REPLACE_PROXY_NAME
+  labels:
+    app: proxy
+    cladding: CLADDING_NAME
+    project_root: "PROJECT_ROOT"
+spec:
+  hostAliases:
+  - ip: "REPLACE_AGENT_IP"
+    hostnames:
+    - REPLACE_AGENT_NAME
+  - ip: "REPLACE_SANDBOX_IP"
+    hostnames:
+    - REPLACE_SANDBOX_NAME
+  containers:
+  - name: proxy
+    image: docker.io/ubuntu/squid:latest
+    command: ["/bin/sh", "/opt/scripts/proxy_startup.sh"]
+    env:
+    - name: CLADDING_PROXY_NAME
+      value: "REPLACE_PROXY_NAME"
+    - name: CLADDING_SANDBOX_NAME
+      value: "REPLACE_SANDBOX_NAME"
+    - name: CLADDING_AGENT_NAME
+      value: "REPLACE_AGENT_NAME"
+    volumeMounts:
+    - name: config-dir
+      mountPath: /opt/config
+      readOnly: true
+    - name: scripts-dir
+      mountPath: /opt/scripts
+      readOnly: true
+    ports:
+    - containerPort: 8080
+  volumes:
+  - name: config-dir
+    hostPath:
+      path: PROJECT_ROOT/config
+      type: Directory
+  - name: scripts-dir
+    hostPath:
+      path: PROJECT_ROOT/scripts
+      type: Directory

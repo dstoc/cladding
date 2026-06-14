@@ -3,20 +3,23 @@ use cladding::assets::{
     materialize_config, materialize_scripts, materialize_scripts_force, scripts_files,
     scripts_top_level_entries, write_embedded_tools,
 };
-use cladding::config::{Config, load_cladding_config, write_default_cladding_config};
+use cladding::config::{
+    ExecutionConfig, MountTarget, load_cladding_config_v2, write_default_cladding_config,
+};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
-use cladding::network::{parse_cladding_pool_index, resolve_network_settings};
+use cladding::network::{parse_cladding_pool_index, resolve_network_settings_for_config};
 use cladding::podman::{
     EnsureNetworkOutcome, ensure_pool_network_settings, list_podman_network_subnets,
     list_project_expose_proxies, list_running_project_networks, list_running_projects,
     podman_build_image, podman_container_exists, podman_play_kube, podman_remove_containers,
     podman_required,
 };
-use cladding::pods::{host_paths_from_rendered, render_pods_yaml};
-use clap::{ArgAction, Args, Parser, Subcommand};
+use cladding::pods::{host_paths_from_rendered, render_pods_yaml_v2};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -73,6 +76,8 @@ enum CommandSpec {
     },
     /// Run a command in the sandbox container
     RunWithScissors {
+        #[arg(long, value_enum, default_value_t = RunWithScissorsTarget::NwSandbox)]
+        target: RunWithScissorsTarget,
         #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
         env: Vec<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -112,6 +117,43 @@ enum ExposeSubcommand {
     List,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum RunWithScissorsTarget {
+    NwSandbox,
+    FsSandbox,
+}
+
+impl RunWithScissorsTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NwSandbox => "nw-sandbox",
+            Self::FsSandbox => "fs-sandbox",
+        }
+    }
+
+    fn config_key(self) -> &'static str {
+        match self {
+            Self::NwSandbox => "nw_sandbox",
+            Self::FsSandbox => "fs_sandbox",
+        }
+    }
+
+    fn enabled(self, config: &ExecutionConfig) -> bool {
+        match self {
+            Self::NwSandbox => config.nw_sandbox_enabled(),
+            Self::FsSandbox => config.fs_sandbox_enabled(),
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::NwSandbox => Self::FsSandbox,
+            Self::FsSandbox => Self::NwSandbox,
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let command = cli.command.unwrap();
@@ -132,7 +174,9 @@ pub fn run() -> Result<()> {
         CommandSpec::Down => cmd_down(&context),
         CommandSpec::Destroy => cmd_destroy(&context),
         CommandSpec::Run { env, args } => cmd_run(&context, &env, &args),
-        CommandSpec::RunWithScissors { env, args } => cmd_run_with_scissors(&context, &env, &args),
+        CommandSpec::RunWithScissors { target, env, args } => {
+            cmd_run_with_scissors(&context, target, &env, &args)
+        }
         CommandSpec::ReloadProxy => cmd_reload_proxy(&context),
         CommandSpec::Ps => cmd_ps(&context),
         CommandSpec::Expose(args) => cmd_expose(&context, &args),
@@ -185,7 +229,7 @@ fn resolve_project_root(
 }
 
 fn cmd_build(context: &Context) -> Result<()> {
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
 
     let host_uid = unsafe { libc::getuid() };
     let host_gid = unsafe { libc::getgid() };
@@ -202,34 +246,57 @@ fn cmd_build(context: &Context) -> Result<()> {
 
     write_embedded_tools(&tools_bin_dir)?;
 
-    let mut agent_image_built = false;
-    if config.agent_image == DEFAULT_CLI_BUILD_IMAGE {
-        podman_build_image(&config.agent_image, host_uid, host_gid)?;
-        agent_image_built = true;
-    } else {
-        println!(
-            "skip: not building agent image (config agent_image is {}, build target is {})",
-            config.agent_image, DEFAULT_CLADDING_BUILD_IMAGE
-        );
+    let mut built_images = HashSet::new();
+    build_default_image(
+        "agent",
+        config.agent_image(),
+        host_uid,
+        host_gid,
+        &mut built_images,
+    )?;
+    if config.nw_sandbox_enabled() {
+        build_default_image(
+            "nw sandbox",
+            config.nw_sandbox_image(),
+            host_uid,
+            host_gid,
+            &mut built_images,
+        )?;
     }
-
-    if config.nw_sandbox_image == DEFAULT_SANDBOX_BUILD_IMAGE {
-        if config.nw_sandbox_image == config.agent_image && agent_image_built {
-            println!(
-                "skip: nw sandbox image already built (config agent_image and nw_sandbox_image are both {})",
-                config.nw_sandbox_image
-            );
-        } else {
-            podman_build_image(&config.nw_sandbox_image, host_uid, host_gid)?;
-        }
-    } else {
-        println!(
-            "skip: not building nw sandbox image (config nw_sandbox_image is {}, build target is {})",
-            config.nw_sandbox_image, DEFAULT_CLADDING_BUILD_IMAGE
-        );
+    if config.fs_sandbox_enabled() {
+        build_default_image(
+            "fs sandbox",
+            config.fs_sandbox_image(),
+            host_uid,
+            host_gid,
+            &mut built_images,
+        )?;
     }
 
     Ok(())
+}
+
+fn build_default_image(
+    label: &str,
+    image: &str,
+    host_uid: u32,
+    host_gid: u32,
+    built_images: &mut HashSet<String>,
+) -> Result<()> {
+    if !built_images.insert(image.to_string()) {
+        println!("skip: {label} image already built ({image})");
+        return Ok(());
+    }
+
+    if image != DEFAULT_CLADDING_BUILD_IMAGE {
+        println!(
+            "skip: not building {label} image (config image is {}, build target is {})",
+            image, DEFAULT_CLADDING_BUILD_IMAGE
+        );
+        return Ok(());
+    }
+
+    podman_build_image(image, host_uid, host_gid)
 }
 
 fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool) -> Result<()> {
@@ -240,6 +307,7 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
     let tools_dir = project_root.join("tools");
     let cladding_config = project_root.join("cladding.json");
     let cladding_gitignore = project_root.join(".gitignore");
+    let cladding_config_preexisting = cladding_config.exists();
 
     if project_root.exists() && !project_root.is_dir() {
         eprintln!(
@@ -298,7 +366,7 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
         materialize_scripts(&scripts_dir)?;
     }
 
-    if cladding_config.exists() {
+    if cladding_config_preexisting {
         println!(
             "cladding config already exists: {}",
             cladding_config.display()
@@ -318,32 +386,35 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
 }
 
 fn cmd_check(context: &Context) -> Result<()> {
-    check_required_binaries(context)?;
-    let config_files_result = check_required_config_files(context);
-    let config_result = load_cladding_config(&context.project_root);
-    let config = match config_result {
-        Ok(config) => config,
-        Err(err) => {
-            if config_files_result.is_err() {
-                return Err(Error::message("check failed"));
-            }
-            return Err(err);
-        }
-    };
-    config_files_result?;
-    let network_settings = resolve_network_settings(&config.name, 0)?;
+    let legacy_config_entries_present = check_legacy_config_entries(context);
+    let config = load_cladding_config_v2(&context.project_root)?;
+
+    check_required_binaries(context, &config)?;
+    check_required_config_files(context, &config)?;
+    let network_settings = resolve_network_settings_for_config(&config.name, 0, &config)?;
     check_required_host_paths(context, &config, &network_settings)?;
     check_required_scripts_files(context)?;
     check_required_images(&config)?;
+    if legacy_config_entries_present {
+        return Err(Error::message("legacy config entries"));
+    }
     println!("check: ok");
     Ok(())
 }
 
-fn check_required_binaries(context: &Context) -> Result<()> {
+fn check_required_binaries(context: &Context, config: &ExecutionConfig) -> Result<()> {
     let mut missing = false;
     let bin_dir = context.project_root.join("tools/bin");
 
-    for name in ["mcp-run", "run-with-network"] {
+    let mut required = vec!["mcp-run", "run-remote"];
+    if config.nw_sandbox_enabled() {
+        required.push("run-in-nw-sandbox");
+    }
+    if config.fs_sandbox_enabled() {
+        required.push("run-in-fs-sandbox");
+    }
+
+    for name in required {
         let path = bin_dir.join(name);
         if !is_executable(&path) {
             eprintln!("missing: tools/bin/{name} ({})", path.display());
@@ -359,9 +430,31 @@ fn check_required_binaries(context: &Context) -> Result<()> {
     Ok(())
 }
 
-fn check_required_config_files(context: &Context) -> Result<()> {
+fn check_required_config_files(context: &Context, config: &ExecutionConfig) -> Result<()> {
     let dst = context.project_root.join("config");
     let mut missing = false;
+
+    for name in required_config_entries(config) {
+        let path = dst.join(name);
+        if !path.exists() {
+            eprintln!("missing: config/{name} ({})", path.display());
+            missing = true;
+        }
+    }
+
+    if missing {
+        eprintln!(
+            "hint: run cladding init, or add missing config paths under {}",
+            dst.display()
+        );
+        return Err(Error::message("missing config files"));
+    }
+
+    Ok(())
+}
+
+fn check_legacy_config_entries(context: &Context) -> bool {
+    let dst = context.project_root.join("config");
     let mut legacy = false;
 
     for (legacy_name, replacement) in legacy_config_entries() {
@@ -376,37 +469,24 @@ fn check_required_config_files(context: &Context) -> Result<()> {
         }
     }
 
-    for name in required_config_entries() {
-        let path = dst.join(name);
-        if !path.exists() {
-            eprintln!("missing: config/{name} ({})", path.display());
-            missing = true;
-        }
-    }
-
-    if legacy {
-        return Err(Error::message("legacy config entries"));
-    }
-
-    if missing {
-        eprintln!(
-            "hint: run cladding init, or add missing config paths under {}",
-            dst.display()
-        );
-        return Err(Error::message("missing config files"));
-    }
-
-    Ok(())
+    legacy
 }
 
-fn required_config_entries() -> &'static [&'static str] {
-    &[
+fn required_config_entries(config: &ExecutionConfig) -> Vec<&'static str> {
+    let mut entries = vec![
         "agent/domains.lst",
         "agent/host_ports.lst",
-        "nw_sandbox",
-        "nw_sandbox/domains.lst",
         "proxy/squid.conf",
-    ]
+    ];
+    if config.nw_sandbox_enabled() {
+        entries.push("nw_sandbox");
+        entries.push("nw_sandbox/domains.lst");
+    }
+    if config.fs_sandbox_enabled() {
+        entries.push("fs_sandbox");
+        entries.push("fs_sandbox/main.rego");
+    }
+    entries
 }
 
 fn legacy_config_entries() -> &'static [(&'static str, &'static str)] {
@@ -477,13 +557,13 @@ fn warn_on_script_mismatch(context: &Context) -> Result<()> {
 
 fn check_required_host_paths(
     context: &Context,
-    config: &Config,
+    config: &ExecutionConfig,
     network_settings: &cladding::network::NetworkSettings,
 ) -> Result<()> {
-    let rendered = render_pods_yaml(&context.project_root, config, network_settings);
+    let rendered = render_pods_yaml_v2(&context.project_root, config, network_settings);
 
     let mut missing = false;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for path in host_paths_from_rendered(&rendered) {
         if !seen.insert(path.clone()) {
             continue;
@@ -503,9 +583,21 @@ fn check_required_host_paths(
     Ok(())
 }
 
-fn check_required_images(config: &Config) -> Result<()> {
+fn check_required_images(config: &ExecutionConfig) -> Result<()> {
     let mut missing = false;
-    for image in [&config.agent_image, &config.nw_sandbox_image] {
+    let mut images = vec![("agent", config.agent_image())];
+    if config.nw_sandbox_enabled() {
+        images.push(("nw_sandbox", config.nw_sandbox_image()));
+    }
+    if config.fs_sandbox_enabled() {
+        images.push(("fs_sandbox", config.fs_sandbox_image()));
+    }
+
+    let mut seen = HashSet::new();
+    for (label, image) in images {
+        if !seen.insert(image.to_string()) {
+            continue;
+        }
         let status = Command::new("podman")
             .args(["image", "exists", image])
             .status();
@@ -518,7 +610,7 @@ fn check_required_images(config: &Config) -> Result<()> {
                     eprintln!("hint: run cladding build");
                 } else {
                     eprintln!(
-                        "hint: pull/tag image '{image}', or set cladding.json image to a supported build target and run cladding build"
+                        "hint: pull/tag image '{image}', or set cladding.json {label}.image to a supported build target and run cladding build"
                     );
                 }
                 missing = true;
@@ -548,7 +640,10 @@ fn current_project_root(context: &Context) -> Result<String> {
         .to_string())
 }
 
-fn project_runtime_status(context: &Context, config: &Config) -> Result<ProjectRuntimeStatus> {
+fn project_runtime_status(
+    context: &Context,
+    config: &ExecutionConfig,
+) -> Result<ProjectRuntimeStatus> {
     let current_project_root = current_project_root(context)?;
 
     let mut conflicting_roots = Vec::new();
@@ -590,7 +685,7 @@ fn project_runtime_status(context: &Context, config: &Config) -> Result<ProjectR
 }
 
 fn cmd_up(context: &Context) -> Result<()> {
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
     let status = project_runtime_status(context, &config)?;
 
     if status.already_running {
@@ -601,23 +696,23 @@ fn cmd_up(context: &Context) -> Result<()> {
         return Ok(());
     }
 
-    check_required_binaries(context)?;
-    let network_settings = select_available_network_settings(&config.name)?;
+    check_required_binaries(context, &config)?;
+    let network_settings = select_available_network_settings_for_config(&config)?;
     check_required_images(&config)?;
+    check_required_config_files(context, &config)?;
     check_required_host_paths(context, &config, &network_settings)?;
-    check_required_config_files(context)?;
     check_required_scripts_files(context)?;
     warn_on_script_mismatch(context)?;
-    let rendered = render_pods_yaml(&context.project_root, &config, &network_settings);
+    let rendered = render_pods_yaml_v2(&context.project_root, &config, &network_settings);
     podman_play_kube(&rendered, &network_settings, false)
 }
 
 fn cmd_down(context: &Context) -> Result<()> {
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding down")?;
-    let rendered = render_pods_yaml(&context.project_root, &config, &network_settings);
+    let rendered = render_pods_yaml_v2(&context.project_root, &config, &network_settings);
     let pod_result = podman_play_kube(&rendered, &network_settings, true);
     let legacy_cleanup_result = remove_legacy_runtime_pods(&config);
     let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
@@ -628,19 +723,27 @@ fn cmd_down(context: &Context) -> Result<()> {
 }
 
 fn cmd_destroy(context: &Context) -> Result<()> {
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding destroy")?;
 
+    let mut container_names = vec![
+        runtime_container_name(&network_settings.agent_name, "agent"),
+        runtime_container_name(&network_settings.proxy_name, "proxy"),
+    ];
+    if let Some(nw) = &network_settings.nw_sandbox {
+        container_names.push(runtime_container_name(&nw.name, "nw-sandbox"));
+    }
+    if let Some(fs) = &network_settings.fs_sandbox {
+        container_names.push(runtime_container_name(&fs.name, "fs-sandbox"));
+    }
+
+    let mut rm_args = vec!["rm".to_string(), "-f".to_string()];
+    rm_args.extend(container_names);
+
     let status = Command::new("podman")
-        .args([
-            "rm",
-            "-f",
-            &format!("{}-agent", network_settings.agent_name),
-            &format!("{}-nw-sandbox", network_settings.sandbox_name),
-            &format!("{}-proxy", network_settings.proxy_name),
-        ])
+        .args(&rm_args)
         .status()
         .with_context(|| "failed to run podman rm")?;
 
@@ -686,32 +789,89 @@ fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
 }
 
 fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding run")?;
-    let container_name = format!("{}-agent", network_settings.agent_name);
-    run_podman_exec(context, &config, "run", &container_name, env_vars, args)
-}
-
-fn cmd_run_with_scissors(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
-    let config = load_cladding_config(&context.project_root)?;
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding run-with-scissors")?;
-    let container_name = format!("{}-nw-sandbox", network_settings.sandbox_name);
+    let container_name = runtime_container_name(&network_settings.agent_name, "agent");
     run_podman_exec(
         context,
         &config,
-        "run-with-scissors",
+        "run",
+        MountTarget::Agent,
         &container_name,
         env_vars,
         args,
     )
 }
 
+fn cmd_run_with_scissors(
+    context: &Context,
+    target: RunWithScissorsTarget,
+    env_vars: &[String],
+    args: &[String],
+) -> Result<()> {
+    let config = load_cladding_config_v2(&context.project_root)?;
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding run-with-scissors")?;
+    let (container_name, mount_target) = match target {
+        RunWithScissorsTarget::NwSandbox => {
+            let Some(component) = network_settings.nw_sandbox.as_ref() else {
+                return run_with_scissors_target_disabled(&config, target);
+            };
+            (
+                runtime_container_name(&component.name, "nw-sandbox"),
+                MountTarget::NwSandbox,
+            )
+        }
+        RunWithScissorsTarget::FsSandbox => {
+            let Some(component) = network_settings.fs_sandbox.as_ref() else {
+                return run_with_scissors_target_disabled(&config, target);
+            };
+            (
+                runtime_container_name(&component.name, "fs-sandbox"),
+                MountTarget::FsSandbox,
+            )
+        }
+    };
+    run_podman_exec(
+        context,
+        &config,
+        "run-with-scissors",
+        mount_target,
+        &container_name,
+        env_vars,
+        args,
+    )
+}
+
+fn run_with_scissors_target_disabled(
+    config: &ExecutionConfig,
+    target: RunWithScissorsTarget,
+) -> Result<()> {
+    let target_name = target.as_str();
+    let target_key = target.config_key();
+    let other = target.other();
+    let hint = match (other.enabled(config), target.enabled(config)) {
+        (true, false) => format!("hint: use '--target {}'", other.as_str()),
+        (false, false) => "hint: enable 'nw_sandbox.enabled' or 'fs_sandbox.enabled'".to_string(),
+        _ => format!("hint: enable '{target_key}.enabled' or choose a different target"),
+    };
+
+    eprintln!(
+        "error: target '{target_name}' is disabled for project '{}'",
+        config.name
+    );
+    eprintln!("{hint}");
+    Err(Error::message(
+        "selected run-with-scissors target is disabled",
+    ))
+}
+
 fn run_podman_exec(
     context: &Context,
-    config: &Config,
+    config: &ExecutionConfig,
     command_name: &str,
+    mount_target: MountTarget,
     container_name: &str,
     env_vars: &[String],
     args: &[String],
@@ -738,7 +898,7 @@ fn run_podman_exec(
 
     let project_dir = canonicalize_path(&project_dir)?;
     let cwd = canonicalize_path(&cwd)?;
-    let container_workdir = resolve_container_workdir(config, &project_dir, &cwd)?;
+    let container_workdir = resolve_container_workdir(config, &project_dir, &cwd, mount_target)?;
 
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
 
@@ -828,14 +988,14 @@ fn run_podman_exec(
 }
 
 fn cmd_reload_proxy(context: &Context) -> Result<()> {
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding reload-proxy")?;
 
     let status = Command::new("podman")
         .args([
             "exec",
-            &format!("{}-proxy", network_settings.proxy_name),
+            &runtime_container_name(&network_settings.proxy_name, "proxy"),
             "squid",
             "-k",
             "reconfigure",
@@ -851,11 +1011,11 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
 fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u16>) -> Result<()> {
     podman_required("podman (required for cladding expose)")?;
 
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding expose")?;
-    let agent_container_name = format!("{}-agent", network_settings.agent_name);
+    let agent_container_name = runtime_container_name(&network_settings.agent_name, "agent");
 
     if !podman_container_exists(&agent_container_name)? {
         eprintln!(
@@ -909,7 +1069,7 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
 fn cmd_expose_stop(context: &Context, host_port: u16) -> Result<()> {
     podman_required("podman (required for cladding expose stop)")?;
 
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
     let proxies = list_project_expose_proxies(&config.name, &project_root, true)?;
     let matched: Vec<_> = proxies
@@ -934,7 +1094,7 @@ fn cmd_expose_stop(context: &Context, host_port: u16) -> Result<()> {
 fn cmd_expose_list(context: &Context) -> Result<()> {
     podman_required("podman (required for cladding expose list)")?;
 
-    let config = load_cladding_config(&context.project_root)?;
+    let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
     let proxies = list_project_expose_proxies(&config.name, &project_root, false)?;
 
@@ -954,7 +1114,11 @@ fn cmd_expose_list(context: &Context) -> Result<()> {
     Ok(())
 }
 
-fn remove_project_expose_proxies(config: &Config, project_root: &str, force: bool) -> Result<()> {
+fn remove_project_expose_proxies(
+    config: &ExecutionConfig,
+    project_root: &str,
+    force: bool,
+) -> Result<()> {
     let proxies = list_project_expose_proxies(&config.name, project_root, true)?;
     if proxies.is_empty() {
         return Ok(());
@@ -964,7 +1128,7 @@ fn remove_project_expose_proxies(config: &Config, project_root: &str, force: boo
     podman_remove_containers(&ids, force, true)
 }
 
-fn remove_legacy_runtime_pods(config: &Config) -> Result<()> {
+fn remove_legacy_runtime_pods(config: &ExecutionConfig) -> Result<()> {
     let legacy_names = [
         format!("{}-cli-pod", config.name),
         format!("{}-sandbox-pod", config.name),
@@ -999,7 +1163,7 @@ enum ExposeCreateOutcome {
 }
 
 fn try_start_expose_proxy(
-    config: &Config,
+    config: &ExecutionConfig,
     project_root: &str,
     network_settings: &cladding::network::NetworkSettings,
     container_port: u16,
@@ -1022,7 +1186,10 @@ fn try_start_expose_proxy(
 
     cmd.arg("alpine/socat")
         .arg(format!("TCP-LISTEN:{container_port},fork,reuseaddr"))
-        .arg(format!("TCP:{}:{container_port}", network_settings.cli_ip));
+        .arg(format!(
+            "TCP:{}:{container_port}",
+            network_settings.agent_ip
+        ));
 
     let output = cmd
         .output()
@@ -1056,6 +1223,11 @@ fn expose_proxy_labels(
     ]
 }
 
+fn runtime_container_name(pod_name: &str, container_name: &str) -> String {
+    // podman play kube prefixes app container names with the pod name.
+    format!("{pod_name}-{container_name}")
+}
+
 fn unique_expose_proxy_name(project_name: &str, container_port: u16, host_port: u16) -> String {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1079,9 +1251,11 @@ fn image_is_buildable_by_cladding(image: &str) -> bool {
     image == DEFAULT_CLADDING_BUILD_IMAGE
 }
 
-fn select_available_network_settings(name: &str) -> Result<cladding::network::NetworkSettings> {
+fn select_available_network_settings_for_config(
+    config: &ExecutionConfig,
+) -> Result<cladding::network::NetworkSettings> {
     let running = list_running_project_networks()?;
-    let mut used = std::collections::HashSet::new();
+    let mut used = HashSet::new();
     for project in running {
         let Some(index) = parse_cladding_pool_index(&project.network) else {
             continue;
@@ -1089,8 +1263,7 @@ fn select_available_network_settings(name: &str) -> Result<cladding::network::Ne
         used.insert(index);
     }
 
-    let mut subnet_to_networks: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    let mut subnet_to_networks: HashMap<String, Vec<String>> = HashMap::new();
     for entry in list_podman_network_subnets()? {
         subnet_to_networks
             .entry(entry.subnet)
@@ -1111,7 +1284,7 @@ fn select_available_network_settings(name: &str) -> Result<cladding::network::Ne
                 conflicts += 1;
                 continue;
             }
-            let candidate = resolve_network_settings(name, index)?;
+            let candidate = resolve_network_settings_for_config(&config.name, index, config)?;
             match ensure_pool_network_settings(&candidate)? {
                 EnsureNetworkOutcome::Ready => return Ok(candidate),
                 EnsureNetworkOutcome::SubnetMismatch => {
@@ -1139,7 +1312,7 @@ fn select_available_network_settings(name: &str) -> Result<cladding::network::Ne
 
 fn resolve_active_project_network_settings(
     context: &Context,
-    config: &Config,
+    config: &ExecutionConfig,
     command_name: &str,
 ) -> Result<cladding::network::NetworkSettings> {
     let current_project_root = canonicalize_path(&context.project_root)?
@@ -1194,12 +1367,17 @@ fn resolve_active_project_network_settings(
         return Err(Error::message("unexpected active network"));
     };
 
-    resolve_network_settings(&config.name, index)
+    resolve_network_settings_for_config(&config.name, index, config)
 }
 
-fn resolve_container_workdir(config: &Config, project_dir: &Path, cwd: &Path) -> Result<PathBuf> {
-    if let Some(custom_workspace_host_path) =
-        effective_cli_workspace_host_path(config).filter(|path| path.starts_with(project_dir))
+fn resolve_container_workdir(
+    config: &ExecutionConfig,
+    project_dir: &Path,
+    cwd: &Path,
+    target: MountTarget,
+) -> Result<PathBuf> {
+    if let Some(custom_workspace_host_path) = effective_cli_workspace_host_path(config, target)
+        .filter(|path| path.starts_with(project_dir))
     {
         let custom_workspace_host_path = canonicalize_path(&custom_workspace_host_path)?;
         let workdir_rel = cwd.strip_prefix(&custom_workspace_host_path).map_err(|_| {
@@ -1233,11 +1411,13 @@ fn resolve_container_workdir(config: &Config, project_dir: &Path, cwd: &Path) ->
     Ok(join_container_workspace(workdir_rel))
 }
 
-fn effective_cli_workspace_host_path(config: &Config) -> Option<PathBuf> {
-    let custom_mount = config
-        .mounts
-        .iter()
-        .find(|mount| mount.mount_path == CONTAINER_WORKSPACE_DIR && !mount.nw_sandbox_only)?;
+fn effective_cli_workspace_host_path(
+    config: &ExecutionConfig,
+    target: MountTarget,
+) -> Option<PathBuf> {
+    let custom_mount = config.mounts.iter().find(|mount| {
+        mount.mount_path == CONTAINER_WORKSPACE_DIR && mount.targets.contains(&target)
+    })?;
 
     if custom_mount.ignore {
         return None;
@@ -1257,7 +1437,7 @@ fn join_container_workspace(workdir_rel: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cladding::config::MountConfig;
+    use cladding::config::{ExecutionComponentConfig, ExecutionConfig, ResolvedMountConfig};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1305,16 +1485,55 @@ mod tests {
     }
 
     #[test]
+    fn run_with_scissors_target_parses() {
+        let cli = Cli::try_parse_from(["cladding", "run-with-scissors", "--target", "fs-sandbox"])
+            .expect("cli parse");
+
+        match cli.command.expect("command") {
+            CommandSpec::RunWithScissors { target, .. } => {
+                assert_eq!(target, RunWithScissorsTarget::FsSandbox);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn required_config_entries_use_normalized_layout() {
+        let config = execution_config(false, false, Vec::new());
         assert_eq!(
-            required_config_entries(),
-            &[
+            required_config_entries(&config),
+            vec![
                 "agent/domains.lst",
                 "agent/host_ports.lst",
-                "nw_sandbox",
-                "nw_sandbox/domains.lst",
-                "proxy/squid.conf",
+                "proxy/squid.conf"
             ]
+        );
+    }
+
+    #[test]
+    fn required_config_entries_include_enabled_fs_sandbox() {
+        let config = execution_config(false, true, Vec::new());
+        assert_eq!(
+            required_config_entries(&config),
+            vec![
+                "agent/domains.lst",
+                "agent/host_ports.lst",
+                "proxy/squid.conf",
+                "fs_sandbox",
+                "fs_sandbox/main.rego",
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_container_name_matches_podman_play_kube_names() {
+        assert_eq!(
+            runtime_container_name("demo-fs-sandbox", "fs-sandbox"),
+            "demo-fs-sandbox-fs-sandbox"
+        );
+        assert_eq!(
+            runtime_container_name("demo-agent", "agent"),
+            "demo-agent-agent"
         );
     }
 
@@ -1336,21 +1555,38 @@ mod tests {
     }
 
     #[test]
+    fn check_legacy_config_entries_detects_old_layout_paths() {
+        let temp = create_temp_dir("legacy-config-paths");
+        let config_dir = temp.join("config");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::write(config_dir.join("squid.conf"), "legacy").expect("write legacy config");
+
+        let context = Context { project_root: temp };
+
+        assert!(check_legacy_config_entries(&context));
+    }
+
+    #[test]
     fn resolve_container_workdir_uses_default_project_mapping() {
         let temp = create_temp_dir("default-workdir");
         let project_dir = temp.join("workspace");
         let nested_dir = project_dir.join("src/module");
         fs::create_dir_all(&nested_dir).expect("create nested dir");
 
-        let config = Config {
+        let config = ExecutionConfig {
             name: "demo".to_string(),
-            nw_sandbox_image: "sandbox:image".to_string(),
-            agent_image: "agent:image".to_string(),
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
             mounts: Vec::new(),
         };
 
         let resolved =
-            resolve_container_workdir(&config, &project_dir, &nested_dir).expect("workdir");
+            resolve_container_workdir(&config, &project_dir, &nested_dir, MountTarget::Agent)
+                .expect("workdir");
         assert_eq!(
             resolved,
             PathBuf::from(CONTAINER_WORKSPACE_DIR).join("src/module")
@@ -1365,27 +1601,54 @@ mod tests {
         let nested_dir = custom_root.join("src/module");
         fs::create_dir_all(&nested_dir).expect("create nested dir");
 
-        let config = Config {
+        let config = ExecutionConfig {
             name: "demo".to_string(),
-            nw_sandbox_image: "sandbox:image".to_string(),
-            agent_image: "agent:image".to_string(),
-            mounts: vec![MountConfig {
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            mounts: vec![ResolvedMountConfig {
                 mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
-                // `hostPath: "../workspace"` has already been resolved relative to `.cladding`.
                 host_path: Some(custom_root.clone()),
                 volume: None,
                 read_only: false,
-                nw_sandbox_only: false,
+                targets: vec![MountTarget::Agent],
                 ignore: false,
             }],
         };
 
         let resolved =
-            resolve_container_workdir(&config, &project_dir, &nested_dir).expect("workdir");
+            resolve_container_workdir(&config, &project_dir, &nested_dir, MountTarget::Agent)
+                .expect("workdir");
         assert_eq!(
             resolved,
             PathBuf::from(CONTAINER_WORKSPACE_DIR).join("src/module")
         );
+    }
+
+    fn execution_config(
+        nw_enabled: bool,
+        fs_enabled: bool,
+        mounts: Vec<ResolvedMountConfig>,
+    ) -> ExecutionConfig {
+        ExecutionConfig {
+            name: "demo".to_string(),
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: nw_enabled.then(|| ExecutionComponentConfig {
+                enabled: true,
+                image: "sandbox:image".to_string(),
+            }),
+            fs_sandbox: fs_enabled.then(|| ExecutionComponentConfig {
+                enabled: true,
+                image: "fs:image".to_string(),
+            }),
+            mounts,
+        }
     }
 
     fn create_temp_dir(name: &str) -> PathBuf {

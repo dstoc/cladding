@@ -1,4 +1,11 @@
+use crate::config::ExecutionConfig;
 use crate::error::{Error, Result};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentNetworkSettings {
+    pub ip: String,
+    pub name: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct NetworkSettings {
@@ -6,31 +13,63 @@ pub struct NetworkSettings {
     pub network: String,
     pub network_subnet: String,
     pub proxy_ip: String,
-    pub sandbox_ip: String,
-    pub cli_ip: String,
     pub proxy_name: String,
-    pub sandbox_name: String,
+    pub agent_ip: String,
     pub agent_name: String,
+    pub nw_sandbox: Option<ComponentNetworkSettings>,
+    pub fs_sandbox: Option<ComponentNetworkSettings>,
 }
 
-pub fn resolve_network_settings(name: &str, pool_index: u8) -> Result<NetworkSettings> {
+pub fn resolve_network_settings_for_config(
+    name: &str,
+    pool_index: u8,
+    config: &ExecutionConfig,
+) -> Result<NetworkSettings> {
+    resolve_network_settings_internal(
+        name,
+        pool_index,
+        config.nw_sandbox_enabled(),
+        config.fs_sandbox_enabled(),
+    )
+}
+
+fn resolve_network_settings_internal(
+    name: &str,
+    pool_index: u8,
+    nw_enabled: bool,
+    fs_enabled: bool,
+) -> Result<NetworkSettings> {
     let network_subnet = format!("10.90.{pool_index}.0/24");
     let network_base = ipv4_to_int(&format!("10.90.{pool_index}.0"))
         .ok_or_else(|| Error::message("invalid generated network"))?;
-    let proxy_ip = int_to_ipv4(network_base + 2);
-    let sandbox_ip = int_to_ipv4(network_base + 3);
-    let cli_ip = int_to_ipv4(network_base + 4);
+
+    let proxy = ComponentNetworkSettings {
+        ip: int_to_ipv4(network_base + 2),
+        name: format!("{}-proxy", name),
+    };
+    let nw_sandbox = nw_enabled.then(|| ComponentNetworkSettings {
+        ip: int_to_ipv4(network_base + 3),
+        name: format!("{}-nw-sandbox", name),
+    });
+    let fs_sandbox = fs_enabled.then(|| ComponentNetworkSettings {
+        ip: int_to_ipv4(network_base + 4),
+        name: format!("{}-fs-sandbox", name),
+    });
+    let agent = ComponentNetworkSettings {
+        ip: int_to_ipv4(network_base + 5),
+        name: format!("{}-agent", name),
+    };
 
     Ok(NetworkSettings {
         pool_index,
         network: cladding_pool_network_name(pool_index),
         network_subnet,
-        proxy_ip,
-        sandbox_ip,
-        cli_ip,
-        proxy_name: format!("{}-proxy", name),
-        sandbox_name: format!("{}-nw-sandbox", name),
-        agent_name: format!("{}-agent", name),
+        proxy_ip: proxy.ip.clone(),
+        proxy_name: proxy.name.clone(),
+        agent_ip: agent.ip.clone(),
+        agent_name: agent.name.clone(),
+        nw_sandbox,
+        fs_sandbox,
     })
 }
 
@@ -80,6 +119,7 @@ pub fn int_to_ipv4(value: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ExecutionComponentConfig, ExecutionConfig};
 
     #[test]
     fn ipv4_roundtrip() {
@@ -90,15 +130,55 @@ mod tests {
 
     #[test]
     fn resolve_network_settings_basic() {
-        let settings = resolve_network_settings("demo", 5).unwrap();
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: "sandbox:image".to_string(),
+            }),
+            fs_sandbox: None,
+            mounts: Vec::new(),
+        };
+
+        let settings = resolve_network_settings_for_config("demo", 5, &config).unwrap();
         assert_eq!(settings.network, "cladding-5");
         assert_eq!(settings.network_subnet, "10.90.5.0/24");
         assert_eq!(settings.proxy_ip, "10.90.5.2");
-        assert_eq!(settings.sandbox_ip, "10.90.5.3");
-        assert_eq!(settings.cli_ip, "10.90.5.4");
+        assert_eq!(settings.agent_ip, "10.90.5.5");
         assert_eq!(settings.proxy_name, "demo-proxy");
-        assert_eq!(settings.sandbox_name, "demo-nw-sandbox");
         assert_eq!(settings.agent_name, "demo-agent");
+        assert!(settings.nw_sandbox.is_some());
+        assert!(settings.fs_sandbox.is_none());
+    }
+
+    #[test]
+    fn resolve_network_settings_for_config_reflects_optional_components() {
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: None,
+            fs_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: "fs:image".to_string(),
+            }),
+            mounts: Vec::new(),
+        };
+
+        let settings = resolve_network_settings_for_config("demo", 7, &config).unwrap();
+        assert_eq!(settings.proxy_ip, "10.90.7.2");
+        assert_eq!(settings.agent_ip, "10.90.7.5");
+        assert!(settings.nw_sandbox.is_none());
+        assert_eq!(
+            settings.fs_sandbox.as_ref().expect("fs sandbox").ip,
+            "10.90.7.4"
+        );
     }
 
     #[test]

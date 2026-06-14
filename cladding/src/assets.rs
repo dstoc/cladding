@@ -12,6 +12,9 @@ static SCRIPTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../scripts");
 
 static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
 static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
+
+const RUN_IN_NW_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_NW_SANDBOX_SERVER:?RUN_NW_SANDBOX_SERVER must be set}\"\nRUN_REMOTE_SERVER=\"$RUN_NW_SANDBOX_SERVER\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
+const RUN_IN_FS_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_FS_SANDBOX_SERVER:?RUN_FS_SANDBOX_SERVER must be set}\"\nRUN_REMOTE_SERVER=\"$RUN_FS_SANDBOX_SERVER\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
 pub fn config_top_level_entries() -> Vec<String> {
     let mut names = std::collections::BTreeSet::new();
     for entry in CONFIG_DIR.dirs() {
@@ -78,10 +81,20 @@ pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
         .with_context(|| format!("failed to write {}", mcp_run_path.display()))?;
     set_permissions(&mcp_run_path, 0o755)?;
 
-    let run_remote_path = bin_dir.join("run-with-network");
+    let run_remote_path = bin_dir.join("run-remote");
     fs::write(&run_remote_path, RUN_REMOTE_BIN)
         .with_context(|| format!("failed to write {}", run_remote_path.display()))?;
     set_permissions(&run_remote_path, 0o755)?;
+
+    let run_in_nw_sandbox_path = bin_dir.join("run-in-nw-sandbox");
+    fs::write(&run_in_nw_sandbox_path, RUN_IN_NW_SANDBOX)
+        .with_context(|| format!("failed to write {}", run_in_nw_sandbox_path.display()))?;
+    set_permissions(&run_in_nw_sandbox_path, 0o755)?;
+
+    let run_in_fs_sandbox_path = bin_dir.join("run-in-fs-sandbox");
+    fs::write(&run_in_fs_sandbox_path, RUN_IN_FS_SANDBOX)
+        .with_context(|| format!("failed to write {}", run_in_fs_sandbox_path.display()))?;
+    set_permissions(&run_in_fs_sandbox_path, 0o755)?;
 
     Ok(())
 }
