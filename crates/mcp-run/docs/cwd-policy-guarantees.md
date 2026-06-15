@@ -23,7 +23,7 @@ The cwd value selected for a request after applying defaulting rules:
 - if the request supplies `cwd`, that value is the effective cwd input;
 - otherwise, `default_cwd` is the effective cwd input.
 
-The effective cwd input must be absolute. Relative request cwd values are rejected. `default_cwd` must already be absolute.
+The effective cwd input must be absolute. Relative request cwd values are rejected. `default_cwd` is validated as absolute during server startup.
 
 ### Trusted cwd label
 
@@ -59,32 +59,20 @@ the relevant parent directories are:
 
 The final directory's contents matter for command behavior, but the stability of the final directory's name is controlled by its parent.
 
-## Resolver Assumptions
+## Resolver Behavior
 
-The first implementation uses a strict resolver:
+The implemented resolver is strict:
 
 1. The effective cwd input must be absolute.
 2. Relative cwd inputs are rejected.
-3. `.` and `..` components are rejected.
-4. Symlink components are rejected.
-5. Magic-link components are rejected.
-6. Every accepted component is opened as a real directory relative to the already-open fd for its parent.
-7. The resolver keeps the final opened directory fd alive through Rego validation and process spawn.
-8. The resolver does not call `canonicalize` and then later rely on that string for enforcement.
-
-Repeated slashes may be normalized according to the implementation contract. For example, the resolver may treat:
-
-```text
-/foo//bar/
-```
-
-as:
-
-```text
-/foo/bar
-```
-
-if this behavior is documented and tested.
+3. Leading `//` is rejected.
+4. `.` and `..` components are rejected.
+5. Symlink components are rejected.
+6. Magic-link components are rejected.
+7. Repeated slashes and trailing slashes are normalized away, except for leading `//`.
+8. Every accepted component is opened as a real directory relative to the already-open fd for its parent.
+9. The resolver keeps the final opened directory fd alive through Rego validation and process spawn.
+10. The resolver does not call `canonicalize` and then later rely on that string for enforcement.
 
 ## Positive Guarantees
 
@@ -152,7 +140,7 @@ The resolver does not guarantee:
 
 For execution, `mcp-run` mitigates the final-cwd TOCTOU issue by holding the opened cwd fd and using that same fd for spawn.
 
-On Unix, execution should change cwd in the child process with `fchdir(fd)` from a minimal `pre_exec` hook. Execution must not call `Command::current_dir` with the raw request cwd after authorization.
+On Unix, execution changes cwd in the child process with `fchdir(fd)` from a minimal `pre_exec` hook. Execution must not call `Command::current_dir` with the raw request cwd after authorization.
 
 If the raw path is renamed or replaced after authorization, the spawned process still starts in the opened directory object that Rego evaluated.
 

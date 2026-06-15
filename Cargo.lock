@@ -1365,6 +1365,7 @@ dependencies = [
  "axum",
  "base64",
  "futures-util",
+ "libc",
  "notify",
  "regorus",
  "reqwest",

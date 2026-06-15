@@ -23,6 +23,8 @@ pub enum ValidationError {
     PathResolutionFailed { command: String, details: String },
     #[error("Failed to compute executable hash for '{command}': {details}")]
     HashResolutionFailed { command: String, details: String },
+    #[error("Failed to resolve cwd '{cwd}': {details}")]
+    CwdResolutionFailed { cwd: String, details: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +48,7 @@ impl RegoPolicy {
             "hash": input.hash,
             "args": input.args,
             "env": input.env,
+            "cwd": input.cwd,
         });
         engine.set_input(regorus::Value::from(input_value));
         engine
@@ -98,6 +101,7 @@ struct PolicyEvaluationInput<'a> {
     hash: &'a str,
     args: &'a [String],
     env: &'a BTreeMap<String, String>,
+    cwd: &'a str,
 }
 
 impl PolicyEngine {
@@ -154,6 +158,7 @@ impl PolicyEngine {
         hash: &str,
         args: &[String],
         env: &BTreeMap<String, String>,
+        cwd: &str,
     ) -> Result<(), ValidationError> {
         let snapshot = self
             .state
@@ -167,6 +172,7 @@ impl PolicyEngine {
             hash,
             args,
             env,
+            cwd,
         };
 
         match snapshot.mode {
@@ -441,13 +447,14 @@ allow if {
                 "0000000000000000000000000000000000000000000000000000000000000000",
                 &[],
                 &BTreeMap::new(),
+                "/",
             )
             .expect_err("deny-all expected");
         assert!(matches!(err, ValidationError::PolicyUnavailable { .. }));
     }
 
     #[test]
-    fn rego_input_contains_command_path_args_env_hash() {
+    fn rego_input_contains_command_path_args_env_hash_cwd() {
         let modules = [
             (
                 "main.rego",
@@ -471,6 +478,7 @@ allow if {
   input.args[0] == "ok"
   input.env.FLAG == "1"
   input.hash == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  input.cwd == "/workspace"
   startswith(input.path, "/")
 }
 "#,
@@ -488,6 +496,7 @@ allow if {
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     &args,
                     &env,
+                    "/workspace",
                 )
                 .is_ok()
         );
@@ -499,6 +508,7 @@ allow if {
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 &args,
                 &env,
+                "/workspace",
             )
             .expect_err("command token should not match when full path is sent");
         assert!(err.to_string().contains("Command not allowed"));
@@ -519,6 +529,7 @@ allow if {
                     "0000000000000000000000000000000000000000000000000000000000000000",
                     &[],
                     &BTreeMap::new(),
+                    "/",
                 )
                 .is_ok()
         );
@@ -539,6 +550,7 @@ allow if {
                     "0000000000000000000000000000000000000000000000000000000000000000",
                     &[],
                     &BTreeMap::new(),
+                    "/",
                 )
                 .expect_err("deny-all expected"),
             ValidationError::PolicyUnavailable { .. }
@@ -555,6 +567,7 @@ allow if {
                     "0000000000000000000000000000000000000000000000000000000000000000",
                     &[],
                     &BTreeMap::new(),
+                    "/",
                 )
                 .is_ok()
         );
