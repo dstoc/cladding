@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/dstoc/cladding/compare/v0.2.1...v0.2.2) (2026-06-15)
+
+
+### Miscellaneous Chores
+
+* force release 0.2.2 ([6183ab0](https://github.com/dstoc/cladding/commit/6183ab019349f075c3c8e5824fb21fb06c0287d3))
+
 ## [0.2.1](https://github.com/dstoc/cladding/compare/v0.2.0...v0.2.1) (2026-06-15)
 
 
