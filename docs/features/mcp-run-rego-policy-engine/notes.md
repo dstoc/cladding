@@ -12,24 +12,24 @@
 ## Existing Product Findings
 
 ### Current policy architecture (`crates/mcp-run/src/policy.rs`)
-- Policy file is a single JSON file loaded from `POLICY_FILE` via `load_policy`.
-- Top-level policy shape is `Vec<CommandRule>` with strict serde schema and validation for regex patterns.
-- Validation is Rust-implemented logic (`validate_invocation`) with rule OR semantics by command name.
+- Policy is loaded from `POLICY_DIR` only; missing or invalid policy state activates deny-all mode.
+- Rego modules are compiled and evaluated by the active policy engine.
+- Validation remains the shared pre-execution gate for all invocations.
 - Rule features today:
   - arg checks: `exact`, `regex`, `hash` (SHA-256), with optional `position` and `required`
   - env allowlist by key per rule (`env: Vec<String>`)
 - Errors are explicit and user-facing:
-  - `CommandNotAllowed`
-  - `RuleValidationFailed` with details across attempted rules.
+  - command not allowed
+  - policy evaluation failure
+  - deny-all fallback when policy state is invalid
 
 ### Current server wiring (`crates/mcp-run/src/mcp.rs`, `crates/mcp-run/src/raw.rs`, `crates/mcp-run/src/executor.rs`)
-- `AppConfig` requires `POLICY_FILE` and loads policy once at startup in `serve`.
-- Loaded policy is stored in `Arc<Policy>` and injected into both MCP (`/mcp`) and raw (`/raw`) paths.
-- Both execution paths call `spawn_network_tool_process`, which calls `validate_invocation` before process spawn.
+- `AppConfig` reads policy configuration from `POLICY_DIR`, then loads policy state in `serve`.
+- Loaded policy state is stored in `Arc<Policy>` and injected into both MCP (`/mcp`) and raw (`/raw`) paths.
+- Both execution paths call `spawn_command_process`, which calls `validate_invocation` before process spawn.
 - There is no policy hot reload today.
 
 ### Config/runtime surface
-- `POLICY_FILE` currently points to `/opt/config/sandbox_commands.json` in both `Containerfile.sandbox` and `pods.yaml`.
 - `README.md` and `config-template/sandbox_commands.json` document JSON policy format as current user-facing contract.
 - `cladding` build step installs `run-remote` as `run-with-network` helper; helper behavior depends on policy-enforced command execution success.
 
@@ -66,4 +66,4 @@
 - Migration requires temporary dual support: Rego directory engine plus legacy JSON fallback; JSON support will be removed in a later feature.
 - Startup behavior is also fail-closed: if no valid policy can be loaded, server still starts in deny-all mode and continues watching for policy fixes.
 - Current ambiguities are resolved enough to draft PRD.
-- Config split decision: `POLICY_DIR` is the Rego policy directory, while `POLICY_FILE` remains legacy JSON during transition.
+- Config split decision: `POLICY_DIR` is the Rego policy directory.

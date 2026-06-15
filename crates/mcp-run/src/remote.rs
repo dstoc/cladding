@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use reqwest::{StatusCode, Url};
 use thiserror::Error;
 
-use crate::executor::RunNetworkToolInput;
+use crate::executor::RunCommandInput;
 use crate::raw::{RawErrorBody, RawStreamEvent};
 
 pub const LOCAL_FAILURE_EXIT_CODE: i32 = 125;
@@ -65,7 +65,7 @@ async fn run_remote_from_env_with_io<WOut: Write, WErr: Write>(
     let env = collect_forwarded_env(&parsed.keep_env, |name| std::env::var(name).ok())?;
     let cwd = std::env::current_dir().map_err(RemoteClientError::CurrentDir)?;
 
-    let payload = RunNetworkToolInput {
+    let payload = RunCommandInput {
         executable: parsed.executable,
         args: parsed.args,
         cwd: Some(cwd.to_string_lossy().to_string()),
@@ -77,7 +77,7 @@ async fn run_remote_from_env_with_io<WOut: Write, WErr: Write>(
 
 pub async fn run_remote_request<WOut: Write, WErr: Write>(
     server_url: &str,
-    payload: RunNetworkToolInput,
+    payload: RunCommandInput,
     stdout: &mut WOut,
     stderr: &mut WErr,
 ) -> Result<i32, RemoteClientError> {
@@ -386,7 +386,7 @@ mod tests {
             .with_state(vec![first, second]);
         let (url, server_task) = start_server(router).await;
 
-        let payload = RunNetworkToolInput {
+        let payload = RunCommandInput {
             executable: "cmd".to_string(),
             args: vec![],
             cwd: None,
@@ -421,7 +421,7 @@ mod tests {
         let router = Router::new().route("/raw", post(handler));
         let (url, server_task) = start_server(router).await;
 
-        let payload = RunNetworkToolInput {
+        let payload = RunCommandInput {
             executable: "cmd".to_string(),
             args: vec![],
             cwd: None,

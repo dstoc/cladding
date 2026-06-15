@@ -12,7 +12,7 @@ use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
 use thiserror::Error;
 
-use crate::executor::{RunNetworkToolInput, RunNetworkToolOutput, run_network_tool_impl};
+use crate::executor::{RunCommandInput, RunCommandOutput, run_command_impl};
 use crate::policy::{PolicyEngine, PolicyMode};
 use crate::raw::{RawEndpointState, raw_handler};
 
@@ -71,14 +71,14 @@ pub enum AppError {
 }
 
 #[derive(Clone)]
-pub struct NetworkMcpServer {
+pub struct McpRunServer {
     policy_engine: Arc<PolicyEngine>,
     default_cwd: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
-impl NetworkMcpServer {
+impl McpRunServer {
     pub fn new(policy_engine: Arc<PolicyEngine>, default_cwd: PathBuf) -> Self {
         Self {
             policy_engine,
@@ -88,14 +88,14 @@ impl NetworkMcpServer {
     }
 
     #[tool(
-        name = "run_network_tool",
+        name = "run_command",
         description = "Execute a policy-allowlisted command without shell wrappers."
     )]
-    async fn run_network_tool(
+    async fn run_command(
         &self,
-        Parameters(input): Parameters<RunNetworkToolInput>,
-    ) -> Result<Json<RunNetworkToolOutput>, String> {
-        run_network_tool_impl(&self.policy_engine, &self.default_cwd, input)
+        Parameters(input): Parameters<RunCommandInput>,
+    ) -> Result<Json<RunCommandOutput>, String> {
+        run_command_impl(&self.policy_engine, &self.default_cwd, input)
             .await
             .map(Json)
             .map_err(|error| error.to_string())
@@ -103,25 +103,19 @@ impl NetworkMcpServer {
 }
 
 #[tool_handler]
-impl ServerHandler for NetworkMcpServer {
+impl ServerHandler for McpRunServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
-                name: "network-mcp-rust".to_string(),
-                title: Some("Network MCP Rust Reimplementation".to_string()),
+                name: "mcp-run".to_string(),
+                title: Some("mcp-run".to_string()),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                description: Some(
-                    "Policy-enforced network-capable command runner with no shell wrapping."
-                        .to_string(),
-                ),
+                description: Some("Policy-enforced command runner with no shell wrapping.".to_string()),
                 icons: None,
                 website_url: None,
             },
-            instructions: Some(
-                "Use run_network_tool with executable/args/cwd/env. Requests are validated against POLICY_DIR Rego policy modules."
-                    .to_string(),
-            ),
+            instructions: Some("Use run_command with executable/args/cwd/env. Requests are validated against POLICY_DIR Rego policy modules.".to_string()),
             ..Default::default()
         }
     }
@@ -138,7 +132,7 @@ pub fn build_app(policy_engine: Arc<PolicyEngine>, default_cwd: PathBuf) -> Rout
 
     let mcp_service = StreamableHttpService::new(
         move || {
-            Ok(NetworkMcpServer::new(
+            Ok(McpRunServer::new(
                 policy_for_factory.clone(),
                 cwd_for_factory.clone(),
             ))
@@ -164,7 +158,7 @@ pub async fn serve(config: AppConfig) -> Result<(), AppError> {
             PolicyMode::DenyAll => "deny-all",
         },
         policy_dir = ?config.policy_dir.as_ref().map(|path| path.display().to_string()),
-        "starting network MCP server",
+        "starting mcp-run server",
     );
 
     let app = build_app(policy_engine, config.default_cwd.clone());
@@ -182,7 +176,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::executor::{MAX_OUTPUT_BYTES, RunNetworkToolOutput, TRUNCATION_MARKER};
+    use crate::executor::{MAX_OUTPUT_BYTES, RunCommandOutput, TRUNCATION_MARKER};
     use crate::policy::PolicyEngine;
     use rmcp::ServiceExt;
     use rmcp::model::CallToolRequestParams;
@@ -241,11 +235,12 @@ mod tests {
                 .expect("connect MCP client");
 
         let tools = client.list_tools(None).await.expect("list tools");
+        assert!(tools.tools.iter().any(|tool| tool.name == "run_command"));
         assert!(
             tools
                 .tools
                 .iter()
-                .any(|tool| tool.name == "run_network_tool")
+                .all(|tool| tool.name != "run_network_tool")
         );
 
         let arguments = serde_json::json!({
@@ -258,14 +253,14 @@ mod tests {
         let call_result = client
             .call_tool(CallToolRequestParams {
                 meta: None,
-                name: "run_network_tool".to_string().into(),
+                name: "run_command".to_string().into(),
                 arguments,
                 task: None,
             })
             .await
-            .expect("invoke run_network_tool");
+            .expect("invoke run_command");
 
-        let typed: RunNetworkToolOutput = call_result.into_typed().expect("typed response");
+        let typed: RunCommandOutput = call_result.into_typed().expect("typed response");
         assert_eq!(typed.stdout, "smoke");
         assert_eq!(typed.exit_code, Some(0));
 
@@ -311,14 +306,14 @@ mod tests {
         let call_result = client
             .call_tool(CallToolRequestParams {
                 meta: None,
-                name: "run_network_tool".to_string().into(),
+                name: "run_command".to_string().into(),
                 arguments,
                 task: None,
             })
             .await
-            .expect("invoke run_network_tool");
+            .expect("invoke run_command");
 
-        let typed: RunNetworkToolOutput = call_result.into_typed().expect("typed response");
+        let typed: RunCommandOutput = call_result.into_typed().expect("typed response");
         assert!(typed.stdout.ends_with(TRUNCATION_MARKER));
         assert_eq!(typed.exit_code, Some(0));
 

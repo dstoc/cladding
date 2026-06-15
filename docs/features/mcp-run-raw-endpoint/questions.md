@@ -7,10 +7,10 @@
 - Decision/Impact: `/raw` will stream newline-delimited JSON event objects and `run-remote` will parse line-by-line.
 
 ## Q2 (resolved)
-- Question: For `/raw` request bodies, should v1 use a plain JSON object matching `RunNetworkToolInput` (`executable`, `args`, `cwd`, `env`), or a JSON-RPC-style envelope (`jsonrpc`, `method`, `params`, `id`)?
+- Question: For `/raw` request bodies, should v1 use a plain JSON object matching `RunCommandInput` (`executable`, `args`, `cwd`, `env`), or a JSON-RPC-style envelope (`jsonrpc`, `method`, `params`, `id`)?
 - Why it matters: This defines protocol complexity, server/client implementation effort, and forward-compatibility strategy for additional operations.
 - Answer: Plain JSON matching current tool input shape.
-- Decision/Impact: `/raw` v1 will accept direct `RunNetworkToolInput`-compatible JSON with no RPC envelope.
+- Decision/Impact: `/raw` v1 will accept direct `RunCommandInput`-compatible JSON with no RPC envelope.
 
 ## Q3 (resolved)
 - Question: Should `/raw` preserve global output ordering between stdout and stderr chunks (single merged event timeline), or is preserving order within each stream independently sufficient?
@@ -52,7 +52,7 @@
 - Question: For `/raw` request JSON, should we reuse the existing field name `executable` (same as MCP tool input), or introduce `command` and map it internally?
 - Why it matters: Reusing `executable` keeps parity with existing server/tool schema and avoids duplicate request models.
 - Answer: Reuse `executable`.
-- Decision/Impact: `/raw` request contract will align with `RunNetworkToolInput` naming and parsing.
+- Decision/Impact: `/raw` request contract will align with `RunCommandInput` naming and parsing.
 
 ## Q9 (resolved)
 - Question: For this feature, should `/raw` use the same trust boundary as existing `/mcp` (no new auth layer), or should we add endpoint-level authentication now?
@@ -78,7 +78,7 @@
 
 ## Q12 (resolved)
 - Question: Should `/raw` keep the same output cap as existing tool behavior (truncate each stream after 1 MiB), or stream full output without that cap?
-- Why it matters: This changes resource usage and parity guarantees with current `run_network_tool`.
+- Why it matters: This changes resource usage and parity guarantees with current `run_command`.
 - Answer: Stream full output with no 1 MiB cap.
 - Decision/Impact: `/raw` execution path will not apply current per-stream truncation limits, enabling full replay completeness.
 

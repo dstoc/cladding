@@ -18,7 +18,7 @@ pub const TRUNCATION_MARKER: &str = "\n...truncated...";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RunNetworkToolInput {
+pub struct RunCommandInput {
     pub executable: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -30,7 +30,7 @@ pub struct RunNetworkToolInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RunNetworkToolOutput {
+pub struct RunCommandOutput {
     pub stdout: String,
     pub stderr: String,
     #[serde(rename = "exitCode")]
@@ -55,12 +55,12 @@ pub enum ToolError {
     StderrJoin { source: tokio::task::JoinError },
 }
 
-pub async fn run_network_tool_impl(
+pub async fn run_command_impl(
     policy_engine: &PolicyEngine,
     default_cwd: &Path,
-    input: RunNetworkToolInput,
-) -> Result<RunNetworkToolOutput, ToolError> {
-    let mut child = spawn_network_tool_process(policy_engine, default_cwd, input)?;
+    input: RunCommandInput,
+) -> Result<RunCommandOutput, ToolError> {
+    let mut child = spawn_command_process(policy_engine, default_cwd, input)?;
 
     let stdout = child.stdout.take().ok_or_else(|| ToolError::StdoutRead {
         source: std::io::Error::other("stdout pipe missing"),
@@ -89,17 +89,17 @@ pub async fn run_network_tool_impl(
     let (stderr_bytes, stderr_truncated) =
         stderr_capture.map_err(|source| ToolError::StderrRead { source })?;
 
-    Ok(RunNetworkToolOutput {
+    Ok(RunCommandOutput {
         stdout: finalize_capture(stdout_bytes, stdout_truncated),
         stderr: finalize_capture(stderr_bytes, stderr_truncated),
         exit_code: status.code(),
     })
 }
 
-pub fn spawn_network_tool_process(
+pub fn spawn_command_process(
     policy_engine: &PolicyEngine,
     default_cwd: &Path,
-    input: RunNetworkToolInput,
+    input: RunCommandInput,
 ) -> Result<Child, ToolError> {
     let user_env = input.env.unwrap_or_default();
     let resolved_executable = resolve_executable_path(&input.executable).map_err(|details| {
@@ -494,10 +494,10 @@ mod tests {
         };
 
         let policy_engine = rego_engine_allow_commands(&[&env_path]);
-        let output = run_network_tool_impl(
+        let output = run_command_impl(
             &policy_engine,
             Path::new("."),
-            RunNetworkToolInput {
+            RunCommandInput {
                 executable: env_path,
                 args: vec!["printf".to_string(), "ok".to_string()],
                 cwd: None,
@@ -520,10 +520,10 @@ mod tests {
         };
 
         let policy_engine = rego_engine_allow_commands(&[&env_path]);
-        let output = run_network_tool_impl(
+        let output = run_command_impl(
             &policy_engine,
             Path::new("."),
-            RunNetworkToolInput {
+            RunCommandInput {
                 executable: env_path,
                 args: vec![],
                 cwd: None,
@@ -607,10 +607,10 @@ mod tests {
         };
 
         let policy_engine = rego_engine_allow_commands(&[&env_path]);
-        let error = run_network_tool_impl(
+        let error = run_command_impl(
             &policy_engine,
             Path::new("."),
-            RunNetworkToolInput {
+            RunCommandInput {
                 executable: "echo".to_string(),
                 args: vec!["blocked".to_string()],
                 cwd: None,
@@ -631,10 +631,10 @@ mod tests {
         };
 
         let policy_engine = rego_engine_allow_commands(&[&head_path]);
-        let output = run_network_tool_impl(
+        let output = run_command_impl(
             &policy_engine,
             Path::new("."),
-            RunNetworkToolInput {
+            RunCommandInput {
                 executable: head_path,
                 args: vec![
                     "-c".to_string(),

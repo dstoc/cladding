@@ -15,16 +15,17 @@
   - `Router::new().route_service("/mcp", any_service(mcp_service))`
 - Config:
   - `MCP_BIND_ADDR` (default `127.0.0.1:8000`)
-  - `POLICY_FILE` (required)
-- Tool exposed via MCP: `run_network_tool`.
+  - `POLICY_DIR` (Rego policy directory, recommended)
+  - `POLICY_FILE` (legacy JSON fallback during transition, if present)
+- Tool exposed via MCP: `run_command`.
 
 ### Command execution behavior (`crates/mcp-run/src/executor.rs`)
-- Request model: `RunNetworkToolInput`
+- Request model: `RunCommandInput`
   - `executable: String`
   - `args: Vec<String>`
   - `cwd: Option<String>`
   - `env: Option<BTreeMap<String, String>>`
-- Output model: `RunNetworkToolOutput`
+- Output model: `RunCommandOutput`
   - `stdout: String`
   - `stderr: String`
   - `exitCode: Option<i32>`
@@ -48,7 +49,7 @@
 - Prior PRD (`docs/features/network-mcp-rust-reimplementation/prd.md`) emphasizes parity-first behavior, no-shell execution, and policy enforcement.
 
 ## Initial Implications for This Feature
-- `/raw` should likely reuse `RunNetworkToolInput` validation/execution paths to avoid policy drift.
+- `/raw` should likely reuse `RunCommandInput` validation/execution paths to avoid policy drift.
 - Streaming behavior is currently absent: executor returns final aggregated buffers only.
 - `run-remote` likely needs protocol framing for at least:
   - start/ack
@@ -59,7 +60,7 @@
 
 ## Clarified Decisions From Q&A
 - Streaming protocol: use HTTP chunked `application/x-ndjson` for `/raw` responses.
-- Request protocol: `/raw` accepts plain JSON matching `RunNetworkToolInput`; no JSON-RPC envelope in v1.
+- Request protocol: `/raw` accepts plain JSON matching `RunCommandInput`; no JSON-RPC envelope in v1.
 - Output ordering contract: preserve ordering within each stream independently (`stdout`, `stderr`), without global cross-stream ordering guarantees.
 - CLI flag naming: use `--keep-env` (the earlier `--keep-end` mention was a typo).
 - `RUN_REMOTE_SERVER` format: full URL required in v1 (no host:port shorthand).

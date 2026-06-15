@@ -4,7 +4,7 @@
 
 It exposes two HTTP endpoints on one server:
 
-- `/mcp`: MCP Streamable HTTP endpoint with tool `run_network_tool`
+- `/mcp`: MCP Streamable HTTP endpoint with tool `run_command`
 - `/raw`: NDJSON streaming endpoint for direct command execution
 
 Policy decisions are made by [Rego](https://www.openpolicyagent.org/docs/policy-reference) modules loaded from `POLICY_DIR`.
@@ -306,7 +306,7 @@ Response is NDJSON events:
 
 ## MCP Tool Contract (`/mcp`)
 
-Tool name: `run_network_tool`
+Tool name: `run_command`
 
 Input schema:
 

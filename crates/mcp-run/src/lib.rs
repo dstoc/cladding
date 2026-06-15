@@ -5,11 +5,11 @@ mod raw;
 mod remote;
 
 pub use executor::{
-    MAX_OUTPUT_BYTES, RunNetworkToolInput, RunNetworkToolOutput, TRUNCATION_MARKER, ToolError,
-    run_network_tool_impl, spawn_network_tool_process,
+    MAX_OUTPUT_BYTES, RunCommandInput, RunCommandOutput, TRUNCATION_MARKER, ToolError,
+    run_command_impl, spawn_command_process,
 };
 pub use mcp::{
-    AppConfig, AppError, ConfigError, DEFAULT_BIND_ADDR, NetworkMcpServer, build_app, serve,
+    AppConfig, AppError, ConfigError, DEFAULT_BIND_ADDR, McpRunServer, build_app, serve,
     tool_error_result,
 };
 pub use policy::{PolicyEngine, PolicyMode, ValidationError};

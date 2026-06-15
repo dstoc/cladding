@@ -16,7 +16,7 @@ use tokio::process::{Child, ChildStderr, ChildStdout};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::executor::{RunNetworkToolInput, ToolError, spawn_network_tool_process};
+use crate::executor::{RunCommandInput, ToolError, spawn_command_process};
 use crate::policy::PolicyEngine;
 
 #[derive(Debug, Clone)]
@@ -81,7 +81,7 @@ enum ReaderEvent {
 
 pub async fn raw_handler(
     State(state): State<RawEndpointState>,
-    payload: Result<Json<RunNetworkToolInput>, JsonRejection>,
+    payload: Result<Json<RunCommandInput>, JsonRejection>,
 ) -> Response {
     let input = match payload {
         Ok(Json(input)) => input,
@@ -97,11 +97,7 @@ pub async fn raw_handler(
     let executable = input.executable.clone();
     let args_for_log = input.args.clone();
 
-    let mut child = match spawn_network_tool_process(
-        &state.policy_engine,
-        &state.default_cwd,
-        input,
-    ) {
+    let mut child = match spawn_command_process(&state.policy_engine, &state.default_cwd, input) {
         Ok(child) => child,
         Err(ToolError::Validation(error)) => {
             tracing::warn!(command = %executable, args = ?args_for_log, error = %error, "raw request denied by policy");
@@ -335,7 +331,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::executor::{MAX_OUTPUT_BYTES, RunNetworkToolInput};
+    use crate::executor::{MAX_OUTPUT_BYTES, RunCommandInput};
     use crate::mcp::build_app;
     use crate::policy::PolicyEngine;
 
@@ -435,7 +431,7 @@ mod tests {
         let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&sh_path])).await;
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
-            .json(&RunNetworkToolInput {
+            .json(&RunCommandInput {
                 executable: sh_path,
                 args: vec!["-c".to_string(), script.to_string()],
                 cwd: None,
@@ -482,7 +478,7 @@ mod tests {
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
-            .json(&RunNetworkToolInput {
+            .json(&RunCommandInput {
                 executable: "echo".to_string(),
                 args: vec!["blocked".to_string()],
                 cwd: None,
@@ -513,7 +509,7 @@ mod tests {
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
-            .json(&RunNetworkToolInput {
+            .json(&RunCommandInput {
                 executable: head_path,
                 args: vec![
                     "-c".to_string(),
@@ -550,7 +546,7 @@ mod tests {
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
-            .json(&RunNetworkToolInput {
+            .json(&RunCommandInput {
                 executable: sh_path,
                 args: vec!["-c".to_string(), script.to_string()],
                 cwd: None,
@@ -579,7 +575,7 @@ mod tests {
 
         let response = reqwest::Client::new()
             .post(format!("{base_url}/raw"))
-            .json(&RunNetworkToolInput {
+            .json(&RunCommandInput {
                 executable: sh_path,
                 args: vec!["-c".to_string(), script.to_string()],
                 cwd: None,

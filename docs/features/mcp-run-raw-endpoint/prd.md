@@ -16,7 +16,7 @@ This enables simple, scriptable remote command execution without MCP protocol/cl
 
 ### 1. Scope and Placement
 1. Feature implementation is inside `mcp-run`.
-2. Existing `/mcp` endpoint and existing `run_network_tool` behavior remain available.
+2. Existing `/mcp` endpoint and existing `run_command` behavior remain available.
 3. A new binary named `run-remote` is added in the same crate.
 
 ### 2. `/raw` Endpoint
