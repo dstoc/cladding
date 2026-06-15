@@ -27,7 +27,7 @@ pub fn render_pods_yaml_v2(
             return rendered_docs.join("---\n");
         };
         apply_component_mutations(&mut doc, template.kind, network_settings);
-        apply_custom_mounts(&mut doc, &config.name, &config.mounts);
+        apply_custom_mounts(&mut doc, template.kind, &config.name, &config.mounts);
         docs.push(doc);
     }
 
@@ -278,7 +278,7 @@ fn customize_proxy_doc(doc: &mut Value, network_settings: &NetworkSettings) {
         return;
     };
 
-    let Some(container) = container_by_name_mut(containers, "proxy") else {
+    let Some(container) = container_by_name_mut(containers, "instance") else {
         return;
     };
 
@@ -344,7 +344,7 @@ fn customize_agent_doc(doc: &mut Value, network_settings: &NetworkSettings) {
         return;
     };
 
-    let Some(container) = container_by_name_mut(containers, "agent") else {
+    let Some(container) = container_by_name_mut(containers, "instance") else {
         return;
     };
 
@@ -544,7 +544,16 @@ fn build_custom_mounts(project_name: &str, mounts: &[ResolvedMountConfig]) -> Ve
     custom_mounts
 }
 
-fn apply_custom_mounts(doc: &mut Value, project_name: &str, mounts: &[ResolvedMountConfig]) {
+fn apply_custom_mounts(
+    doc: &mut Value,
+    kind: TemplateKind,
+    project_name: &str,
+    mounts: &[ResolvedMountConfig],
+) {
+    let Some(target) = template_mount_target(kind) else {
+        return;
+    };
+
     let custom_mounts = build_custom_mounts(project_name, mounts);
 
     let Some(spec) = pod_spec_mut(doc) else {
@@ -575,13 +584,9 @@ fn apply_custom_mounts(doc: &mut Value, project_name: &str, mounts: &[ResolvedMo
         let Some(container_map) = container.as_mapping_mut() else {
             continue;
         };
-        let Some(container_name) = mapping_get(container_map, "name").and_then(Value::as_str)
-        else {
+        if mapping_get(container_map, "name").and_then(Value::as_str) != Some("instance") {
             continue;
-        };
-        let Some(target) = container_target(container_name) else {
-            continue;
-        };
+        }
 
         let Some(volume_mounts) = seq_get_mut_mapping(container_map, "volumeMounts") else {
             continue;
@@ -793,12 +798,12 @@ fn container_by_name_mut<'a>(containers: &'a mut [Value], name: &str) -> Option<
     None
 }
 
-fn container_target(name: &str) -> Option<MountTarget> {
-    match name {
-        "agent" => Some(MountTarget::Agent),
-        "nw-sandbox" => Some(MountTarget::NwSandbox),
-        "fs-sandbox" => Some(MountTarget::FsSandbox),
-        _ => None,
+fn template_mount_target(kind: TemplateKind) -> Option<MountTarget> {
+    match kind {
+        TemplateKind::Agent => Some(MountTarget::Agent),
+        TemplateKind::NwSandbox => Some(MountTarget::NwSandbox),
+        TemplateKind::FsSandbox => Some(MountTarget::FsSandbox),
+        TemplateKind::ConfigMap | TemplateKind::Proxy => None,
     }
 }
 

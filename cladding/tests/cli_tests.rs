@@ -27,7 +27,7 @@ fn render_pods_yaml_v2_default_config_renders_enabled_components() {
     assert!(!rendered.contains("demo-fs-sandbox"));
     assert!(!rendered.contains("RUN_REMOTE_SERVER"));
 
-    let agent_env = container_env(&rendered, "demo-agent", "agent");
+    let agent_env = container_env(&rendered, "demo-agent", "instance");
     assert_eq!(
         agent_env.get("RUN_NW_SANDBOX_SERVER").map(String::as_str),
         Some("http://demo-nw-sandbox:3000/raw")
@@ -45,10 +45,10 @@ fn render_pods_yaml_v2_disabled_nw_removes_nw_rendering_and_envs() {
     assert!(!rendered.contains("RUN_NW_SANDBOX_SERVER"));
     assert!(!rendered.contains("RUN_REMOTE_SERVER"));
 
-    let proxy_env = container_env(&rendered, "demo-proxy", "proxy");
+    let proxy_env = container_env(&rendered, "demo-proxy", "instance");
     assert!(!proxy_env.contains_key("CLADDING_SANDBOX_NAME"));
 
-    let agent_env = container_env(&rendered, "demo-agent", "agent");
+    let agent_env = container_env(&rendered, "demo-agent", "instance");
     assert!(!agent_env.contains_key("CLADDING_SANDBOX_NAME"));
     assert!(!agent_env.contains_key("RUN_NW_SANDBOX_SERVER"));
 
@@ -64,7 +64,7 @@ fn render_pods_yaml_v2_enabled_fs_adds_fs_pod_and_agent_endpoint() {
 
     assert!(rendered_doc_names(&rendered).contains(&"demo-fs-sandbox".to_string()));
 
-    let fs_container_env = container_env(&rendered, "demo-fs-sandbox", "fs-sandbox");
+    let fs_container_env = container_env(&rendered, "demo-fs-sandbox", "instance");
     assert_eq!(
         fs_container_env.get("POLICY_DIR").map(String::as_str),
         Some("/opt/config/fs_sandbox")
@@ -72,12 +72,12 @@ fn render_pods_yaml_v2_enabled_fs_adds_fs_pod_and_agent_endpoint() {
     assert!(!fs_container_env.contains_key("http_proxy"));
     assert!(!fs_container_env.contains_key("https_proxy"));
     assert_eq!(
-        container_command(&rendered, "demo-fs-sandbox", "fs-sandbox"),
+        container_command(&rendered, "demo-fs-sandbox", "instance"),
         vec!["mcp-run".to_string()]
     );
     assert!(rendered.contains("jail_fs_sandbox.sh"));
 
-    let agent_env = container_env(&rendered, "demo-agent", "agent");
+    let agent_env = container_env(&rendered, "demo-agent", "instance");
     assert_eq!(
         agent_env.get("RUN_FS_SANDBOX_SERVER").map(String::as_str),
         Some("http://demo-fs-sandbox:3000/raw")
@@ -120,11 +120,11 @@ fn targeted_mounts_apply_per_component() {
     let rendered = render_pods_yaml_v2(Path::new("/tmp/project/.cladding"), &config, &settings);
 
     assert_eq!(
-        container_mount_host_path(&rendered, "demo-agent", "agent", "/workspace"),
+        container_mount_host_path(&rendered, "demo-agent", "instance", "/workspace"),
         Some("/tmp/workspace-ro".to_string())
     );
     assert_eq!(
-        container_mount_host_path(&rendered, "demo-fs-sandbox", "fs-sandbox", "/workspace"),
+        container_mount_host_path(&rendered, "demo-fs-sandbox", "instance", "/workspace"),
         Some("/tmp/workspace-fs".to_string())
     );
 }
@@ -147,11 +147,11 @@ fn ignore_mount_removes_default_mount_for_target() {
     let rendered = render_pods_yaml_v2(Path::new("/tmp/project/.cladding"), &config, &settings);
 
     assert!(
-        !container_mount_paths(&rendered, "demo-agent", "agent")
+        !container_mount_paths(&rendered, "demo-agent", "instance")
             .contains(&"/opt/config".to_string())
     );
     assert!(
-        container_mount_paths(&rendered, "demo-nw-sandbox", "nw-sandbox")
+        container_mount_paths(&rendered, "demo-nw-sandbox", "instance")
             .contains(&"/opt/config".to_string())
     );
 }

@@ -34,7 +34,7 @@ spec:
       value: "REPLACE_AGENT_NAME"
     command: ["/bin/sh", "/opt/scripts/jail_nw_sandbox.sh"]
   containers:
-  - name: nw-sandbox
+  - name: instance
     image: REPLACE_NW_SANDBOX_IMAGE
     imagePullPolicy: Never
     command: ["mcp-run"]

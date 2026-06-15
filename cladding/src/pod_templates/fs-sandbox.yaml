@@ -23,7 +23,7 @@ spec:
       readOnly: true
     command: ["/bin/sh", "/opt/scripts/jail_fs_sandbox.sh"]
   containers:
-  - name: fs-sandbox
+  - name: instance
     image: REPLACE_FS_SANDBOX_IMAGE
     imagePullPolicy: Never
     command: ["mcp-run"]

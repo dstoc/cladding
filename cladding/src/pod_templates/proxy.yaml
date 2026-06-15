@@ -15,7 +15,7 @@ spec:
     hostnames:
     - REPLACE_SANDBOX_NAME
   containers:
-  - name: proxy
+  - name: instance
     image: docker.io/ubuntu/squid:latest
     command: ["/bin/sh", "/opt/scripts/proxy_startup.sh"]
     env:

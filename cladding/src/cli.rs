@@ -729,14 +729,14 @@ fn cmd_destroy(context: &Context) -> Result<()> {
         resolve_active_project_network_settings(context, &config, "cladding destroy")?;
 
     let mut container_names = vec![
-        runtime_container_name(&network_settings.agent_name, "agent"),
-        runtime_container_name(&network_settings.proxy_name, "proxy"),
+        runtime_container_name(&network_settings.agent_name),
+        runtime_container_name(&network_settings.proxy_name),
     ];
     if let Some(nw) = &network_settings.nw_sandbox {
-        container_names.push(runtime_container_name(&nw.name, "nw-sandbox"));
+        container_names.push(runtime_container_name(&nw.name));
     }
     if let Some(fs) = &network_settings.fs_sandbox {
-        container_names.push(runtime_container_name(&fs.name, "fs-sandbox"));
+        container_names.push(runtime_container_name(&fs.name));
     }
 
     let mut rm_args = vec!["rm".to_string(), "-f".to_string()];
@@ -792,7 +792,7 @@ fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()
     let config = load_cladding_config_v2(&context.project_root)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding run")?;
-    let container_name = runtime_container_name(&network_settings.agent_name, "agent");
+    let container_name = runtime_container_name(&network_settings.agent_name);
     run_podman_exec(
         context,
         &config,
@@ -819,7 +819,7 @@ fn cmd_run_with_scissors(
                 return run_with_scissors_target_disabled(&config, target);
             };
             (
-                runtime_container_name(&component.name, "nw-sandbox"),
+                runtime_container_name(&component.name),
                 MountTarget::NwSandbox,
             )
         }
@@ -828,7 +828,7 @@ fn cmd_run_with_scissors(
                 return run_with_scissors_target_disabled(&config, target);
             };
             (
-                runtime_container_name(&component.name, "fs-sandbox"),
+                runtime_container_name(&component.name),
                 MountTarget::FsSandbox,
             )
         }
@@ -995,7 +995,7 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
     let status = Command::new("podman")
         .args([
             "exec",
-            &runtime_container_name(&network_settings.proxy_name, "proxy"),
+            &runtime_container_name(&network_settings.proxy_name),
             "squid",
             "-k",
             "reconfigure",
@@ -1015,7 +1015,7 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
     let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding expose")?;
-    let agent_container_name = runtime_container_name(&network_settings.agent_name, "agent");
+    let agent_container_name = runtime_container_name(&network_settings.agent_name);
 
     if !podman_container_exists(&agent_container_name)? {
         eprintln!(
@@ -1223,9 +1223,9 @@ fn expose_proxy_labels(
     ]
 }
 
-fn runtime_container_name(pod_name: &str, container_name: &str) -> String {
+fn runtime_container_name(pod_name: &str) -> String {
     // podman play kube prefixes app container names with the pod name.
-    format!("{pod_name}-{container_name}")
+    format!("{pod_name}-instance")
 }
 
 fn unique_expose_proxy_name(project_name: &str, container_port: u16, host_port: u16) -> String {
@@ -1528,13 +1528,10 @@ mod tests {
     #[test]
     fn runtime_container_name_matches_podman_play_kube_names() {
         assert_eq!(
-            runtime_container_name("demo-fs-sandbox", "fs-sandbox"),
-            "demo-fs-sandbox-fs-sandbox"
+            runtime_container_name("demo-fs-sandbox"),
+            "demo-fs-sandbox-instance"
         );
-        assert_eq!(
-            runtime_container_name("demo-agent", "agent"),
-            "demo-agent-agent"
-        );
+        assert_eq!(runtime_container_name("demo-agent"), "demo-agent-instance");
     }
 
     #[test]

@@ -47,7 +47,7 @@ spec:
       value: "REPLACE_RUN_FS_SANDBOX_SERVER"
     command: ["/bin/sh", "/opt/scripts/jail_agent.sh"]
   containers:
-  - name: agent
+  - name: instance
     image: REPLACE_AGENT_IMAGE
     imagePullPolicy: Never
     command: ["sleep", "infinity"]

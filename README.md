@@ -146,7 +146,7 @@ Default mounts may be overridden by adding an entry with the same `mount` value,
 flowchart TB
   subgraph C["<name>-agent"]
     CJ[agent-node: nftables jailer]
-    CA[agent]
+    CA[agent instance]
   end
 
   subgraph H[volumes]
@@ -157,12 +157,12 @@ flowchart TB
 
   subgraph S["<name>-nw-sandbox"]
     SJ[nw-sandbox-node: nftables jailer]
-    SA[nw-sandbox: mcp-run :3000]
+    SA[nw-sandbox instance: mcp-run :3000]
   end
 
   subgraph F["<name>-fs-sandbox"]
     FJ[fs-sandbox-node: nftables jailer]
-    FA[fs-sandbox: mcp-run :3000]
+    FA[fs-sandbox instance: mcp-run :3000]
   end
 
   subgraph P["<name>-proxy"]
@@ -202,8 +202,9 @@ cladding reload-proxy # reconfigure squid after domain-list edits
 cladding down         # stop associated pods
 cladding destroy      # force-remove running containers
 cladding up           # starts the containers
-podman logs -f <name>-proxy-proxy              # view proxy logs
-podman logs -f <name>-nw-sandbox-nw-sandbox    # network sandbox (mcp-run) logs
+podman logs -f <name>-proxy-instance              # view proxy logs
+podman logs -f <name>-nw-sandbox-instance         # network sandbox (mcp-run) logs
+podman logs -f <name>-fs-sandbox-instance         # filesystem sandbox (mcp-run) logs
 ```
 
 Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to ask an enabled sandbox to run an allowlisted command. These wrappers call `run-remote` with the component-specific endpoint injected into the agent environment.
