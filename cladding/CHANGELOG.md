@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/dstoc/cladding/compare/v0.1.2...v0.2.0) (2026-06-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* normalize config layout
+* simplify container/pod/config naming
+
+### Features
+
+* add `cladding logs` ([0c27bfd](https://github.com/dstoc/cladding/commit/0c27bfd351285ba871a1354d2046fe41acc8e3f9))
+* add optional fs sandbox ([69d17d0](https://github.com/dstoc/cladding/commit/69d17d0b403eb750602822457ba16d4e9836d6d9))
+* normalize config layout ([b5cbdd5](https://github.com/dstoc/cladding/commit/b5cbdd56b08022ac77d8e9eb748623adc52aeae1))
+* simplify container naming e.g. &lt;name&gt;-agent-agent to &lt;name&gt;-agent-instance ([909db90](https://github.com/dstoc/cladding/commit/909db90bc91df827e9e0c92c1665b32c7a34305e))
+* simplify container/pod/config naming ([8f53953](https://github.com/dstoc/cladding/commit/8f53953b78a18d09e1f67cc1311c9a862ff9e75f))
+
 ## [0.1.2](https://github.com/dstoc/cladding/compare/v0.1.1...v0.1.2) (2026-06-06)
 
 
