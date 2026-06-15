@@ -37,6 +37,17 @@ pub struct RunCommandOutput {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCommandCheckOutput {
+    pub allowed: bool,
+    pub reason: Option<String>,
+    pub executable: String,
+    pub resolved_path: Option<String>,
+    pub hash: Option<String>,
+    pub policy_mode: String,
+}
+
 #[derive(Debug, Error)]
 pub enum ToolError {
     #[error(transparent)]
@@ -101,37 +112,32 @@ pub fn spawn_command_process(
     default_cwd: &Path,
     input: RunCommandInput,
 ) -> Result<Child, ToolError> {
-    let user_env = input.env.unwrap_or_default();
-    let resolved_executable = resolve_executable_path(&input.executable).map_err(|details| {
-        ToolError::Validation(ValidationError::PathResolutionFailed {
-            command: input.executable.clone(),
-            details,
-        })
-    })?;
-    let executable_hash =
-        compute_executable_sha256_hex(&resolved_executable).map_err(|details| {
-            ToolError::Validation(ValidationError::HashResolutionFailed {
-                command: input.executable.clone(),
-                details,
-            })
-        })?;
-    policy_engine.validate_invocation(
-        &input.executable,
-        &resolved_executable,
-        &executable_hash,
-        &input.args,
-        &user_env,
-    )?;
+    let authorization = authorize_command_request(policy_engine, input);
+    if !authorization.decision.allowed {
+        return Err(ToolError::Validation(
+            authorization
+                .validation_error
+                .expect("authorization denial without validation error"),
+        ));
+    }
+
+    let user_env = authorization.user_env;
+    let resolved_executable = authorization
+        .decision
+        .resolved_path
+        .as_deref()
+        .expect("allowed authorization without resolved executable");
+    let cwd = authorization.input.cwd.as_deref();
 
     let mut command = Command::new(&resolved_executable);
     command
-        .args(&input.args)
+        .args(&authorization.input.args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    if let Some(cwd) = input.cwd.as_deref() {
+    if let Some(cwd) = cwd {
         command.current_dir(cwd);
     } else {
         command.current_dir(default_cwd);
@@ -148,6 +154,106 @@ pub fn spawn_command_process(
     command
         .spawn()
         .map_err(|source| ToolError::Spawn { source })
+}
+
+pub fn check_command(
+    policy_engine: &PolicyEngine,
+    _default_cwd: &Path,
+    input: RunCommandInput,
+) -> RunCommandCheckOutput {
+    authorize_command_request(policy_engine, input).decision
+}
+
+#[derive(Debug)]
+struct CommandAuthorization {
+    decision: RunCommandCheckOutput,
+    validation_error: Option<ValidationError>,
+    user_env: BTreeMap<String, String>,
+    input: RunCommandInput,
+}
+
+fn authorize_command_request(
+    policy_engine: &PolicyEngine,
+    input: RunCommandInput,
+) -> CommandAuthorization {
+    let user_env = input.env.clone().unwrap_or_default();
+    let policy_mode = match policy_engine.mode() {
+        crate::policy::PolicyMode::Rego => "rego",
+        crate::policy::PolicyMode::DenyAll => "deny-all",
+    }
+    .to_string();
+
+    let mut decision = RunCommandCheckOutput {
+        allowed: false,
+        reason: None,
+        executable: input.executable.clone(),
+        resolved_path: None,
+        hash: None,
+        policy_mode,
+    };
+
+    let resolved_path = match resolve_executable_path(&input.executable) {
+        Ok(path) => path,
+        Err(details) => {
+            let validation_error = ValidationError::PathResolutionFailed {
+                command: input.executable.clone(),
+                details,
+            };
+            decision.reason = Some(validation_error.to_string());
+            return CommandAuthorization {
+                decision,
+                validation_error: Some(validation_error),
+                user_env,
+                input,
+            };
+        }
+    };
+    decision.resolved_path = Some(resolved_path.clone());
+
+    let executable_hash = match compute_executable_sha256_hex(&resolved_path) {
+        Ok(hash) => hash,
+        Err(details) => {
+            let validation_error = ValidationError::HashResolutionFailed {
+                command: input.executable.clone(),
+                details,
+            };
+            decision.reason = Some(validation_error.to_string());
+            return CommandAuthorization {
+                decision,
+                validation_error: Some(validation_error),
+                user_env,
+                input,
+            };
+        }
+    };
+    decision.hash = Some(executable_hash.clone());
+
+    match policy_engine.validate_invocation(
+        &input.executable,
+        &resolved_path,
+        &executable_hash,
+        &input.args,
+        &user_env,
+    ) {
+        Ok(()) => {
+            decision.allowed = true;
+            CommandAuthorization {
+                decision,
+                validation_error: None,
+                user_env,
+                input,
+            }
+        }
+        Err(validation_error) => {
+            decision.reason = Some(validation_error.to_string());
+            CommandAuthorization {
+                decision,
+                validation_error: Some(validation_error),
+                user_env,
+                input,
+            }
+        }
+    }
 }
 
 pub(crate) fn resolve_executable_path(command: &str) -> Result<String, String> {
@@ -487,6 +593,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_allows_command_with_resolved_path_and_hash() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script_path = temp.path().join("allowed-check.sh");
+        std::fs::write(&script_path, b"#!/bin/sh\necho allowed\n").expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("set perms");
+        }
+
+        let script = script_path.to_string_lossy().into_owned();
+        let expected_hash = compute_executable_sha256_hex(script_path.to_string_lossy().as_ref())
+            .expect("hash should succeed");
+        let expected_path = script_path.to_string_lossy().into_owned();
+        let policy_engine = rego_engine_allow_commands(&[&script]);
+        let decision = check_command(
+            &policy_engine,
+            Path::new("."),
+            RunCommandInput {
+                executable: script.clone(),
+                args: vec![],
+                cwd: None,
+                env: None,
+            },
+        );
+
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, None);
+        assert_eq!(decision.executable, script);
+        assert_eq!(
+            decision.resolved_path.as_deref(),
+            Some(expected_path.as_str())
+        );
+        assert_eq!(decision.hash.as_deref(), Some(expected_hash.as_str()));
+        assert_eq!(decision.policy_mode, "rego");
+    }
+
+    #[tokio::test]
     async fn executes_allowed_command_successfully() {
         let env_path = match find_executable("env") {
             Some(path) => path,
@@ -650,5 +798,115 @@ mod tests {
 
         assert_eq!(output.exit_code, Some(0));
         assert!(output.stdout.ends_with(TRUNCATION_MARKER));
+    }
+
+    #[tokio::test]
+    async fn check_denied_by_policy_returns_data_without_spawning() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let side_effect_file = temp.path().join("side-effect.txt");
+        let script_path = temp.path().join("side-effect.sh");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nprintf spawned > {}\n",
+                side_effect_file.display()
+            ),
+        )
+        .expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("set perms");
+        }
+
+        let script = script_path.to_string_lossy().into_owned();
+        let policy_engine = rego_engine_allow_commands(&["/bin/does-not-match-this-path"]);
+        let decision = check_command(
+            &policy_engine,
+            Path::new("."),
+            RunCommandInput {
+                executable: script,
+                args: vec![],
+                cwd: None,
+                env: None,
+            },
+        );
+
+        assert!(!decision.allowed);
+        assert!(
+            decision
+                .reason
+                .as_deref()
+                .expect("reason")
+                .contains("Command not allowed")
+        );
+        assert!(!side_effect_file.exists());
+    }
+
+    #[tokio::test]
+    async fn check_reports_deny_all_mode() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("bad.rego"),
+            "package sandbox.main\nallow if",
+        )
+        .expect("write bad rego");
+        let policy_engine = PolicyEngine::from_sources(Some(temp.path().to_path_buf()));
+
+        let env_path = match find_executable("env") {
+            Some(path) => path,
+            None => return,
+        };
+
+        let decision = check_command(
+            &policy_engine,
+            Path::new("."),
+            RunCommandInput {
+                executable: env_path,
+                args: vec![],
+                cwd: None,
+                env: None,
+            },
+        );
+
+        assert!(!decision.allowed);
+        assert!(
+            decision
+                .reason
+                .as_deref()
+                .expect("reason")
+                .contains("Policy deny-all is active")
+        );
+        assert_eq!(decision.policy_mode, "deny-all");
+    }
+
+    #[tokio::test]
+    async fn check_reports_missing_executable() {
+        let policy_engine = rego_engine_allow_commands(&["/bin/does-not-matter"]);
+        let decision = check_command(
+            &policy_engine,
+            Path::new("."),
+            RunCommandInput {
+                executable: "definitely-not-a-real-command-for-mcp-run".to_string(),
+                args: vec![],
+                cwd: None,
+                env: None,
+            },
+        );
+
+        assert!(!decision.allowed);
+        assert!(
+            decision
+                .reason
+                .as_deref()
+                .expect("reason")
+                .contains("was not found on PATH")
+        );
+        assert!(decision.resolved_path.is_none());
+        assert!(decision.hash.is_none());
     }
 }

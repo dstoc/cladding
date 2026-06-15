@@ -16,7 +16,9 @@ use tokio::process::{Child, ChildStderr, ChildStdout};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::executor::{RunCommandInput, ToolError, spawn_command_process};
+use crate::executor::{
+    RunCommandCheckOutput, RunCommandInput, ToolError, check_command, spawn_command_process,
+};
 use crate::policy::PolicyEngine;
 
 #[derive(Debug, Clone)]
@@ -152,6 +154,38 @@ pub async fn raw_handler(
         HeaderValue::from_static("application/x-ndjson"),
     );
     response
+}
+
+pub async fn check_handler(
+    State(state): State<RawEndpointState>,
+    payload: Result<Json<RunCommandInput>, JsonRejection>,
+) -> Response {
+    let input = match payload {
+        Ok(Json(input)) => input,
+        Err(error) => {
+            tracing::warn!(error = %error, "check request rejected before validation");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("Invalid request payload: {error}"),
+            );
+        }
+    };
+
+    let executable = input.executable.clone();
+    let args_for_log = input.args.clone();
+    let decision: RunCommandCheckOutput =
+        check_command(&state.policy_engine, &state.default_cwd, input);
+
+    tracing::info!(
+        command = %executable,
+        args = ?args_for_log,
+        allowed = decision.allowed,
+        policy_mode = %decision.policy_mode,
+        reason = ?decision.reason,
+        "check request evaluated",
+    );
+
+    (StatusCode::OK, Json(decision)).into_response()
 }
 
 async fn stream_process_events(
@@ -331,7 +365,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::executor::{MAX_OUTPUT_BYTES, RunCommandInput};
+    use crate::executor::{MAX_OUTPUT_BYTES, RunCommandCheckOutput, RunCommandInput};
     use crate::mcp::build_app;
     use crate::policy::PolicyEngine;
 
@@ -464,6 +498,101 @@ mod tests {
             events.last(),
             Some(RawStreamEvent::Exit { exit_code: Some(0) })
         ));
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn check_returns_allowed_decision_with_path_and_hash() {
+        let sh_path = match find_executable("sh") {
+            Some(path) => path,
+            None => return,
+        };
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&sh_path])).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{base_url}/check"))
+            .json(&RunCommandInput {
+                executable: sh_path.clone(),
+                args: vec!["-c".to_string(), "printf ok".to_string()],
+                cwd: None,
+                env: None,
+            })
+            .send()
+            .await
+            .expect("request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let decision = response
+            .json::<RunCommandCheckOutput>()
+            .await
+            .expect("decision json");
+        assert!(decision.allowed);
+        assert_eq!(decision.executable, sh_path);
+        assert!(decision.resolved_path.is_some());
+        assert!(decision.hash.is_some());
+        assert_eq!(decision.policy_mode, "rego");
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn check_returns_denied_decision_as_success() {
+        let true_path = match find_executable("true") {
+            Some(path) => path,
+            None => return,
+        };
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&true_path])).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{base_url}/check"))
+            .json(&RunCommandInput {
+                executable: "echo".to_string(),
+                args: vec!["blocked".to_string()],
+                cwd: None,
+                env: None,
+            })
+            .send()
+            .await
+            .expect("request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let decision = response
+            .json::<RunCommandCheckOutput>()
+            .await
+            .expect("decision json");
+        assert!(!decision.allowed);
+        assert!(
+            decision
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Command not allowed")
+        );
+        assert!(decision.resolved_path.is_some());
+        assert!(decision.hash.is_some());
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn check_rejects_malformed_json_with_json_error() {
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[])).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{base_url}/check"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body("{\"executable\":")
+            .send()
+            .await
+            .expect("request");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response
+            .json::<RawErrorBody>()
+            .await
+            .expect("json error response");
+        assert!(body.error.contains("Invalid request payload"));
 
         server_task.abort();
     }

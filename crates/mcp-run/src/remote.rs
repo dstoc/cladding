@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use reqwest::{StatusCode, Url};
 use thiserror::Error;
 
-use crate::executor::RunCommandInput;
+use crate::executor::{RunCommandCheckOutput, RunCommandInput};
 use crate::raw::{RawErrorBody, RawStreamEvent};
 
 pub const LOCAL_FAILURE_EXIT_CODE: i32 = 125;
@@ -44,6 +44,7 @@ pub enum RemoteClientError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedArgs {
+    check: bool,
     keep_env: Vec<String>,
     executable: String,
     args: Vec<String>,
@@ -60,19 +61,59 @@ async fn run_remote_from_env_with_io<WOut: Write, WErr: Write>(
     stdout: &mut WOut,
     stderr: &mut WErr,
 ) -> Result<i32, RemoteClientError> {
+    run_remote_with_context(
+        args,
+        std::env::var("RUN_REMOTE_SERVER").ok(),
+        || {
+            std::env::current_dir()
+                .map(|path| path.to_string_lossy().to_string())
+                .map_err(RemoteClientError::CurrentDir)
+        },
+        |name| std::env::var(name).ok(),
+        stdout,
+        stderr,
+    )
+    .await
+}
+
+async fn run_remote_with_context<WOut: Write, WErr: Write, FEnv, FCwd>(
+    args: Vec<String>,
+    server_url: Option<String>,
+    cwd: FCwd,
+    env_lookup: FEnv,
+    stdout: &mut WOut,
+    stderr: &mut WErr,
+) -> Result<i32, RemoteClientError>
+where
+    FEnv: FnMut(&str) -> Option<String>,
+    FCwd: FnOnce() -> Result<String, RemoteClientError>,
+{
     let parsed = parse_args(&args)?;
-    let server_url = resolve_server_url(std::env::var("RUN_REMOTE_SERVER").ok())?;
-    let env = collect_forwarded_env(&parsed.keep_env, |name| std::env::var(name).ok())?;
-    let cwd = std::env::current_dir().map_err(RemoteClientError::CurrentDir)?;
+    let server_url = resolve_server_url(server_url)?;
+    let env = collect_forwarded_env(&parsed.keep_env, env_lookup)?;
+    let cwd = cwd()?;
+    let payload = build_payload(parsed.executable, parsed.args, cwd, env);
 
-    let payload = RunCommandInput {
-        executable: parsed.executable,
-        args: parsed.args,
-        cwd: Some(cwd.to_string_lossy().to_string()),
+    if parsed.check {
+        let check_url = derive_check_server_url(&server_url)?;
+        run_remote_check_request(&check_url, payload, stdout, stderr).await
+    } else {
+        run_remote_request(&server_url, payload, stdout, stderr).await
+    }
+}
+
+fn build_payload(
+    executable: String,
+    args: Vec<String>,
+    cwd: String,
+    env: BTreeMap<String, String>,
+) -> RunCommandInput {
+    RunCommandInput {
+        executable,
+        args,
+        cwd: Some(cwd),
         env: Some(env),
-    };
-
-    run_remote_request(&server_url, payload, stdout, stderr).await
+    }
 }
 
 pub async fn run_remote_request<WOut: Write, WErr: Write>(
@@ -99,6 +140,45 @@ pub async fn run_remote_request<WOut: Write, WErr: Write>(
     }
 
     process_stream(response, stdout, stderr).await
+}
+
+async fn run_remote_check_request<WOut: Write, WErr: Write>(
+    server_url: &str,
+    payload: RunCommandInput,
+    stdout: &mut WOut,
+    _stderr: &mut WErr,
+) -> Result<i32, RemoteClientError> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(server_url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(RemoteClientError::Request)?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.map_err(RemoteClientError::Request)?;
+        let message = serde_json::from_str::<RawErrorBody>(&body)
+            .map(|decoded| decoded.error)
+            .unwrap_or_else(|_| body.trim().to_string());
+        return Err(RemoteClientError::ServerRejected { status, message });
+    }
+
+    let body = response.bytes().await.map_err(RemoteClientError::Request)?;
+    let decision: RunCommandCheckOutput = serde_json::from_slice(&body)
+        .map_err(|error| RemoteClientError::Protocol(format!("invalid decision JSON: {error}")))?;
+
+    let serialized = serde_json::to_vec(&decision).map_err(|error| {
+        RemoteClientError::Protocol(format!("failed to serialize decision JSON: {error}"))
+    })?;
+    stdout
+        .write_all(&serialized)
+        .and_then(|_| stdout.write_all(b"\n"))
+        .and_then(|_| stdout.flush())
+        .map_err(RemoteClientError::OutputWrite)?;
+
+    Ok(if decision.allowed { 0 } else { 1 })
 }
 
 async fn process_stream<WOut: Write, WErr: Write>(
@@ -197,12 +277,18 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, RemoteClientError> {
         .position(|arg| arg == "--")
         .ok_or(RemoteClientError::MissingDelimiter)?;
 
+    let mut check = false;
     let mut keep_env = Vec::new();
     let mut seen = HashSet::new();
 
     let mut index = 0;
     while index < delimiter {
         let arg = &args[index];
+        if arg == "--check" {
+            check = true;
+            index += 1;
+            continue;
+        }
         if let Some(value) = arg.strip_prefix("--keep-env=") {
             append_keep_env(value, &mut keep_env, &mut seen);
             index += 1;
@@ -229,6 +315,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, RemoteClientError> {
         .ok_or(RemoteClientError::MissingExecutable)?;
 
     Ok(ParsedArgs {
+        check,
         keep_env,
         executable,
         args: command[1..].to_vec(),
@@ -292,6 +379,29 @@ fn resolve_server_url(raw: Option<String>) -> Result<String, RemoteClientError> 
     Ok(url)
 }
 
+fn derive_check_server_url(server_url: &str) -> Result<String, RemoteClientError> {
+    let mut url = Url::parse(server_url).map_err(|_| RemoteClientError::InvalidServerUrl)?;
+    let mut segments = url
+        .path_segments()
+        .ok_or(RemoteClientError::InvalidServerUrl)?
+        .map(|segment| segment.to_string())
+        .collect::<Vec<_>>();
+
+    if let Some(last) = segments.last_mut() {
+        if last == "raw" {
+            *last = "check".to_string();
+        } else {
+            segments.push("check".to_string());
+        }
+    } else {
+        segments.push("check".to_string());
+    }
+
+    let path = format!("/{}", segments.join("/"));
+    url.set_path(&path);
+    Ok(url.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -317,6 +427,30 @@ mod tests {
         let err = resolve_server_url(Some("127.0.0.1:8000".to_string()))
             .expect_err("host:port shorthand should fail");
         assert!(matches!(err, RemoteClientError::InvalidServerUrl));
+    }
+
+    #[test]
+    fn parse_args_supports_check_and_keep_env_before_delimiter() {
+        let args = vec![
+            "--check".to_string(),
+            "--keep-env=ONE,TWO".to_string(),
+            "--".to_string(),
+            "echo".to_string(),
+            "hello".to_string(),
+        ];
+        let parsed = parse_args(&args).expect("args should parse");
+
+        assert!(parsed.check);
+        assert_eq!(parsed.keep_env, vec!["ONE", "TWO"]);
+        assert_eq!(parsed.executable, "echo");
+        assert_eq!(parsed.args, vec!["hello"]);
+    }
+
+    #[test]
+    fn derive_check_server_url_replaces_raw_suffix() {
+        let derived = derive_check_server_url("http://127.0.0.1:8000/raw")
+            .expect("check url should be derived");
+        assert_eq!(derived, "http://127.0.0.1:8000/check");
     }
 
     #[test]
@@ -441,6 +575,197 @@ mod tests {
             }
         ));
         assert!(err.to_string().contains("blocked"));
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn check_mode_parses_keep_env_and_uses_check_endpoint() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct CheckState {
+            raw_hits: Arc<AtomicUsize>,
+            check_hits: Arc<AtomicUsize>,
+        }
+
+        async fn raw_handler(State(state): State<CheckState>) -> Response {
+            state.raw_hits.fetch_add(1, Ordering::SeqCst);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(RawErrorBody {
+                    error: "raw should not be called".to_string(),
+                }),
+            )
+                .into_response()
+        }
+
+        async fn check_handler(State(state): State<CheckState>, body: Bytes) -> Response {
+            state.check_hits.fetch_add(1, Ordering::SeqCst);
+            let input: RunCommandInput = serde_json::from_slice(&body).expect("request body");
+            assert_eq!(input.executable, "echo");
+            assert_eq!(input.args, vec!["hello"]);
+            assert_eq!(input.cwd.as_deref(), Some("/work"));
+            assert_eq!(
+                input.env.as_ref().expect("env map").get("API_TOKEN"),
+                Some(&"secret".to_string())
+            );
+            assert_eq!(
+                input.env.as_ref().expect("env map").get("CI"),
+                Some(&"1".to_string())
+            );
+
+            (
+                StatusCode::OK,
+                axum::Json(RunCommandCheckOutput {
+                    allowed: true,
+                    reason: None,
+                    executable: input.executable,
+                    resolved_path: Some("/usr/bin/echo".to_string()),
+                    hash: Some("abc".to_string()),
+                    policy_mode: "rego".to_string(),
+                }),
+            )
+                .into_response()
+        }
+
+        let state = CheckState {
+            raw_hits: Arc::new(AtomicUsize::new(0)),
+            check_hits: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let router = Router::new()
+            .route("/raw", post(raw_handler))
+            .route("/check", post(check_handler))
+            .with_state(state.clone());
+        let (url, server_task) = start_server(router).await;
+
+        let args = vec![
+            "--check".to_string(),
+            "--keep-env=API_TOKEN,CI".to_string(),
+            "--".to_string(),
+            "echo".to_string(),
+            "hello".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_remote_with_context(
+            args,
+            Some(url),
+            || Ok("/work".to_string()),
+            |name| match name {
+                "API_TOKEN" => Some("secret".to_string()),
+                "CI" => Some("1".to_string()),
+                _ => None,
+            },
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .expect("check request should succeed");
+
+        assert_eq!(code, 0);
+        assert_eq!(state.raw_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(state.check_hits.load(Ordering::SeqCst), 1);
+
+        let decision: RunCommandCheckOutput =
+            serde_json::from_slice(&stdout).expect("stdout should contain JSON decision");
+        assert!(decision.allowed);
+        assert_eq!(decision.executable, "echo");
+        assert_eq!(decision.policy_mode, "rego");
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn check_mode_returns_denied_exit_code_and_json_output() {
+        async fn handler(State(_): State<()>, body: Bytes) -> Response {
+            let input: RunCommandInput = serde_json::from_slice(&body).expect("request body");
+            assert_eq!(input.executable, "blocked");
+            (
+                StatusCode::OK,
+                axum::Json(RunCommandCheckOutput {
+                    allowed: false,
+                    reason: Some("command not allowed".to_string()),
+                    executable: input.executable,
+                    resolved_path: Some("/usr/bin/blocked".to_string()),
+                    hash: Some("deadbeef".to_string()),
+                    policy_mode: "rego".to_string(),
+                }),
+            )
+                .into_response()
+        }
+
+        let router = Router::new().route("/check", post(handler)).with_state(());
+        let (url, server_task) = start_server(router).await;
+
+        let args = vec![
+            "--check".to_string(),
+            "--".to_string(),
+            "blocked".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_remote_with_context(
+            args,
+            Some(url),
+            || Ok("/work".to_string()),
+            |_name| None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .expect("check request should succeed");
+
+        assert_eq!(code, 1);
+        let decision: RunCommandCheckOutput =
+            serde_json::from_slice(&stdout).expect("stdout should contain JSON decision");
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason.as_deref(), Some("command not allowed"));
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn check_mode_does_not_use_streaming_parser_for_json_responses() {
+        async fn handler() -> Response {
+            (
+                StatusCode::OK,
+                axum::Json(RunCommandCheckOutput {
+                    allowed: true,
+                    reason: None,
+                    executable: "echo".to_string(),
+                    resolved_path: Some("/usr/bin/echo".to_string()),
+                    hash: Some("abc".to_string()),
+                    policy_mode: "rego".to_string(),
+                }),
+            )
+                .into_response()
+        }
+
+        let router = Router::new().route("/check", post(handler));
+        let (url, server_task) = start_server(router).await;
+
+        let args = vec!["--check".to_string(), "--".to_string(), "echo".to_string()];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_remote_with_context(
+            args,
+            Some(url),
+            || Ok("/work".to_string()),
+            |_name| None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .expect("check request should succeed");
+
+        assert_eq!(code, 0);
+        let decision: RunCommandCheckOutput =
+            serde_json::from_slice(&stdout).expect("stdout should contain JSON decision");
+        assert!(decision.allowed);
+        assert!(stdout.starts_with(b"{"));
 
         server_task.abort();
     }

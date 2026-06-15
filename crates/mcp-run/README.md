@@ -2,10 +2,11 @@
 
 `mcp-run` is a policy-enforced command runner for constrained environments.
 
-It exposes two HTTP endpoints on one server:
+It exposes three HTTP endpoints on one server:
 
 - `/mcp`: MCP Streamable HTTP endpoint with tool `run_command`
 - `/raw`: NDJSON streaming endpoint for direct command execution
+- `/check`: JSON policy-check endpoint that returns a decision object
 
 Policy decisions are made by [Rego](https://www.openpolicyagent.org/docs/policy-reference) modules loaded from `POLICY_DIR`.
 
@@ -22,6 +23,13 @@ Policy decisions are made by [Rego](https://www.openpolicyagent.org/docs/policy-
 - Runtime is fail-closed:
   - if policy load fails at startup, server still starts but denies all requests
   - if policy reload fails, engine switches to deny-all until a valid policy set is loaded
+
+Policy checks are advisory and point-in-time:
+
+- `/check` and `check_command` evaluate the same pre-spawn authorization path as execution
+- they return a decision object instead of starting a process
+- a later execution can still differ if policy or the executable file changes after the check
+- callers that need enforcement must still execute through `mcp-run`; `/check` is not a capability token
 
 ## Configuration
 
@@ -90,6 +98,8 @@ data.sandbox.main.allow
 ```
 
 Your modules should produce a single boolean `allow` decision.
+
+The same input and authorization path are used by `check_command`, `POST /check`, and `run-remote --check`.
 
 Router pattern (recommended):
 
@@ -330,6 +340,8 @@ Output from MCP tool calls is capped at 1 MiB per stream; truncated output appen
 - Requires `RUN_REMOTE_SERVER` (full URL, usually `http://127.0.0.1:8000/raw`)
 - Requires `--` delimiter before executable
 - Supports env forwarding with `--keep-env`
+- `--check` switches from `/raw` streaming to `/check` JSON output
+- default `run-remote -- ...` behavior remains unchanged
 
 Examples:
 
@@ -344,7 +356,20 @@ run-remote --keep-env=API_TOKEN,CI -- curl -I https://example.com
 
 # equivalent two-arg keep-env form
 run-remote --keep-env API_TOKEN -- curl -I https://example.com
+
+# policy-only preflight
+run-remote --check -- curl -I https://example.com
 ```
+
+`run-remote --check` builds the same payload as execution, including `cwd` and forwarded env, but sends it to `/check` instead of `/raw`. If `RUN_REMOTE_SERVER` ends in `/raw`, the client derives the check endpoint by replacing the final path segment with `/check`.
+
+Exit codes for `run-remote --check`:
+
+- `0` when the check succeeds and `allowed` is `true`
+- `1` when the check succeeds and `allowed` is `false`
+- `125` for local/client/server failures such as parse errors, missing env, connection failures, malformed responses, or HTTP errors
+
+The JSON decision object is written to stdout.
 
 ## Live Reload Behavior
 

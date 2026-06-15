@@ -5,8 +5,8 @@ mod raw;
 mod remote;
 
 pub use executor::{
-    MAX_OUTPUT_BYTES, RunCommandInput, RunCommandOutput, TRUNCATION_MARKER, ToolError,
-    run_command_impl, spawn_command_process,
+    MAX_OUTPUT_BYTES, RunCommandCheckOutput, RunCommandInput, RunCommandOutput, TRUNCATION_MARKER,
+    ToolError, check_command, run_command_impl, spawn_command_process,
 };
 pub use mcp::{
     AppConfig, AppError, ConfigError, DEFAULT_BIND_ADDR, McpRunServer, build_app, serve,

@@ -12,9 +12,12 @@ use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
 use thiserror::Error;
 
-use crate::executor::{RunCommandInput, RunCommandOutput, run_command_impl};
+use crate::executor::{
+    RunCommandCheckOutput, RunCommandInput, RunCommandOutput, check_command as check_command_impl,
+    run_command_impl,
+};
 use crate::policy::{PolicyEngine, PolicyMode};
-use crate::raw::{RawEndpointState, raw_handler};
+use crate::raw::{RawEndpointState, check_handler, raw_handler};
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8000";
 
@@ -100,6 +103,21 @@ impl McpRunServer {
             .map(Json)
             .map_err(|error| error.to_string())
     }
+
+    #[tool(
+        name = "check_command",
+        description = "Check whether a command request would be allowed without executing it."
+    )]
+    async fn check_command(
+        &self,
+        Parameters(input): Parameters<RunCommandInput>,
+    ) -> Result<Json<RunCommandCheckOutput>, String> {
+        Ok(Json(check_command_impl(
+            &self.policy_engine,
+            &self.default_cwd,
+            input,
+        )))
+    }
 }
 
 #[tool_handler]
@@ -115,7 +133,7 @@ impl ServerHandler for McpRunServer {
                 icons: None,
                 website_url: None,
             },
-            instructions: Some("Use run_command with executable/args/cwd/env. Requests are validated against POLICY_DIR Rego policy modules.".to_string()),
+            instructions: Some("Use run_command to execute allowlisted commands and check_command to inspect policy decisions. Requests are validated against POLICY_DIR Rego policy modules.".to_string()),
             ..Default::default()
         }
     }
@@ -144,6 +162,7 @@ pub fn build_app(policy_engine: Arc<PolicyEngine>, default_cwd: PathBuf) -> Rout
     Router::new()
         .route_service("/mcp", any_service(mcp_service))
         .route("/raw", post(raw_handler))
+        .route("/check", post(check_handler))
         .with_state(raw_state)
 }
 
@@ -176,7 +195,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::executor::{MAX_OUTPUT_BYTES, RunCommandOutput, TRUNCATION_MARKER};
+    use crate::executor::{
+        MAX_OUTPUT_BYTES, RunCommandCheckOutput, RunCommandOutput, TRUNCATION_MARKER,
+    };
     use crate::policy::PolicyEngine;
     use rmcp::ServiceExt;
     use rmcp::model::CallToolRequestParams;
@@ -236,6 +257,7 @@ mod tests {
 
         let tools = client.list_tools(None).await.expect("list tools");
         assert!(tools.tools.iter().any(|tool| tool.name == "run_command"));
+        assert!(tools.tools.iter().any(|tool| tool.name == "check_command"));
         assert!(
             tools
                 .tools
@@ -263,6 +285,30 @@ mod tests {
         let typed: RunCommandOutput = call_result.into_typed().expect("typed response");
         assert_eq!(typed.stdout, "smoke");
         assert_eq!(typed.exit_code, Some(0));
+
+        let check_arguments = serde_json::json!({
+            "executable": env_path,
+            "args": ["printf", "check"]
+        })
+        .as_object()
+        .cloned();
+
+        let check_result = client
+            .call_tool(CallToolRequestParams {
+                meta: None,
+                name: "check_command".to_string().into(),
+                arguments: check_arguments,
+                task: None,
+            })
+            .await
+            .expect("invoke check_command");
+
+        let check_typed: RunCommandCheckOutput =
+            check_result.into_typed().expect("typed check response");
+        assert!(check_typed.allowed);
+        assert_eq!(check_typed.executable, env_path);
+        assert!(check_typed.resolved_path.is_some());
+        assert!(check_typed.hash.is_some());
 
         client.cancel().await.expect("cancel client");
         server_task.abort();
@@ -316,6 +362,66 @@ mod tests {
         let typed: RunCommandOutput = call_result.into_typed().expect("typed response");
         assert!(typed.stdout.ends_with(TRUNCATION_MARKER));
         assert_eq!(typed.exit_code, Some(0));
+
+        client.cancel().await.expect("cancel client");
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn mcp_check_command_returns_structured_denial() {
+        let true_path = match find_executable("true") {
+            Some(path) => path,
+            None => return,
+        };
+
+        let policy_engine = rego_engine_allow_commands(&[&true_path]);
+        let app = build_app(
+            Arc::new(policy_engine),
+            std::env::current_dir().expect("current dir"),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!("http://{addr}/mcp");
+        let client =
+            ().serve(StreamableHttpClientTransport::from_uri(url))
+                .await
+                .expect("connect MCP client");
+
+        let arguments = serde_json::json!({
+            "executable": "echo",
+            "args": ["blocked"]
+        })
+        .as_object()
+        .cloned();
+
+        let call_result = client
+            .call_tool(CallToolRequestParams {
+                meta: None,
+                name: "check_command".to_string().into(),
+                arguments,
+                task: None,
+            })
+            .await
+            .expect("invoke check_command");
+
+        let typed: RunCommandCheckOutput = call_result.into_typed().expect("typed response");
+        assert!(!typed.allowed);
+        assert!(
+            typed
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Command not allowed")
+        );
+        assert!(typed.resolved_path.is_some());
+        assert!(typed.hash.is_some());
 
         client.cancel().await.expect("cancel client");
         server_task.abort();
