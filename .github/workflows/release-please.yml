@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   # Maintains a "chore: release X.Y.Z" PR from conventional commits. Merging
-  # that PR bumps the version, tags it, and cuts a GitHub Release.
+  # that PR bumps the version, tags it, and creates a draft GitHub Release.
+  # The release is published only after binaries have been attached, which is
+  # required when GitHub immutable releases are enabled.
   release-please:
     runs-on: ubuntu-latest
     outputs:
@@ -61,7 +63,7 @@ jobs:
           path: helpers/
 
   # Only runs on the push that merges the release PR (release_created == true).
-  # Builds a release binary per target and attaches it to the fresh Release.
+  # Builds a release binary per target and attaches it to the draft Release.
   upload-binaries:
     needs: [release-please, build-helpers]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -115,3 +117,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "$ASSET" --clobber
+
+  publish-release:
+    needs: [release-please, upload-binaries]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ needs.release-please.outputs.tag_name }}" --draft=false
