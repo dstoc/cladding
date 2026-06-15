@@ -199,12 +199,13 @@ cladding expose <containerport> [hostport] # publish an agent TCP port to localh
 cladding expose list # show active published ports for the current project
 cladding expose stop <hostport> # remove one published localhost port
 cladding reload-proxy # reconfigure squid after domain-list edits
+cladding logs [agent|proxy|nw-sandbox|fs-sandbox] [podman logs args...] # view container logs
 cladding down         # stop associated pods
 cladding destroy      # force-remove running containers
 cladding up           # starts the containers
-podman logs -f <name>-proxy-instance              # view proxy logs
-podman logs -f <name>-nw-sandbox-instance         # network sandbox (mcp-run) logs
-podman logs -f <name>-fs-sandbox-instance         # filesystem sandbox (mcp-run) logs
+cladding logs proxy -f       # follow proxy logs
+cladding logs nw-sandbox -f  # follow network sandbox (mcp-run) logs
+cladding logs fs-sandbox -f  # follow filesystem sandbox (mcp-run) logs
 ```
 
 Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to ask an enabled sandbox to run an allowlisted command. These wrappers call `run-remote` with the component-specific endpoint injected into the agent environment.

@@ -83,6 +83,13 @@ enum CommandSpec {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Show logs for a cladding container
+    Logs {
+        #[arg(value_enum)]
+        target: LogsTarget,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Reload the squid proxy configuration
     ReloadProxy,
     /// Show running cladding projects
@@ -154,6 +161,34 @@ impl RunWithScissorsTarget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum LogsTarget {
+    Agent,
+    Proxy,
+    NwSandbox,
+    FsSandbox,
+}
+
+impl LogsTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Proxy => "proxy",
+            Self::NwSandbox => "nw-sandbox",
+            Self::FsSandbox => "fs-sandbox",
+        }
+    }
+
+    fn config_key(self) -> Option<&'static str> {
+        match self {
+            Self::Agent | Self::Proxy => None,
+            Self::NwSandbox => Some("nw_sandbox"),
+            Self::FsSandbox => Some("fs_sandbox"),
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let command = cli.command.unwrap();
@@ -177,6 +212,7 @@ pub fn run() -> Result<()> {
         CommandSpec::RunWithScissors { target, env, args } => {
             cmd_run_with_scissors(&context, target, &env, &args)
         }
+        CommandSpec::Logs { target, args } => cmd_logs(&context, target, &args),
         CommandSpec::ReloadProxy => cmd_reload_proxy(&context),
         CommandSpec::Ps => cmd_ps(&context),
         CommandSpec::Expose(args) => cmd_expose(&context, &args),
@@ -867,6 +903,53 @@ fn run_with_scissors_target_disabled(
     ))
 }
 
+fn cmd_logs(context: &Context, target: LogsTarget, args: &[String]) -> Result<()> {
+    podman_required("podman (required for cladding logs)")?;
+
+    let config = load_cladding_config_v2(&context.project_root)?;
+    let network_settings =
+        resolve_active_project_network_settings(context, &config, "cladding logs")?;
+    let pod_name = match target {
+        LogsTarget::Agent => network_settings.agent_name.clone(),
+        LogsTarget::Proxy => network_settings.proxy_name.clone(),
+        LogsTarget::NwSandbox => {
+            let Some(component) = network_settings.nw_sandbox.as_ref() else {
+                return logs_target_disabled(&config, target);
+            };
+            component.name.clone()
+        }
+        LogsTarget::FsSandbox => {
+            let Some(component) = network_settings.fs_sandbox.as_ref() else {
+                return logs_target_disabled(&config, target);
+            };
+            component.name.clone()
+        }
+    };
+    let container_name = runtime_container_name(&pod_name);
+
+    let mut cmd = Command::new("podman");
+    cmd.arg("logs");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.arg(container_name);
+
+    let status = cmd.status().with_context(|| "failed to run podman logs")?;
+    cladding::podman::ensure_success(status, "podman logs")
+}
+
+fn logs_target_disabled(config: &ExecutionConfig, target: LogsTarget) -> Result<()> {
+    let target_name = target.as_str();
+    eprintln!(
+        "error: target '{target_name}' is disabled for project '{}'",
+        config.name
+    );
+    if let Some(key) = target.config_key() {
+        eprintln!("hint: enable '{key}.enabled' or choose a different target");
+    }
+    Err(Error::message("selected logs target is disabled"))
+}
+
 fn run_podman_exec(
     context: &Context,
     config: &ExecutionConfig,
@@ -1492,6 +1575,20 @@ mod tests {
         match cli.command.expect("command") {
             CommandSpec::RunWithScissors { target, .. } => {
                 assert_eq!(target, RunWithScissorsTarget::FsSandbox);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logs_target_and_passthrough_args_parse() {
+        let cli = Cli::try_parse_from(["cladding", "logs", "fs-sandbox", "-f", "--since", "10m"])
+            .expect("cli parse");
+
+        match cli.command.expect("command") {
+            CommandSpec::Logs { target, args } => {
+                assert_eq!(target, LogsTarget::FsSandbox);
+                assert_eq!(args, vec!["-f", "--since", "10m"]);
             }
             other => panic!("unexpected command: {other:?}"),
         }
