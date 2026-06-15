@@ -624,6 +624,7 @@ mod tests {
                     executable: input.executable,
                     resolved_path: Some("/usr/bin/echo".to_string()),
                     hash: Some("abc".to_string()),
+                    cwd: Some("/work".to_string()),
                     policy_mode: "rego".to_string(),
                 }),
             )
@@ -673,6 +674,7 @@ mod tests {
             serde_json::from_slice(&stdout).expect("stdout should contain JSON decision");
         assert!(decision.allowed);
         assert_eq!(decision.executable, "echo");
+        assert_eq!(decision.cwd.as_deref(), Some("/work"));
         assert_eq!(decision.policy_mode, "rego");
 
         server_task.abort();
@@ -691,6 +693,7 @@ mod tests {
                     executable: input.executable,
                     resolved_path: Some("/usr/bin/blocked".to_string()),
                     hash: Some("deadbeef".to_string()),
+                    cwd: Some("/work".to_string()),
                     policy_mode: "rego".to_string(),
                 }),
             )
@@ -723,6 +726,7 @@ mod tests {
             serde_json::from_slice(&stdout).expect("stdout should contain JSON decision");
         assert!(!decision.allowed);
         assert_eq!(decision.reason.as_deref(), Some("command not allowed"));
+        assert_eq!(decision.cwd.as_deref(), Some("/work"));
 
         server_task.abort();
     }
@@ -738,6 +742,7 @@ mod tests {
                     executable: "echo".to_string(),
                     resolved_path: Some("/usr/bin/echo".to_string()),
                     hash: Some("abc".to_string()),
+                    cwd: Some("/work".to_string()),
                     policy_mode: "rego".to_string(),
                 }),
             )

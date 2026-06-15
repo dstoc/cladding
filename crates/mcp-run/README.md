@@ -20,9 +20,11 @@ Policy decisions are made by [Rego](https://www.openpolicyagent.org/docs/policy-
   - `input.hash`: SHA-256 hash of the resolved executable file (lowercase hex)
   - `input.args`: argument list
   - `input.env`: forwarded environment map
+  - `input.cwd`: trusted resolved cwd policy label, produced by `mcp-run` rather than copied from request input
 - Runtime is fail-closed:
   - if policy load fails at startup, server still starts but denies all requests
   - if policy reload fails, engine switches to deny-all until a valid policy set is loaded
+- CWD authorization uses the same fd-resolved cwd for policy and execution. See [CWD Policy Guarantees](docs/cwd-policy-guarantees.md) for exact guarantees and non-guarantees.
 
 Policy checks are advisory and point-in-time:
 

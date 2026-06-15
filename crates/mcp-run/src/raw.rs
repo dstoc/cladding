@@ -361,7 +361,6 @@ fn error_response(status: StatusCode, message: String) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use super::*;
@@ -395,7 +394,10 @@ mod tests {
     }
 
     async fn start_server(policy_engine: PolicyEngine) -> (String, tokio::task::JoinHandle<()>) {
-        let app = build_app(Arc::new(policy_engine), PathBuf::from("."));
+        let app = build_app(
+            Arc::new(policy_engine),
+            std::env::current_dir().expect("current dir"),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -508,6 +510,10 @@ mod tests {
             Some(path) => path,
             None => return,
         };
+        let expected_cwd = std::env::current_dir()
+            .expect("current dir")
+            .to_string_lossy()
+            .into_owned();
         let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&sh_path])).await;
 
         let response = reqwest::Client::new()
@@ -531,6 +537,7 @@ mod tests {
         assert_eq!(decision.executable, sh_path);
         assert!(decision.resolved_path.is_some());
         assert!(decision.hash.is_some());
+        assert_eq!(decision.cwd.as_deref(), Some(expected_cwd.as_str()));
         assert_eq!(decision.policy_mode, "rego");
 
         server_task.abort();
@@ -571,6 +578,46 @@ mod tests {
         );
         assert!(decision.resolved_path.is_some());
         assert!(decision.hash.is_some());
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn check_returns_cwd_null_when_cwd_resolution_fails() {
+        let missing_cwd = std::env::current_dir()
+            .expect("current dir")
+            .join("missing-cwd-for-mcp-run-check-test");
+        let (base_url, server_task) =
+            start_server(rego_engine_allow_commands(&["/bin/does-not-matter"])).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{base_url}/check"))
+            .json(&RunCommandInput {
+                executable: "definitely-not-a-real-command-for-mcp-run".to_string(),
+                args: vec![],
+                cwd: Some(missing_cwd.to_string_lossy().into_owned()),
+                env: None,
+            })
+            .send()
+            .await
+            .expect("request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let decision = response
+            .json::<RunCommandCheckOutput>()
+            .await
+            .expect("decision json");
+        assert!(!decision.allowed);
+        assert!(decision.cwd.is_none());
+        assert!(decision.resolved_path.is_none());
+        assert!(decision.hash.is_none());
+        assert!(
+            decision
+                .reason
+                .as_deref()
+                .expect("reason")
+                .contains("path does not exist")
+        );
 
         server_task.abort();
     }

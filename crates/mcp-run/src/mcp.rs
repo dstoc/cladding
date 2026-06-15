@@ -1,5 +1,5 @@
 use std::net::{AddrParseError, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
@@ -45,11 +45,22 @@ impl AppConfig {
             .map(PathBuf::from);
         let default_cwd =
             std::env::current_dir().map_err(|source| ConfigError::CurrentDir { source })?;
+        validate_default_cwd(&default_cwd)?;
 
         Ok(Self {
             bind_addr,
             policy_dir,
             default_cwd,
+        })
+    }
+}
+
+fn validate_default_cwd(default_cwd: &Path) -> Result<(), ConfigError> {
+    if default_cwd.is_absolute() {
+        Ok(())
+    } else {
+        Err(ConfigError::RelativeDefaultCwd {
+            cwd: default_cwd.to_path_buf(),
         })
     }
 }
@@ -63,6 +74,8 @@ pub enum ConfigError {
     },
     #[error("failed to get current working directory: {source}")]
     CurrentDir { source: std::io::Error },
+    #[error("default cwd must be absolute: {cwd:?}")]
+    RelativeDefaultCwd { cwd: PathBuf },
 }
 
 #[derive(Debug, Error)]
@@ -167,6 +180,8 @@ pub fn build_app(policy_engine: Arc<PolicyEngine>, default_cwd: PathBuf) -> Rout
 }
 
 pub async fn serve(config: AppConfig) -> Result<(), AppError> {
+    validate_default_cwd(&config.default_cwd)?;
+
     let policy_engine = Arc::new(PolicyEngine::from_sources(config.policy_dir.clone()));
     policy_engine.start_watcher();
 
@@ -202,6 +217,7 @@ mod tests {
     use rmcp::ServiceExt;
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::StreamableHttpClientTransport;
+    use std::time::Duration;
 
     fn find_executable(name: &str) -> Option<String> {
         let path = std::env::var_os("PATH")?;
@@ -229,6 +245,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_rejects_relative_default_cwd() {
+        let config = AppConfig {
+            bind_addr: "127.0.0.1:0".parse().expect("bind addr"),
+            policy_dir: None,
+            default_cwd: PathBuf::from("."),
+        };
+
+        let error = tokio::time::timeout(Duration::from_secs(1), serve(config))
+            .await
+            .expect("serve validation returned")
+            .expect_err("relative default cwd rejected");
+
+        assert!(matches!(
+            error,
+            AppError::Config(ConfigError::RelativeDefaultCwd { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn mcp_http_sse_smoke_tool_invocation() {
         let env_path = match find_executable("env") {
             Some(path) => path,
@@ -236,10 +271,9 @@ mod tests {
         };
 
         let policy_engine = rego_engine_allow_commands(&[&env_path]);
-        let app = build_app(
-            Arc::new(policy_engine),
-            std::env::current_dir().expect("current dir"),
-        );
+        let default_cwd = std::env::current_dir().expect("current dir");
+        let expected_cwd = default_cwd.to_string_lossy().into_owned();
+        let app = build_app(Arc::new(policy_engine), default_cwd);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -309,6 +343,7 @@ mod tests {
         assert_eq!(check_typed.executable, env_path);
         assert!(check_typed.resolved_path.is_some());
         assert!(check_typed.hash.is_some());
+        assert_eq!(check_typed.cwd.as_deref(), Some(expected_cwd.as_str()));
 
         client.cancel().await.expect("cancel client");
         server_task.abort();
