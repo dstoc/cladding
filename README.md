@@ -100,7 +100,7 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 * `targets` (optional; explicit list of `agent`, `nw-sandbox`, `fs-sandbox`)
 * `ignore` (optional, default `false`; when true, removes an existing default mount at the same `mount` path instead of replacing it)
 
-If neither `hostPath` nor `volume` is set, an empty ConfigMap is used and mounted read-only - this is intended for masking or hiding underlying files, as used to hide `.cladding` by default.
+If neither `hostPath` nor `volume` is set, a managed empty runtime volume is mounted read-only - this is intended for masking or hiding underlying files.
 Mounts apply to the components named in `targets`. When `targets` is omitted, the mount applies to all enabled execution containers.
 
 Example:

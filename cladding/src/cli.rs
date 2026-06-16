@@ -12,10 +12,10 @@ use cladding::network::{parse_cladding_pool_index, resolve_network_settings_for_
 use cladding::podman::{
     EnsureNetworkOutcome, ensure_pool_network_settings, list_podman_network_subnets,
     list_project_expose_proxies, list_running_project_networks, list_running_projects,
-    podman_build_image, podman_container_exists, podman_play_kube, podman_remove_containers,
-    podman_required,
+    podman_build_image, podman_container_exists, podman_remove_containers, podman_required,
+    runtime_cleanup, runtime_create,
 };
-use cladding::pods::{host_paths_from_rendered, render_pods_yaml_v2};
+use cladding::runtime::RuntimeSpec;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -341,6 +341,8 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
     let scripts_dir = project_root.join("scripts");
     let home_dir = project_root.join("home");
     let tools_dir = project_root.join("tools");
+    let runtime_dir = project_root.join("runtime");
+    let empty_mask_dir = runtime_dir.join("empty-mask");
     let cladding_config = project_root.join("cladding.json");
     let cladding_gitignore = project_root.join(".gitignore");
     let cladding_config_preexisting = cladding_config.exists();
@@ -396,6 +398,22 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
         println!("initialized: {}", tools_dir.display());
     }
 
+    if runtime_dir.exists() || path_is_symlink(&runtime_dir) {
+        println!("runtime already exists: {}", runtime_dir.display());
+    } else {
+        fs::create_dir_all(&runtime_dir)
+            .with_context(|| format!("failed to create {}", runtime_dir.display()))?;
+        println!("initialized: {}", runtime_dir.display());
+    }
+
+    if empty_mask_dir.exists() || path_is_symlink(&empty_mask_dir) {
+        println!("empty-mask already exists: {}", empty_mask_dir.display());
+    } else {
+        fs::create_dir_all(&empty_mask_dir)
+            .with_context(|| format!("failed to create {}", empty_mask_dir.display()))?;
+        println!("initialized: {}", empty_mask_dir.display());
+    }
+
     if update_scripts {
         materialize_scripts_force(&scripts_dir)?;
     } else {
@@ -428,9 +446,10 @@ fn cmd_check(context: &Context) -> Result<()> {
     check_required_binaries(context, &config)?;
     check_required_config_files(context, &config)?;
     let network_settings = resolve_network_settings_for_config(&config.name, 0, &config)?;
-    check_required_host_paths(context, &config, &network_settings)?;
     check_required_scripts_files(context)?;
     check_required_images(&config)?;
+    let spec = RuntimeSpec::build(&context.project_root, &config, &network_settings);
+    check_required_host_paths(&spec)?;
     if legacy_config_entries_present {
         return Err(Error::message("legacy config entries"));
     }
@@ -591,16 +610,10 @@ fn warn_on_script_mismatch(context: &Context) -> Result<()> {
     Ok(())
 }
 
-fn check_required_host_paths(
-    context: &Context,
-    config: &ExecutionConfig,
-    network_settings: &cladding::network::NetworkSettings,
-) -> Result<()> {
-    let rendered = render_pods_yaml_v2(&context.project_root, config, network_settings);
-
+fn check_required_host_paths(spec: &RuntimeSpec) -> Result<()> {
     let mut missing = false;
     let mut seen = HashSet::new();
-    for path in host_paths_from_rendered(&rendered) {
+    for path in spec.required_host_paths() {
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -736,11 +749,13 @@ fn cmd_up(context: &Context) -> Result<()> {
     let network_settings = select_available_network_settings_for_config(&config)?;
     check_required_images(&config)?;
     check_required_config_files(context, &config)?;
-    check_required_host_paths(context, &config, &network_settings)?;
     check_required_scripts_files(context)?;
     warn_on_script_mismatch(context)?;
-    let rendered = render_pods_yaml_v2(&context.project_root, &config, &network_settings);
-    podman_play_kube(&rendered, &network_settings, false)
+    let spec = RuntimeSpec::build(&context.project_root, &config, &network_settings);
+    fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
+        .with_context(|| "failed to create runtime empty-mask directory")?;
+    check_required_host_paths(&spec)?;
+    runtime_create(&spec)
 }
 
 fn cmd_down(context: &Context) -> Result<()> {
@@ -748,8 +763,8 @@ fn cmd_down(context: &Context) -> Result<()> {
     let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding down")?;
-    let rendered = render_pods_yaml_v2(&context.project_root, &config, &network_settings);
-    let pod_result = podman_play_kube(&rendered, &network_settings, true);
+    let spec = RuntimeSpec::build(&context.project_root, &config, &network_settings);
+    let pod_result = runtime_cleanup(&spec);
     let legacy_cleanup_result = remove_legacy_runtime_pods(&config);
     let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
 
@@ -763,27 +778,8 @@ fn cmd_destroy(context: &Context) -> Result<()> {
     let project_root = current_project_root(context)?;
     let network_settings =
         resolve_active_project_network_settings(context, &config, "cladding destroy")?;
-
-    let mut container_names = vec![
-        runtime_container_name(&network_settings.agent_name),
-        runtime_container_name(&network_settings.proxy_name),
-    ];
-    if let Some(nw) = &network_settings.nw_sandbox {
-        container_names.push(runtime_container_name(&nw.name));
-    }
-    if let Some(fs) = &network_settings.fs_sandbox {
-        container_names.push(runtime_container_name(&fs.name));
-    }
-
-    let mut rm_args = vec!["rm".to_string(), "-f".to_string()];
-    rm_args.extend(container_names);
-
-    let status = Command::new("podman")
-        .args(&rm_args)
-        .status()
-        .with_context(|| "failed to run podman rm")?;
-
-    let destroy_result = cladding::podman::ensure_success(status, "podman rm");
+    let spec = RuntimeSpec::build(&context.project_root, &config, &network_settings);
+    let destroy_result = runtime_cleanup(&spec);
     let legacy_cleanup_result = remove_legacy_runtime_pods(&config);
     let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
 
@@ -1307,7 +1303,6 @@ fn expose_proxy_labels(
 }
 
 fn runtime_container_name(pod_name: &str) -> String {
-    // podman play kube prefixes app container names with the pod name.
     format!("{pod_name}-instance")
 }
 
@@ -1623,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_container_name_matches_podman_play_kube_names() {
+    fn runtime_container_name_matches_direct_runtime_names() {
         assert_eq!(
             runtime_container_name("demo-fs-sandbox"),
             "demo-fs-sandbox-instance"
