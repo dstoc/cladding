@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# - ask the fs-sandbox whether this jj invocation is allowed
+# - run in the fs-sandbox when allowed
+# - snapshot through the fs-sandbox, then fall back to local jj when denied or unavailable
+
+wrapper_self=${BASH_SOURCE[0]}
+real_jj=real_jj
+
+if command -v run-in-fs-sandbox >/dev/null 2>&1 \
+    && run-in-fs-sandbox --check -- $real_jj "$@" >/dev/null 2>&1; then
+    exec run-in-fs-sandbox -- $real_jj "$@"
+fi
+
+if command -v run-in-fs-sandbox >/dev/null 2>&1; then
+    run-in-fs-sandbox -- $real_jj util snapshot >/dev/null 2>&1 || true
+fi
+exec "$real_jj" "$@"
