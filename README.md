@@ -2,14 +2,12 @@ Cladding lets you run an agent in a constrained container environment where netw
 
 - The agent runs in `<name>-agent`.
 - Optional delegated sandboxes run in `<name>-nw-sandbox` and `<name>-fs-sandbox`.
-- Direct egress from the agent container is [blocked](scripts/jail_agent.sh) except to:
-  - enabled sandbox containers on port `3000`
-  - `<name>-proxy` (Squid on port `8080`)
-  - `host.containers.internal` on ports specified in [`config-template/agent/host_ports.lst`](config-template/agent/host_ports.lst).
+- HTTP(S) egress is mediated by `<name>-proxy`, which uses separate Squid listeners to distinguish agent traffic from network-sandbox traffic.
+- The agent can reach `host.containers.internal` only on ports listed in [`config-template/agent/host_ports.lst`](config-template/agent/host_ports.lst).
 - `<name>-nw-sandbox` and `<name>-fs-sandbox` each serve [`mcp-run`](crates/mcp-run/README.md) and execute commands only when allowed by their Rego policy modules under `.cladding/config/`.
-- HTTP(S) from the agent and the network sandbox is allowed through Squid on `<name>-proxy`, which only permits domains from:
+- Proxy allow-lists come from:
   - `.cladding/config/agent/domains.lst` (template: [`config-template/agent/domains.lst`](config-template/agent/domains.lst))
-  - `.cladding/config/nw_sandbox/domains.lst` (template: [`config-template/nw_sandbox/domains.lst`](config-template/nw_sandbox/domains.lst))
+  - `.cladding/config/nw_sandbox/domains.lst` when network sandboxing is enabled (template: [`config-template/nw_sandbox/domains.lst`](config-template/nw_sandbox/domains.lst))
 
 In short: the agent cannot freely access the network; users can run sandbox commands from the host with [`cladding run-with-scissors`](#useful-commands), while commands running inside the agent can delegate to sandbox containers with `run-in-nw-sandbox` or `run-in-fs-sandbox`.
 
@@ -145,7 +143,6 @@ Default mounts may be overridden by adding an entry with the same `mount` value,
 ```mermaid
 flowchart TB
   subgraph C["<name>-agent"]
-    CJ[agent-node: nftables jailer]
     CA[agent instance]
   end
 
@@ -156,17 +153,16 @@ flowchart TB
 
 
   subgraph S["<name>-nw-sandbox"]
-    SJ[nw-sandbox-node: nftables jailer]
     SA[nw-sandbox instance: mcp-run :3000]
   end
 
   subgraph F["<name>-fs-sandbox"]
-    FJ[fs-sandbox-node: nftables jailer]
     FA[fs-sandbox instance: mcp-run :3000]
   end
 
   subgraph P["<name>-proxy"]
-    PX[Squid proxy :8080]
+    PX1[Squid listener 127.0.0.1:3128]
+    PX2[Squid listener 127.0.0.1:3129]
   end
 
   WS --> CA
@@ -178,13 +174,10 @@ flowchart TB
 
   CA -- MCP tool calls --> SA
   CA -- MCP tool calls --> FA
-  CA -- HTTP(S) via proxy --> PX
-  SA -- HTTP(S) via proxy --> PX
-  PX -- allowlisted domains only, ACL by source --> NET[(Internet)]
-
-  CJ -. allow egress only to enabled sandbox:3000 and proxy:8080 .-> CA
-  SJ -. allow egress only to proxy .-> SA
-  FJ -. block new outbound network traffic .-> FA
+  CA -- HTTP(S) via proxy --> PX1
+  SA -- HTTP(S) via proxy --> PX2
+  PX1 -- listener identity, allowlisted domains only --> NET[(Internet)]
+  PX2 -- listener identity, allowlisted domains only --> NET
 ```
 
 ## Useful Commands

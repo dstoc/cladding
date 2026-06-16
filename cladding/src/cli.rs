@@ -8,10 +8,8 @@ use cladding::config::{
 };
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
-use cladding::network::{parse_cladding_pool_index, resolve_network_settings_for_config};
 use cladding::podman::{
-    EnsureNetworkOutcome, ensure_pool_network_settings, list_podman_network_subnets,
-    list_project_expose_proxies, list_running_project_networks, list_running_projects,
+    list_project_expose_containers, list_project_expose_proxies, list_running_projects,
     podman_build_image, podman_container_exists, podman_remove_containers, podman_required,
     runtime_cleanup, runtime_create,
 };
@@ -19,10 +17,10 @@ use cladding::runtime::RuntimeSpec;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io::{self, ErrorKind, IsTerminal};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -445,13 +443,16 @@ fn cmd_check(context: &Context) -> Result<()> {
 
     check_required_binaries(context, &config)?;
     check_required_config_files(context, &config)?;
-    let network_settings = resolve_network_settings_for_config(&config.name, 0, &config)?;
     check_required_scripts_files(context)?;
+    let script_mismatch = report_script_mismatch(context, "error")?;
     check_required_images(&config)?;
-    let spec = RuntimeSpec::build(&context.project_root, &config, &network_settings);
+    let spec = RuntimeSpec::build(&context.project_root, &config);
     check_required_host_paths(&spec)?;
     if legacy_config_entries_present {
         return Err(Error::message("legacy config entries"));
+    }
+    if script_mismatch {
+        return Err(Error::message("script files differ from embedded version"));
     }
     println!("check: ok");
     Ok(())
@@ -488,6 +489,7 @@ fn check_required_binaries(context: &Context, config: &ExecutionConfig) -> Resul
 fn check_required_config_files(context: &Context, config: &ExecutionConfig) -> Result<()> {
     let dst = context.project_root.join("config");
     let mut missing = false;
+    let mut invalid = false;
 
     for name in required_config_entries(config) {
         let path = dst.join(name);
@@ -505,7 +507,29 @@ fn check_required_config_files(context: &Context, config: &ExecutionConfig) -> R
         return Err(Error::message("missing config files"));
     }
 
+    if proxy_squid_config_uses_legacy_network_identity(&dst.join("proxy/squid.conf"))? {
+        eprintln!("error: config/proxy/squid.conf uses the old source-IP proxy identity model");
+        eprintln!(
+            "hint: remove config/proxy/squid.conf and run 'cladding init' to regenerate it from the current template"
+        );
+        invalid = true;
+    }
+
+    if invalid {
+        return Err(Error::message("invalid config files"));
+    }
+
     Ok(())
+}
+
+fn proxy_squid_config_uses_legacy_network_identity(path: &Path) -> Result<bool> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(contents.contains("/tmp/agent_ips.lst")
+        || contents.contains("/tmp/nw_sandbox_ips.lst")
+        || contents.contains("acl agent_src src")
+        || contents.contains("acl nw_sandbox_src src")
+        || contents.contains("http_port 8080"))
 }
 
 fn check_legacy_config_entries(context: &Context) -> bool {
@@ -581,8 +605,12 @@ fn check_required_scripts_files(context: &Context) -> Result<()> {
 }
 
 fn warn_on_script_mismatch(context: &Context) -> Result<()> {
+    report_script_mismatch(context, "warning").map(|_| ())
+}
+
+fn report_script_mismatch(context: &Context, level: &str) -> Result<bool> {
     let dst = context.project_root.join("scripts");
-    let mut warned = false;
+    let mut mismatched = false;
 
     for (rel_path, contents) in scripts_files() {
         let target = dst.join(&rel_path);
@@ -590,24 +618,24 @@ fn warn_on_script_mismatch(context: &Context) -> Result<()> {
             Ok(existing) => {
                 if existing != contents {
                     eprintln!(
-                        "warning: scripts/{} differs from embedded version",
+                        "{level}: scripts/{} differs from embedded version",
                         rel_path.display()
                     );
-                    warned = true;
+                    mismatched = true;
                 }
             }
             Err(_) => {
-                eprintln!("warning: scripts/{} is missing", rel_path.display());
-                warned = true;
+                eprintln!("{level}: scripts/{} is missing", rel_path.display());
+                mismatched = true;
             }
         }
     }
 
-    if warned {
+    if mismatched {
         eprintln!("hint: run cladding init --update-scripts to re-materialize scripts");
     }
 
-    Ok(())
+    Ok(mismatched)
 }
 
 fn check_required_host_paths(spec: &RuntimeSpec) -> Result<()> {
@@ -746,12 +774,11 @@ fn cmd_up(context: &Context) -> Result<()> {
     }
 
     check_required_binaries(context, &config)?;
-    let network_settings = select_available_network_settings_for_config(&config)?;
     check_required_images(&config)?;
     check_required_config_files(context, &config)?;
     check_required_scripts_files(context)?;
     warn_on_script_mismatch(context)?;
-    let spec = RuntimeSpec::build(&context.project_root, &config, &network_settings);
+    let spec = RuntimeSpec::build(&context.project_root, &config);
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;
@@ -761,31 +788,45 @@ fn cmd_up(context: &Context) -> Result<()> {
 fn cmd_down(context: &Context) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding down")?;
-    let spec = RuntimeSpec::build(&context.project_root, &config, &network_settings);
-    let pod_result = runtime_cleanup(&spec);
-    let legacy_cleanup_result = remove_legacy_runtime_pods(&config);
-    let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
+    let spec = RuntimeSpec::build(&context.project_root, &config);
+    let mut cleanup_error = None;
+    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec));
+    record_cleanup_result(&mut cleanup_error, remove_legacy_runtime_pods(&config));
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_project_expose_containers(&config, &project_root, true),
+    );
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_runtime_expose_dir(&context.project_root),
+    );
 
-    pod_result?;
-    legacy_cleanup_result?;
-    cleanup_result
+    match cleanup_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 fn cmd_destroy(context: &Context) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding destroy")?;
-    let spec = RuntimeSpec::build(&context.project_root, &config, &network_settings);
-    let destroy_result = runtime_cleanup(&spec);
-    let legacy_cleanup_result = remove_legacy_runtime_pods(&config);
-    let cleanup_result = remove_project_expose_proxies(&config, &project_root, true);
+    let spec = RuntimeSpec::build(&context.project_root, &config);
+    let mut cleanup_error = None;
+    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec));
+    record_cleanup_result(&mut cleanup_error, remove_legacy_runtime_pods(&config));
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_project_expose_containers(&config, &project_root, true),
+    );
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_runtime_expose_dir(&context.project_root),
+    );
 
-    destroy_result?;
-    legacy_cleanup_result?;
-    cleanup_result
+    match cleanup_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 fn cmd_ps(_context: &Context) -> Result<()> {
@@ -822,9 +863,7 @@ fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
 
 fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding run")?;
-    let container_name = runtime_container_name(&network_settings.agent_name);
+    let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
     run_podman_exec(
         context,
         &config,
@@ -843,24 +882,22 @@ fn cmd_run_with_scissors(
     args: &[String],
 ) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding run-with-scissors")?;
     let (container_name, mount_target) = match target {
         RunWithScissorsTarget::NwSandbox => {
-            let Some(component) = network_settings.nw_sandbox.as_ref() else {
+            if !target.enabled(&config) {
                 return run_with_scissors_target_disabled(&config, target);
-            };
+            }
             (
-                runtime_container_name(&component.name),
+                runtime_container_name(&project_component_name(&config.name, "nw-sandbox")),
                 MountTarget::NwSandbox,
             )
         }
         RunWithScissorsTarget::FsSandbox => {
-            let Some(component) = network_settings.fs_sandbox.as_ref() else {
+            if !target.enabled(&config) {
                 return run_with_scissors_target_disabled(&config, target);
-            };
+            }
             (
-                runtime_container_name(&component.name),
+                runtime_container_name(&project_component_name(&config.name, "fs-sandbox")),
                 MountTarget::FsSandbox,
             )
         }
@@ -903,23 +940,16 @@ fn cmd_logs(context: &Context, target: LogsTarget, args: &[String]) -> Result<()
     podman_required("podman (required for cladding logs)")?;
 
     let config = load_cladding_config_v2(&context.project_root)?;
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding logs")?;
     let pod_name = match target {
-        LogsTarget::Agent => network_settings.agent_name.clone(),
-        LogsTarget::Proxy => network_settings.proxy_name.clone(),
-        LogsTarget::NwSandbox => {
-            let Some(component) = network_settings.nw_sandbox.as_ref() else {
-                return logs_target_disabled(&config, target);
-            };
-            component.name.clone()
+        LogsTarget::Agent => project_component_name(&config.name, "agent"),
+        LogsTarget::Proxy => project_component_name(&config.name, "proxy"),
+        LogsTarget::NwSandbox if config.nw_sandbox_enabled() => {
+            project_component_name(&config.name, "nw-sandbox")
         }
-        LogsTarget::FsSandbox => {
-            let Some(component) = network_settings.fs_sandbox.as_ref() else {
-                return logs_target_disabled(&config, target);
-            };
-            component.name.clone()
+        LogsTarget::FsSandbox if config.fs_sandbox_enabled() => {
+            project_component_name(&config.name, "fs-sandbox")
         }
+        _ => return logs_target_disabled(&config, target),
     };
     let container_name = runtime_container_name(&pod_name);
 
@@ -1068,13 +1098,11 @@ fn run_podman_exec(
 
 fn cmd_reload_proxy(context: &Context) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding reload-proxy")?;
 
     let status = Command::new("podman")
         .args([
             "exec",
-            &runtime_container_name(&network_settings.proxy_name),
+            &runtime_container_name(&project_component_name(&config.name, "proxy")),
             "squid",
             "-k",
             "reconfigure",
@@ -1092,9 +1120,7 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
 
     let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
-    let network_settings =
-        resolve_active_project_network_settings(context, &config, "cladding expose")?;
-    let agent_container_name = runtime_container_name(&network_settings.agent_name);
+    let (agent_pod_name, agent_container_name) = agent_runtime_names(&config.name);
 
     if !podman_container_exists(&agent_container_name)? {
         eprintln!(
@@ -1105,7 +1131,9 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
         return Err(Error::message("missing agent container"));
     }
 
-    let existing = list_project_expose_proxies(&config.name, &project_root, false)?;
+    ensure_runtime_expose_dir(&context.project_root)?;
+
+    let existing = list_project_expose_containers(&config.name, &project_root, false)?;
     if let Some(proxy) = existing
         .iter()
         .find(|proxy| proxy.container_port == container_port)
@@ -1123,21 +1151,33 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
             continue;
         }
 
-        match try_start_expose_proxy(
+        let socket_path =
+            runtime_expose_socket_path(&context.project_root, container_port, candidate_host_port);
+        clear_runtime_path(&socket_path)?;
+
+        match try_start_expose_bridge_pair(
             &config,
             &project_root,
-            &network_settings,
+            &agent_pod_name,
             container_port,
             candidate_host_port,
-        )? {
-            ExposeCreateOutcome::Started => {
+            &socket_path,
+        ) {
+            Ok(ExposeCreateOutcome::Started) => {
                 println!(
                     "exposed: localhost:{candidate_host_port} -> {}:{container_port}",
                     agent_container_name
                 );
                 return Ok(());
             }
-            ExposeCreateOutcome::HostPortConflict => continue,
+            Ok(ExposeCreateOutcome::HostPortConflict) => {
+                let _ = clear_runtime_path(&socket_path);
+                continue;
+            }
+            Err(err) => {
+                let _ = clear_runtime_path(&socket_path);
+                return Err(err);
+            }
         }
     }
 
@@ -1150,7 +1190,7 @@ fn cmd_expose_stop(context: &Context, host_port: u16) -> Result<()> {
 
     let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
-    let proxies = list_project_expose_proxies(&config.name, &project_root, true)?;
+    let proxies = list_project_expose_containers(&config.name, &project_root, true)?;
     let matched: Vec<_> = proxies
         .into_iter()
         .filter(|proxy| proxy.host_port == host_port)
@@ -1165,7 +1205,17 @@ fn cmd_expose_stop(context: &Context, host_port: u16) -> Result<()> {
     }
 
     let ids: Vec<String> = matched.iter().map(|proxy| proxy.id.clone()).collect();
-    podman_remove_containers(&ids, true, true)?;
+    let socket_path =
+        runtime_expose_socket_path(&context.project_root, matched[0].container_port, host_port);
+    let mut cleanup_error = None;
+    record_cleanup_result(
+        &mut cleanup_error,
+        podman_remove_containers(&ids, true, true),
+    );
+    record_cleanup_result(&mut cleanup_error, clear_runtime_path(&socket_path));
+    if let Some(err) = cleanup_error {
+        return Err(err);
+    }
     println!("stopped: localhost:{host_port}");
     Ok(())
 }
@@ -1193,18 +1243,96 @@ fn cmd_expose_list(context: &Context) -> Result<()> {
     Ok(())
 }
 
-fn remove_project_expose_proxies(
+fn remove_project_expose_containers(
     config: &ExecutionConfig,
     project_root: &str,
     force: bool,
 ) -> Result<()> {
-    let proxies = list_project_expose_proxies(&config.name, project_root, true)?;
+    let proxies = list_project_expose_containers(&config.name, project_root, true)?;
     if proxies.is_empty() {
         return Ok(());
     }
 
     let ids: Vec<String> = proxies.into_iter().map(|proxy| proxy.id).collect();
     podman_remove_containers(&ids, force, true)
+}
+
+fn record_cleanup_result(target: &mut Option<Error>, result: Result<()>) {
+    if let Err(err) = result {
+        if target.is_none() {
+            *target = Some(err);
+        }
+    }
+}
+
+fn ensure_runtime_expose_dir(project_root: &Path) -> Result<()> {
+    let expose_dir = runtime_expose_dir(project_root);
+    if let Ok(metadata) = fs::symlink_metadata(&expose_dir) {
+        if !metadata.is_dir() {
+            clear_runtime_path(&expose_dir)?;
+        }
+    }
+    fs::create_dir_all(&expose_dir).with_context(|| {
+        format!(
+            "failed to create runtime expose directory {}",
+            expose_dir.display()
+        )
+    })?;
+    set_restrictive_dir_permissions(&expose_dir)?;
+    Ok(())
+}
+
+fn remove_runtime_expose_dir(project_root: &Path) -> Result<()> {
+    clear_runtime_path(&runtime_expose_dir(project_root))
+}
+
+fn clear_runtime_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                fs::remove_dir_all(path)
+                    .with_context(|| format!("failed to remove directory {}", path.display()))?;
+            } else {
+                fs::remove_file(path)
+                    .with_context(|| format!("failed to remove file {}", path.display()))?;
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(anyhow::Error::new(err).into());
+        }
+    }
+    Ok(())
+}
+
+fn runtime_expose_dir(project_root: &Path) -> PathBuf {
+    project_root.join("runtime/expose")
+}
+
+fn runtime_expose_socket_path(project_root: &Path, container_port: u16, host_port: u16) -> PathBuf {
+    runtime_expose_dir(project_root).join(format!("agent-{container_port}-{host_port}.sock"))
+}
+
+#[cfg(unix)]
+fn set_restrictive_dir_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("failed to read permissions for {}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions).with_context(|| {
+        format!(
+            "failed to set restrictive permissions on {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_restrictive_dir_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn remove_legacy_runtime_pods(config: &ExecutionConfig) -> Result<()> {
@@ -1241,77 +1369,151 @@ enum ExposeCreateOutcome {
     HostPortConflict,
 }
 
-fn try_start_expose_proxy(
+fn try_start_expose_bridge_pair(
     config: &ExecutionConfig,
     project_root: &str,
-    network_settings: &cladding::network::NetworkSettings,
+    agent_pod_name: &str,
     container_port: u16,
     host_port: u16,
+    socket_path: &Path,
 ) -> Result<ExposeCreateOutcome> {
-    let container_name = unique_expose_proxy_name(&config.name, container_port, host_port);
-    let mut cmd = Command::new("podman");
-    cmd.arg("run")
+    let socket_name = socket_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::message("invalid expose socket path"))?;
+
+    let sidecar_name =
+        unique_expose_container_name(&config.name, "pod-sidecar", container_port, host_port);
+    let helper_name =
+        unique_expose_container_name(&config.name, "host-helper", container_port, host_port);
+    let expose_dir = socket_path
+        .parent()
+        .ok_or_else(|| Error::message("invalid expose socket path"))?;
+
+    let mut sidecar_cmd = Command::new("podman");
+    sidecar_cmd
+        .arg("run")
         .arg("-d")
         .arg("--name")
-        .arg(&container_name)
-        .arg("--network")
-        .arg(&network_settings.network)
-        .arg("-p")
-        .arg(format!("{host_port}:{container_port}"));
+        .arg(&sidecar_name)
+        .arg("--pod")
+        .arg(agent_pod_name)
+        .arg("--volume")
+        .arg(format!("{}:/run/cladding/expose", expose_dir.display()));
+    append_expose_labels(
+        &mut sidecar_cmd,
+        &config.name,
+        project_root,
+        container_port,
+        host_port,
+        "pod-sidecar",
+    );
+    sidecar_cmd
+        .arg("alpine/socat")
+        .arg(format!(
+            "UNIX-LISTEN:/run/cladding/expose/{socket_name},fork,reuseaddr"
+        ))
+        .arg(format!("TCP:127.0.0.1:{container_port}"));
+    let sidecar_output = sidecar_cmd
+        .output()
+        .with_context(|| "failed to run podman run for cladding expose pod-sidecar")?;
 
-    for (key, value) in expose_proxy_labels(&config.name, project_root, container_port, host_port) {
-        cmd.arg("--label").arg(format!("{key}={value}"));
+    if !sidecar_output.status.success() {
+        if podman_output_is_bind_conflict(&sidecar_output) {
+            return Ok(ExposeCreateOutcome::HostPortConflict);
+        }
+        cladding::podman::ensure_success_output(&sidecar_output, "podman run")?;
+        return Err(Error::message("podman run failed"));
     }
 
-    cmd.arg("alpine/socat")
-        .arg(format!("TCP-LISTEN:{container_port},fork,reuseaddr"))
+    let mut helper_cmd = Command::new("podman");
+    helper_cmd
+        .arg("run")
+        .arg("-d")
+        .arg("--name")
+        .arg(&helper_name)
+        .arg("--network")
+        .arg("host")
+        .arg("--volume")
+        .arg(format!("{}:/run/cladding/expose", expose_dir.display()));
+    append_expose_labels(
+        &mut helper_cmd,
+        &config.name,
+        project_root,
+        container_port,
+        host_port,
+        "host-helper",
+    );
+    helper_cmd
+        .arg("alpine/socat")
         .arg(format!(
-            "TCP:{}:{container_port}",
-            network_settings.agent_ip
-        ));
-
-    let output = cmd
+            "TCP-LISTEN:{host_port},bind=127.0.0.1,fork,reuseaddr"
+        ))
+        .arg(format!("UNIX-CONNECT:/run/cladding/expose/{socket_name}"));
+    let helper_output = helper_cmd
         .output()
-        .with_context(|| "failed to run podman run for cladding expose")?;
+        .with_context(|| "failed to run podman run for cladding expose host-helper")?;
 
-    if output.status.success() {
+    if helper_output.status.success() {
         return Ok(ExposeCreateOutcome::Started);
     }
 
-    if podman_output_is_bind_conflict(&output) {
+    let _ = podman_remove_containers(&[sidecar_name], true, true);
+
+    if podman_output_is_bind_conflict(&helper_output) {
         return Ok(ExposeCreateOutcome::HostPortConflict);
     }
 
-    cladding::podman::ensure_success_output(&output, "podman run")?;
+    cladding::podman::ensure_success_output(&helper_output, "podman run")?;
     Err(Error::message("podman run failed"))
 }
 
-fn expose_proxy_labels(
+fn append_expose_labels(
+    cmd: &mut Command,
     project_name: &str,
     project_root: &str,
     container_port: u16,
     host_port: u16,
-) -> [(&'static str, String); 6] {
-    [
+    role: &str,
+) {
+    for (key, value) in [
         ("cladding", project_name.to_string()),
         ("project_root", project_root.to_string()),
         ("cladding_expose", "true".to_string()),
         ("cladding_expose_target", "agent".to_string()),
+        ("cladding_expose_role", role.to_string()),
         ("cladding_expose_container_port", container_port.to_string()),
         ("cladding_expose_host_port", host_port.to_string()),
-    ]
+    ] {
+        cmd.arg("--label").arg(format!("{key}={value}"));
+    }
 }
 
 fn runtime_container_name(pod_name: &str) -> String {
     format!("{pod_name}-instance")
 }
 
-fn unique_expose_proxy_name(project_name: &str, container_port: u16, host_port: u16) -> String {
+fn project_component_name(project_name: &str, component: &str) -> String {
+    format!("{project_name}-{component}")
+}
+
+fn agent_runtime_names(project_name: &str) -> (String, String) {
+    let agent_pod_name = project_component_name(project_name, "agent");
+    let agent_container_name = runtime_container_name(&agent_pod_name);
+    (agent_pod_name, agent_container_name)
+}
+
+fn unique_expose_container_name(
+    project_name: &str,
+    role: &str,
+    container_port: u16,
+    host_port: u16,
+) -> String {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
-    format!("{project_name}-expose-{container_port}-{host_port}-{suffix}")
+    format!("{project_name}-expose-{role}-{container_port}-{host_port}-{suffix}")
 }
 
 fn host_port_appears_available(port: u16) -> bool {
@@ -1327,125 +1529,6 @@ fn podman_output_is_bind_conflict(output: &std::process::Output) -> bool {
 
 fn image_is_buildable_by_cladding(image: &str) -> bool {
     image == DEFAULT_CLADDING_BUILD_IMAGE
-}
-
-fn select_available_network_settings_for_config(
-    config: &ExecutionConfig,
-) -> Result<cladding::network::NetworkSettings> {
-    let running = list_running_project_networks()?;
-    let mut used = HashSet::new();
-    for project in running {
-        let Some(index) = parse_cladding_pool_index(&project.network) else {
-            continue;
-        };
-        used.insert(index);
-    }
-
-    let mut subnet_to_networks: HashMap<String, Vec<String>> = HashMap::new();
-    for entry in list_podman_network_subnets()? {
-        subnet_to_networks
-            .entry(entry.subnet)
-            .or_default()
-            .push(entry.name);
-    }
-
-    let mut mismatched = 0usize;
-    let mut conflicts = 0usize;
-    for index in 0u16..=255 {
-        let index = index as u8;
-        if !used.contains(&index) {
-            let candidate_subnet = format!("10.90.{index}.0/24");
-            let candidate_network = format!("cladding-{index}");
-            if let Some(names) = subnet_to_networks.get(&candidate_subnet)
-                && names.iter().any(|name| name != &candidate_network)
-            {
-                conflicts += 1;
-                continue;
-            }
-            let candidate = resolve_network_settings_for_config(&config.name, index, config)?;
-            match ensure_pool_network_settings(&candidate)? {
-                EnsureNetworkOutcome::Ready => return Ok(candidate),
-                EnsureNetworkOutcome::SubnetMismatch => {
-                    mismatched += 1;
-                    continue;
-                }
-            }
-        }
-    }
-
-    eprintln!("error: no free cladding network slots in pool cladding-0..cladding-255");
-    if mismatched > 0 {
-        eprintln!(
-            "hint: {mismatched} cladding-N networks exist with unexpected subnets; remove them with 'podman network rm cladding-N'"
-        );
-    } else if conflicts > 0 {
-        eprintln!(
-            "hint: {conflicts} pool subnets are already used by non-cladding networks; free those subnets or remove the conflicting networks"
-        );
-    } else {
-        eprintln!("hint: run 'cladding ps' and stop a running project with 'cladding down'");
-    }
-    Err(Error::message("no free cladding network slots"))
-}
-
-fn resolve_active_project_network_settings(
-    context: &Context,
-    config: &ExecutionConfig,
-    command_name: &str,
-) -> Result<cladding::network::NetworkSettings> {
-    let current_project_root = canonicalize_path(&context.project_root)?
-        .display()
-        .to_string();
-
-    let mut matched_network: Option<String> = None;
-    for project in list_running_project_networks()? {
-        if project.name != config.name {
-            continue;
-        }
-
-        let normalized_root = canonicalize_path(Path::new(&project.project_root))
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| project.project_root.clone());
-
-        if normalized_root != current_project_root {
-            continue;
-        }
-
-        if let Some(existing) = &matched_network {
-            if existing != &project.network {
-                eprintln!(
-                    "error: active project '{}' has inconsistent cladding network assignment",
-                    config.name
-                );
-                eprintln!("project_root: {current_project_root}");
-                eprintln!("networks: {existing}, {}", project.network);
-                return Err(Error::message("inconsistent active network"));
-            }
-            continue;
-        }
-
-        matched_network = Some(project.network);
-    }
-
-    let Some(network_name) = matched_network else {
-        eprintln!(
-            "error: could not resolve active cladding network for project '{}'",
-            config.name
-        );
-        eprintln!("hint: ensure the project is running, then retry '{command_name}'");
-        return Err(Error::message("missing active cladding network"));
-    };
-
-    let Some(index) = parse_cladding_pool_index(&network_name) else {
-        eprintln!(
-            "error: active project '{}' is attached to unexpected network '{}'",
-            config.name, network_name
-        );
-        eprintln!("hint: restart the project with 'cladding down' then 'cladding up'");
-        return Err(Error::message("unexpected active network"));
-    };
-
-    resolve_network_settings_for_config(&config.name, index, config)
 }
 
 fn resolve_container_workdir(
@@ -1563,6 +1646,49 @@ mod tests {
     }
 
     #[test]
+    fn expose_label_args_include_role() {
+        let mut cmd = Command::new("podman");
+        append_expose_labels(
+            &mut cmd,
+            "demo",
+            "/tmp/demo/.cladding",
+            3000,
+            9000,
+            "host-helper",
+        );
+
+        assert_eq!(
+            cmd.get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "--label",
+                "cladding=demo",
+                "--label",
+                "project_root=/tmp/demo/.cladding",
+                "--label",
+                "cladding_expose=true",
+                "--label",
+                "cladding_expose_target=agent",
+                "--label",
+                "cladding_expose_role=host-helper",
+                "--label",
+                "cladding_expose_container_port=3000",
+                "--label",
+                "cladding_expose_host_port=9000",
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_expose_socket_path_uses_expected_layout() {
+        assert_eq!(
+            runtime_expose_socket_path(&PathBuf::from("/tmp/project/.cladding"), 3000, 9000),
+            PathBuf::from("/tmp/project/.cladding/runtime/expose/agent-3000-9000.sock")
+        );
+    }
+
+    #[test]
     fn run_with_scissors_target_parses() {
         let cli = Cli::try_parse_from(["cladding", "run-with-scissors", "--target", "fs-sandbox"])
             .expect("cli parse");
@@ -1627,6 +1753,14 @@ mod tests {
     }
 
     #[test]
+    fn agent_runtime_names_cover_pod_and_container_names() {
+        assert_eq!(
+            agent_runtime_names("demo"),
+            ("demo-agent".to_string(), "demo-agent-instance".to_string())
+        );
+    }
+
+    #[test]
     fn legacy_config_entries_cover_pre_rename_and_flat_layouts() {
         assert_eq!(
             legacy_config_entries(),
@@ -1653,6 +1787,56 @@ mod tests {
         let context = Context { project_root: temp };
 
         assert!(check_legacy_config_entries(&context));
+    }
+
+    #[test]
+    fn proxy_squid_config_detects_legacy_network_identity() {
+        let temp = create_temp_dir("legacy-proxy-config");
+        let config = temp.join("squid.conf");
+        fs::write(
+            &config,
+            r#"http_port 8080
+acl agent_src src "/tmp/agent_ips.lst"
+"#,
+        )
+        .expect("write config");
+
+        assert!(proxy_squid_config_uses_legacy_network_identity(&config).expect("check config"));
+
+        fs::write(
+            &config,
+            r#"http_port 127.0.0.1:3128 name=agent
+acl from_agent myportname agent
+"#,
+        )
+        .expect("write config");
+
+        assert!(!proxy_squid_config_uses_legacy_network_identity(&config).expect("check config"));
+    }
+
+    #[test]
+    fn report_script_mismatch_detects_drift() {
+        let temp = create_temp_dir("script-mismatch");
+        let scripts_dir = temp.join("scripts");
+        fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+        for (rel_path, contents) in scripts_files() {
+            let path = scripts_dir.join(rel_path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create script parent");
+            }
+            fs::write(path, contents).expect("write script");
+        }
+
+        let context = Context { project_root: temp };
+        assert!(!report_script_mismatch(&context, "error").expect("check scripts"));
+
+        fs::write(
+            context.project_root.join("scripts/proxy_startup.sh"),
+            b"#!/bin/sh\nexit 0\n",
+        )
+        .expect("modify script");
+
+        assert!(report_script_mismatch(&context, "error").expect("check scripts"));
     }
 
     #[test]

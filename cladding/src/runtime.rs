@@ -1,14 +1,20 @@
 use crate::config::{ExecutionConfig, MountTarget, ResolvedMountConfig};
-use crate::network::{ComponentNetworkSettings, NetworkSettings};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+const LOOPBACK: &str = "127.0.0.1";
+const NETWORK_DEFAULT: &str = "default";
+const NETWORK_NONE: &str = "none";
+const RUNTIME_SOCKET_DIR: &str = "runtime/sockets";
+#[allow(dead_code)]
+const RUNTIME_EXPOSE_DIR: &str = "runtime/expose";
+const RUNTIME_SOCKET_MOUNT_PATH: &str = "/run/cladding/sockets";
 
 #[derive(Debug, Clone)]
 pub struct RuntimeSpec {
     pub project_name: String,
     pub project_root: PathBuf,
     pub project_root_label: String,
-    pub network_settings: NetworkSettings,
     pub custom_mounts: Vec<RuntimeCustomMount>,
     pub proxy: RuntimePod,
     pub agent: RuntimePod,
@@ -16,33 +22,53 @@ pub struct RuntimeSpec {
     pub fs_sandbox: Option<RuntimePod>,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeNames {
+    proxy_name: String,
+    agent_name: String,
+    nw_sandbox_name: Option<String>,
+    fs_sandbox_name: Option<String>,
+}
+
+impl RuntimeNames {
+    fn from_config(config: &ExecutionConfig) -> Self {
+        Self {
+            proxy_name: format!("{}-proxy", config.name),
+            agent_name: format!("{}-agent", config.name),
+            nw_sandbox_name: config
+                .nw_sandbox_enabled()
+                .then(|| format!("{}-nw-sandbox", config.name)),
+            fs_sandbox_name: config
+                .fs_sandbox_enabled()
+                .then(|| format!("{}-fs-sandbox", config.name)),
+        }
+    }
+}
+
 impl RuntimeSpec {
-    pub fn build(
-        project_root: &Path,
-        config: &ExecutionConfig,
-        network_settings: &NetworkSettings,
-    ) -> Self {
+    pub fn build(project_root: &Path, config: &ExecutionConfig) -> Self {
         let project_root = project_root.to_path_buf();
         let project_root_label = project_root.display().to_string();
         let custom_mounts = build_custom_mounts(&config.name, &config.mounts);
+        let names = RuntimeNames::from_config(config);
 
-        let proxy = build_proxy_pod(&project_root, config, network_settings, &custom_mounts);
-        let agent = build_agent_pod(&project_root, config, network_settings, &custom_mounts);
-        let nw_sandbox = network_settings.nw_sandbox.as_ref().map(|component| {
+        let proxy = build_proxy_pod(&project_root, config, &names, &custom_mounts);
+        let agent = build_agent_pod(&project_root, config, &names, &custom_mounts);
+        let nw_sandbox = names.nw_sandbox_name.as_ref().map(|component_name| {
             build_nw_sandbox_pod(
                 &project_root,
                 config,
-                network_settings,
-                component,
+                &names,
+                component_name,
                 &custom_mounts,
             )
         });
-        let fs_sandbox = network_settings.fs_sandbox.as_ref().map(|component| {
+        let fs_sandbox = names.fs_sandbox_name.as_ref().map(|component_name| {
             build_fs_sandbox_pod(
                 &project_root,
                 config,
-                network_settings,
-                component,
+                &names,
+                component_name,
                 &custom_mounts,
             )
         });
@@ -51,7 +77,6 @@ impl RuntimeSpec {
             project_name: config.name.clone(),
             project_root,
             project_root_label,
-            network_settings: network_settings.clone(),
             custom_mounts,
             proxy,
             agent,
@@ -152,63 +177,58 @@ pub struct RuntimeHostAlias {
 fn build_proxy_pod(
     project_root: &Path,
     config: &ExecutionConfig,
-    network_settings: &NetworkSettings,
+    names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mounts = build_proxy_mounts(project_root, custom_mounts);
-
-    let mut env = vec![
-        RuntimeEnvVar {
-            name: "CLADDING_PROXY_NAME".to_string(),
-            value: network_settings.proxy_name.clone(),
-        },
-        RuntimeEnvVar {
-            name: "CLADDING_AGENT_NAME".to_string(),
-            value: network_settings.agent_name.clone(),
-        },
-    ];
-    if let Some(nw) = &network_settings.nw_sandbox {
-        env.insert(
-            1,
+    let mut containers = vec![RuntimeContainer {
+        name: runtime_container_name(&names.proxy_name),
+        image: "docker.io/ubuntu/squid:latest".to_string(),
+        command: vec![
+            "/bin/sh".to_string(),
+            "/opt/scripts/proxy_startup.sh".to_string(),
+        ],
+        workdir: None,
+        env: vec![
             RuntimeEnvVar {
-                name: "CLADDING_SANDBOX_NAME".to_string(),
-                value: nw.name.clone(),
+                name: "CLADDING_PROXY_NAME".to_string(),
+                value: names.proxy_name.clone(),
             },
-        );
+            RuntimeEnvVar {
+                name: "CLADDING_AGENT_NAME".to_string(),
+                value: names.agent_name.clone(),
+            },
+        ],
+        mounts,
+        ports: vec![3128, 3129],
+        stdin: false,
+        tty: false,
+    }];
+
+    if names.nw_sandbox_name.is_some() {
+        containers.push(build_proxy_bridge_listener(
+            &names.proxy_name,
+            "nw-sandbox-proxy-socket",
+            3129,
+            runtime_socket_path(project_root, "nw-sandbox-proxy.sock"),
+        ));
     }
 
-    let mut host_aliases = vec![RuntimeHostAlias {
-        ip: network_settings.agent_ip.clone(),
-        hostnames: vec![network_settings.agent_name.clone()],
-    }];
-    if let Some(nw) = &network_settings.nw_sandbox {
-        host_aliases.push(RuntimeHostAlias {
-            ip: nw.ip.clone(),
-            hostnames: vec![nw.name.clone()],
-        });
-    }
+    containers.push(build_proxy_bridge_listener(
+        &names.proxy_name,
+        "agent-proxy-socket",
+        3128,
+        runtime_socket_path(project_root, "agent-proxy.sock"),
+    ));
 
     RuntimePod {
-        name: network_settings.proxy_name.clone(),
+        name: names.proxy_name.clone(),
         labels: build_labels(&config.name, project_root, "proxy"),
-        network_name: network_settings.network.clone(),
-        ip: network_settings.proxy_ip.clone(),
-        host_aliases,
+        network_name: NETWORK_DEFAULT.to_string(),
+        ip: String::new(),
+        host_aliases: Vec::new(),
         init_tasks: Vec::new(),
-        containers: vec![RuntimeContainer {
-            name: runtime_container_name(&network_settings.proxy_name),
-            image: "docker.io/ubuntu/squid:latest".to_string(),
-            command: vec![
-                "/bin/sh".to_string(),
-                "/opt/scripts/proxy_startup.sh".to_string(),
-            ],
-            workdir: None,
-            env,
-            mounts,
-            ports: vec![8080],
-            stdin: false,
-            tty: false,
-        }],
+        containers,
         userns_keep_id: false,
     }
 }
@@ -216,7 +236,7 @@ fn build_proxy_pod(
 fn build_agent_pod(
     project_root: &Path,
     config: &ExecutionConfig,
-    network_settings: &NetworkSettings,
+    names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mounts = apply_custom_mounts(
@@ -233,148 +253,101 @@ fn build_agent_pod(
         },
         RuntimeEnvVar {
             name: "CLADDING_PROXY_NAME".to_string(),
-            value: network_settings.proxy_name.clone(),
+            value: names.proxy_name.clone(),
         },
         RuntimeEnvVar {
             name: "CLADDING_AGENT_NAME".to_string(),
-            value: network_settings.agent_name.clone(),
+            value: names.agent_name.clone(),
         },
         RuntimeEnvVar {
             name: "http_proxy".to_string(),
-            value: format!("http://{}:8080", network_settings.proxy_name),
+            value: format!("http://{LOOPBACK}:3128"),
         },
         RuntimeEnvVar {
             name: "https_proxy".to_string(),
-            value: format!("http://{}:8080", network_settings.proxy_name),
+            value: format!("http://{LOOPBACK}:3128"),
         },
         RuntimeEnvVar {
             name: "HTTP_PROXY".to_string(),
-            value: format!("http://{}:8080", network_settings.proxy_name),
+            value: format!("http://{LOOPBACK}:3128"),
         },
         RuntimeEnvVar {
             name: "HTTPS_PROXY".to_string(),
-            value: format!("http://{}:8080", network_settings.proxy_name),
+            value: format!("http://{LOOPBACK}:3128"),
         },
         RuntimeEnvVar {
             name: "no_proxy".to_string(),
-            value: build_no_proxy(network_settings),
+            value: build_no_proxy(),
         },
         RuntimeEnvVar {
             name: "NO_PROXY".to_string(),
-            value: build_no_proxy(network_settings),
+            value: build_no_proxy(),
         },
     ];
-    if let Some(nw) = &network_settings.nw_sandbox {
+    if let Some(nw_name) = names.nw_sandbox_name.as_ref() {
         env.insert(
             3,
             RuntimeEnvVar {
                 name: "CLADDING_SANDBOX_NAME".to_string(),
-                value: nw.name.clone(),
+                value: nw_name.clone(),
             },
         );
         env.push(RuntimeEnvVar {
             name: "RUN_NW_SANDBOX_SERVER".to_string(),
-            value: format!("http://{}:3000/raw", nw.name),
+            value: format!("http://{LOOPBACK}:3001/raw"),
         });
     }
-    if let Some(fs) = &network_settings.fs_sandbox {
+    if names.fs_sandbox_name.is_some() {
         env.push(RuntimeEnvVar {
             name: "RUN_FS_SANDBOX_SERVER".to_string(),
-            value: format!("http://{}:3000/raw", fs.name),
+            value: format!("http://{LOOPBACK}:3002/raw"),
         });
     }
 
-    let mut host_aliases = vec![RuntimeHostAlias {
-        ip: network_settings.proxy_ip.clone(),
-        hostnames: vec![network_settings.proxy_name.clone()],
+    let mut containers = vec![RuntimeContainer {
+        name: runtime_container_name(&names.agent_name),
+        image: config.agent_image().to_string(),
+        command: vec!["sleep".to_string(), "infinity".to_string()],
+        workdir: Some("/home/user/workspace".to_string()),
+        env,
+        mounts,
+        ports: Vec::new(),
+        stdin: true,
+        tty: true,
     }];
-    if let Some(nw) = &network_settings.nw_sandbox {
-        host_aliases.push(RuntimeHostAlias {
-            ip: nw.ip.clone(),
-            hostnames: vec![nw.name.clone()],
-        });
-    }
-    if let Some(fs) = &network_settings.fs_sandbox {
-        host_aliases.push(RuntimeHostAlias {
-            ip: fs.ip.clone(),
-            hostnames: vec![fs.name.clone()],
-        });
-    }
 
-    let mut init_env = vec![
-        RuntimeEnvVar {
-            name: "CLADDING_PROXY_NAME".to_string(),
-            value: network_settings.proxy_name.clone(),
-        },
-        RuntimeEnvVar {
-            name: "CLADDING_AGENT_NAME".to_string(),
-            value: network_settings.agent_name.clone(),
-        },
-    ];
-    if let Some(nw) = &network_settings.nw_sandbox {
-        init_env.push(RuntimeEnvVar {
-            name: "CLADDING_SANDBOX_NAME".to_string(),
-            value: nw.name.clone(),
-        });
-        init_env.push(RuntimeEnvVar {
-            name: "RUN_NW_SANDBOX_SERVER".to_string(),
-            value: format!("http://{}:3000/raw", nw.name),
-        });
-    }
-    if let Some(fs) = &network_settings.fs_sandbox {
-        init_env.push(RuntimeEnvVar {
-            name: "RUN_FS_SANDBOX_SERVER".to_string(),
-            value: format!("http://{}:3000/raw", fs.name),
-        });
-    }
+    containers.push(build_loopback_bridge_sidecar(
+        &names.agent_name,
+        "proxy-client",
+        3128,
+        runtime_socket_path(project_root, "agent-proxy.sock"),
+    ));
 
-    let init_tasks = vec![RuntimeTask {
-        name: "agent-node".to_string(),
-        image: "alpine:latest".to_string(),
-        command: vec![
-            "/bin/sh".to_string(),
-            "/opt/scripts/jail_agent.sh".to_string(),
-        ],
-        env: init_env,
-        mounts: vec![
-            RuntimeMount {
-                mount_path: "/opt/scripts".to_string(),
-                read_only: true,
-                source: RuntimeMountSource::HostPath {
-                    path: project_root.join("scripts"),
-                },
-            },
-            RuntimeMount {
-                mount_path: "/opt/config".to_string(),
-                read_only: true,
-                source: RuntimeMountSource::HostPath {
-                    path: project_root.join("config"),
-                },
-            },
-        ],
-        run_as_user: Some(0),
-        run_as_group: Some(0),
-        added_capabilities: vec!["NET_ADMIN".to_string()],
-    }];
+    if names.nw_sandbox_name.is_some() {
+        containers.push(build_loopback_bridge_sidecar(
+            &names.agent_name,
+            "nw-sandbox-run-client",
+            3001,
+            runtime_socket_path(project_root, "nw-sandbox-run.sock"),
+        ));
+    }
+    if names.fs_sandbox_name.is_some() {
+        containers.push(build_loopback_bridge_sidecar(
+            &names.agent_name,
+            "fs-sandbox-run-client",
+            3002,
+            runtime_socket_path(project_root, "fs-sandbox-run.sock"),
+        ));
+    }
 
     RuntimePod {
-        name: network_settings.agent_name.clone(),
+        name: names.agent_name.clone(),
         labels: build_labels(&config.name, project_root, "agent"),
-        network_name: network_settings.network.clone(),
-        ip: network_settings.agent_ip.clone(),
-        host_aliases,
-        init_tasks,
-        containers: vec![RuntimeContainer {
-            name: runtime_container_name(&network_settings.agent_name),
-            image: config.agent_image().to_string(),
-            command: vec!["sleep".to_string(), "infinity".to_string()],
-            workdir: Some("/home/user/workspace".to_string()),
-            env,
-            mounts,
-            ports: Vec::new(),
-            stdin: true,
-            tty: true,
-        }],
+        network_name: NETWORK_NONE.to_string(),
+        ip: String::new(),
+        host_aliases: Vec::new(),
+        init_tasks: Vec::new(),
+        containers,
         userns_keep_id: true,
     }
 }
@@ -382,8 +355,8 @@ fn build_agent_pod(
 fn build_nw_sandbox_pod(
     project_root: &Path,
     config: &ExecutionConfig,
-    network_settings: &NetworkSettings,
-    component: &ComponentNetworkSettings,
+    names: &RuntimeNames,
+    component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mounts = apply_custom_mounts(
@@ -400,7 +373,7 @@ fn build_nw_sandbox_pod(
         },
         RuntimeEnvVar {
             name: "MCP_BIND_ADDR".to_string(),
-            value: "0.0.0.0:3000".to_string(),
+            value: format!("{LOOPBACK}:3000"),
         },
         RuntimeEnvVar {
             name: "POLICY_DIR".to_string(),
@@ -408,34 +381,34 @@ fn build_nw_sandbox_pod(
         },
         RuntimeEnvVar {
             name: "CLADDING_PROXY_NAME".to_string(),
-            value: network_settings.proxy_name.clone(),
+            value: names.proxy_name.clone(),
         },
         RuntimeEnvVar {
             name: "CLADDING_AGENT_NAME".to_string(),
-            value: network_settings.agent_name.clone(),
+            value: names.agent_name.clone(),
         },
         RuntimeEnvVar {
             name: "CLADDING_SANDBOX_NAME".to_string(),
-            value: component.name.clone(),
+            value: component_name.to_string(),
         },
         RuntimeEnvVar {
             name: "http_proxy".to_string(),
-            value: format!("http://{}:8080", network_settings.proxy_name),
+            value: format!("http://{LOOPBACK}:3128"),
         },
         RuntimeEnvVar {
             name: "https_proxy".to_string(),
-            value: format!("http://{}:8080", network_settings.proxy_name),
+            value: format!("http://{LOOPBACK}:3128"),
         },
         RuntimeEnvVar {
             name: "HTTP_PROXY".to_string(),
-            value: format!("http://{}:8080", network_settings.proxy_name),
+            value: format!("http://{LOOPBACK}:3128"),
         },
         RuntimeEnvVar {
             name: "HTTPS_PROXY".to_string(),
-            value: format!("http://{}:8080", network_settings.proxy_name),
+            value: format!("http://{LOOPBACK}:3128"),
         },
     ];
-    let no_proxy = format!("{},localhost,127.0.0.1", component.name);
+    let no_proxy = format!("localhost,{LOOPBACK}");
     env.push(RuntimeEnvVar {
         name: "no_proxy".to_string(),
         value: no_proxy.clone(),
@@ -445,49 +418,9 @@ fn build_nw_sandbox_pod(
         value: no_proxy,
     });
 
-    RuntimePod {
-        name: component.name.clone(),
-        labels: build_labels(&config.name, project_root, "nw-sandbox"),
-        network_name: network_settings.network.clone(),
-        ip: component.ip.clone(),
-        host_aliases: vec![RuntimeHostAlias {
-            ip: network_settings.proxy_ip.clone(),
-            hostnames: vec![network_settings.proxy_name.clone()],
-        }],
-        init_tasks: vec![RuntimeTask {
-            name: "sandbox-node".to_string(),
-            image: "alpine:latest".to_string(),
-            command: vec![
-                "/bin/sh".to_string(),
-                "/opt/scripts/jail_nw_sandbox.sh".to_string(),
-            ],
-            env: vec![
-                RuntimeEnvVar {
-                    name: "CLADDING_PROXY_NAME".to_string(),
-                    value: network_settings.proxy_name.clone(),
-                },
-                RuntimeEnvVar {
-                    name: "CLADDING_AGENT_NAME".to_string(),
-                    value: network_settings.agent_name.clone(),
-                },
-                RuntimeEnvVar {
-                    name: "CLADDING_SANDBOX_NAME".to_string(),
-                    value: component.name.clone(),
-                },
-            ],
-            mounts: vec![RuntimeMount {
-                mount_path: "/opt/scripts".to_string(),
-                read_only: true,
-                source: RuntimeMountSource::HostPath {
-                    path: project_root.join("scripts"),
-                },
-            }],
-            run_as_user: Some(0),
-            run_as_group: Some(0),
-            added_capabilities: vec!["NET_ADMIN".to_string()],
-        }],
-        containers: vec![RuntimeContainer {
-            name: runtime_container_name(&component.name),
+    let mut containers = vec![
+        RuntimeContainer {
+            name: runtime_container_name(component_name),
             image: config.nw_sandbox_image().to_string(),
             command: vec!["mcp-run".to_string()],
             workdir: Some("/home/user/workspace".to_string()),
@@ -496,7 +429,29 @@ fn build_nw_sandbox_pod(
             ports: vec![3000],
             stdin: false,
             tty: false,
-        }],
+        },
+        build_loopback_bridge_sidecar(
+            component_name,
+            "proxy-client",
+            3128,
+            runtime_socket_path(project_root, "nw-sandbox-proxy.sock"),
+        ),
+        build_sandbox_run_server_listener(
+            component_name,
+            "run-server",
+            "nw-sandbox-run.sock",
+            project_root,
+        ),
+    ];
+
+    RuntimePod {
+        name: component_name.to_string(),
+        labels: build_labels(&config.name, project_root, "nw-sandbox"),
+        network_name: NETWORK_NONE.to_string(),
+        ip: String::new(),
+        host_aliases: Vec::new(),
+        init_tasks: Vec::new(),
+        containers: std::mem::take(&mut containers),
         userns_keep_id: true,
     }
 }
@@ -504,8 +459,8 @@ fn build_nw_sandbox_pod(
 fn build_fs_sandbox_pod(
     project_root: &Path,
     config: &ExecutionConfig,
-    network_settings: &NetworkSettings,
-    component: &ComponentNetworkSettings,
+    _names: &RuntimeNames,
+    component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mounts = apply_custom_mounts(
@@ -515,52 +470,45 @@ fn build_fs_sandbox_pod(
     );
 
     RuntimePod {
-        name: component.name.clone(),
+        name: component_name.to_string(),
         labels: build_labels(&config.name, project_root, "fs-sandbox"),
-        network_name: network_settings.network.clone(),
-        ip: component.ip.clone(),
+        network_name: NETWORK_NONE.to_string(),
+        ip: String::new(),
         host_aliases: Vec::new(),
-        init_tasks: vec![RuntimeTask {
-            name: "fs-sandbox-node".to_string(),
-            image: "alpine:latest".to_string(),
-            command: vec!["/bin/sh".to_string(), "/opt/scripts/jail_fs_sandbox.sh".to_string()],
-            env: Vec::new(),
-            mounts: vec![RuntimeMount {
-                mount_path: "/opt/scripts".to_string(),
-                read_only: true,
-                source: RuntimeMountSource::HostPath {
-                    path: project_root.join("scripts"),
-                },
-            }],
-            run_as_user: Some(0),
-            run_as_group: Some(0),
-            added_capabilities: vec!["NET_ADMIN".to_string()],
-        }],
-        containers: vec![RuntimeContainer {
-            name: runtime_container_name(&component.name),
-            image: config.fs_sandbox_image().to_string(),
-            command: vec!["mcp-run".to_string()],
-            workdir: Some("/home/user/workspace".to_string()),
-            env: vec![
-                RuntimeEnvVar {
-                    name: "PATH".to_string(),
-                    value: "/opt/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                        .to_string(),
-                },
-                RuntimeEnvVar {
-                    name: "MCP_BIND_ADDR".to_string(),
-                    value: "0.0.0.0:3000".to_string(),
-                },
-                RuntimeEnvVar {
-                    name: "POLICY_DIR".to_string(),
-                    value: "/opt/config/fs_sandbox".to_string(),
-                },
-            ],
-            mounts,
-            ports: vec![3000],
-            stdin: false,
-            tty: false,
-        }],
+        init_tasks: Vec::new(),
+        containers: vec![
+            RuntimeContainer {
+                name: runtime_container_name(component_name),
+                image: config.fs_sandbox_image().to_string(),
+                command: vec!["mcp-run".to_string()],
+                workdir: Some("/home/user/workspace".to_string()),
+                env: vec![
+                    RuntimeEnvVar {
+                        name: "PATH".to_string(),
+                        value: "/opt/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                            .to_string(),
+                    },
+                    RuntimeEnvVar {
+                        name: "MCP_BIND_ADDR".to_string(),
+                        value: format!("{LOOPBACK}:3000"),
+                    },
+                    RuntimeEnvVar {
+                        name: "POLICY_DIR".to_string(),
+                        value: "/opt/config/fs_sandbox".to_string(),
+                    },
+                ],
+                mounts,
+                ports: vec![3000],
+                stdin: false,
+                tty: false,
+            },
+            build_sandbox_run_server_listener(
+                component_name,
+                "run-server",
+                "fs-sandbox-run.sock",
+                project_root,
+            ),
+        ],
         userns_keep_id: true,
     }
 }
@@ -596,6 +544,134 @@ fn build_proxy_mounts(
             },
         },
     ]
+}
+
+fn build_socket_dir_mount(socket_dir: &Path) -> RuntimeMount {
+    RuntimeMount {
+        mount_path: RUNTIME_SOCKET_MOUNT_PATH.to_string(),
+        read_only: false,
+        source: RuntimeMountSource::HostPath {
+            path: socket_dir.to_path_buf(),
+        },
+    }
+}
+
+fn build_proxy_bridge_listener(
+    pod_name: &str,
+    listener_name: &str,
+    listen_port: u16,
+    socket_path: PathBuf,
+) -> RuntimeContainer {
+    let socket_name = socket_path
+        .file_name()
+        .expect("runtime socket path must have a file name")
+        .to_str()
+        .expect("runtime socket path must be valid UTF-8");
+    RuntimeContainer {
+        name: format!("{pod_name}-{listener_name}"),
+        image: "alpine/socat".to_string(),
+        command: vec![
+            "socat".to_string(),
+            format!(
+                "UNIX-LISTEN:{},fork,reuseaddr",
+                runtime_socket_mount_path(socket_name)
+            ),
+            format!("TCP:{LOOPBACK}:{listen_port}"),
+        ],
+        workdir: None,
+        env: Vec::new(),
+        mounts: vec![build_socket_dir_mount(socket_path.parent().unwrap())],
+        ports: vec![listen_port],
+        stdin: false,
+        tty: false,
+    }
+}
+
+fn build_loopback_bridge_sidecar(
+    pod_name: &str,
+    listener_name: &str,
+    listen_port: u16,
+    socket_path: PathBuf,
+) -> RuntimeContainer {
+    let socket_name = socket_path
+        .file_name()
+        .expect("runtime socket path must have a file name")
+        .to_str()
+        .expect("runtime socket path must be valid UTF-8");
+    RuntimeContainer {
+        name: format!("{pod_name}-{listener_name}"),
+        image: "alpine/socat".to_string(),
+        command: vec![
+            "socat".to_string(),
+            format!("TCP-LISTEN:{listen_port},bind={LOOPBACK},fork,reuseaddr"),
+            format!("UNIX-CONNECT:{}", runtime_socket_mount_path(socket_name)),
+        ],
+        workdir: None,
+        env: Vec::new(),
+        mounts: vec![build_socket_dir_mount(socket_path.parent().unwrap())],
+        ports: vec![listen_port],
+        stdin: false,
+        tty: false,
+    }
+}
+
+fn build_sandbox_run_server_listener(
+    pod_name: &str,
+    listener_name: &str,
+    socket_name: &str,
+    project_root: &Path,
+) -> RuntimeContainer {
+    RuntimeContainer {
+        name: format!("{pod_name}-{listener_name}"),
+        image: "alpine/socat".to_string(),
+        command: vec![
+            "socat".to_string(),
+            format!(
+                "UNIX-LISTEN:{},fork,reuseaddr",
+                runtime_socket_mount_path(socket_name)
+            ),
+            format!("TCP:{LOOPBACK}:3000"),
+        ],
+        workdir: None,
+        env: Vec::new(),
+        mounts: vec![RuntimeMount {
+            mount_path: RUNTIME_SOCKET_MOUNT_PATH.to_string(),
+            read_only: false,
+            source: RuntimeMountSource::HostPath {
+                path: runtime_socket_dir(project_root),
+            },
+        }],
+        ports: vec![3000],
+        stdin: false,
+        tty: false,
+    }
+}
+
+fn runtime_socket_dir(project_root: &Path) -> PathBuf {
+    project_root.join(RUNTIME_SOCKET_DIR)
+}
+
+#[allow(dead_code)]
+fn runtime_expose_dir(project_root: &Path) -> PathBuf {
+    project_root.join(RUNTIME_EXPOSE_DIR)
+}
+
+fn runtime_socket_path(project_root: &Path, socket_name: &str) -> PathBuf {
+    runtime_socket_dir(project_root).join(socket_name)
+}
+
+fn runtime_socket_mount_path(socket_name: &str) -> String {
+    format!("{RUNTIME_SOCKET_MOUNT_PATH}/{socket_name}")
+}
+
+#[allow(dead_code)]
+fn runtime_expose_socket_path(
+    project_root: &Path,
+    pod_name: &str,
+    container_port: u16,
+    host_port: u16,
+) -> PathBuf {
+    runtime_expose_dir(project_root).join(format!("{pod_name}-{container_port}-{host_port}.sock"))
 }
 
 fn build_agent_mounts(
@@ -746,17 +822,8 @@ fn build_mount_source(project_name: &str, mount: &ResolvedMountConfig) -> Runtim
     }
 }
 
-fn build_no_proxy(network_settings: &NetworkSettings) -> String {
-    let mut entries = Vec::new();
-    if let Some(nw) = &network_settings.nw_sandbox {
-        entries.push(nw.name.clone());
-    }
-    if let Some(fs) = &network_settings.fs_sandbox {
-        entries.push(fs.name.clone());
-    }
-    entries.push("localhost".to_string());
-    entries.push("127.0.0.1".to_string());
-    entries.join(",")
+fn build_no_proxy() -> String {
+    ["localhost", LOOPBACK].join(",")
 }
 
 fn runtime_container_name(pod_name: &str) -> String {
@@ -767,6 +834,9 @@ fn collect_required_host_paths(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) 
     for task in &pod.init_tasks {
         for mount in &task.mounts {
             if let RuntimeMountSource::HostPath { path } = &mount.source {
+                if is_generated_runtime_path(path) {
+                    continue;
+                }
                 paths.insert(path.clone());
             }
         }
@@ -775,10 +845,17 @@ fn collect_required_host_paths(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) 
     for container in &pod.containers {
         for mount in &container.mounts {
             if let RuntimeMountSource::HostPath { path } = &mount.source {
+                if is_generated_runtime_path(path) {
+                    continue;
+                }
                 paths.insert(path.clone());
             }
         }
     }
+}
+
+fn is_generated_runtime_path(path: &Path) -> bool {
+    path.ends_with(RUNTIME_SOCKET_DIR)
 }
 
 #[cfg(test)]
@@ -812,29 +889,7 @@ mod tests {
     #[test]
     fn build_runtime_spec_preserves_component_metadata() {
         let config = execution_config(true, true, Vec::new());
-        let network_settings = NetworkSettings {
-            pool_index: 1,
-            network: "cladding-1".to_string(),
-            network_subnet: "10.90.1.0/24".to_string(),
-            proxy_ip: "10.90.1.2".to_string(),
-            proxy_name: "demo-proxy".to_string(),
-            agent_ip: "10.90.1.5".to_string(),
-            agent_name: "demo-agent".to_string(),
-            nw_sandbox: Some(ComponentNetworkSettings {
-                ip: "10.90.1.3".to_string(),
-                name: "demo-nw-sandbox".to_string(),
-            }),
-            fs_sandbox: Some(ComponentNetworkSettings {
-                ip: "10.90.1.4".to_string(),
-                name: "demo-fs-sandbox".to_string(),
-            }),
-        };
-
-        let spec = RuntimeSpec::build(
-            Path::new("/tmp/project/.cladding"),
-            &config,
-            &network_settings,
-        );
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
 
         assert_eq!(spec.project_name, "demo");
         assert_eq!(spec.proxy.name, "demo-proxy");
@@ -843,7 +898,11 @@ mod tests {
             spec.proxy.labels.get("project_root").map(String::as_str),
             Some("/tmp/project/.cladding")
         );
-        assert_eq!(spec.proxy.host_aliases.len(), 2);
+        assert!(spec.proxy.host_aliases.is_empty());
+        assert_eq!(spec.proxy.network_name, "default");
+        assert_eq!(spec.agent.network_name, "none");
+        assert_eq!(spec.agent.host_aliases.len(), 0);
+        assert_eq!(spec.agent.init_tasks.len(), 0);
         assert!(spec.agent.userns_keep_id);
         assert_eq!(
             spec.agent.containers[0].workdir.as_deref(),
@@ -852,43 +911,182 @@ mod tests {
         assert_eq!(spec.agent.containers[0].ports, Vec::<u16>::new());
         assert_eq!(spec.agent.containers[0].name, "demo-agent-instance");
         assert_eq!(spec.proxy.containers[0].name, "demo-proxy-instance");
+        assert!(
+            spec.proxy
+                .containers
+                .iter()
+                .any(|container| container.name == "demo-proxy-agent-proxy-socket")
+        );
+        assert!(
+            spec.proxy
+                .containers
+                .iter()
+                .any(|container| container.name == "demo-proxy-nw-sandbox-proxy-socket")
+        );
+        let agent_proxy_client = spec
+            .agent
+            .containers
+            .iter()
+            .find(|container| container.name == "demo-agent-proxy-client")
+            .expect("agent proxy client");
+        assert_eq!(
+            agent_proxy_client.command,
+            vec![
+                "socat".to_string(),
+                "TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr".to_string(),
+                "UNIX-CONNECT:/run/cladding/sockets/agent-proxy.sock".to_string(),
+            ]
+        );
+        assert!(
+            agent_proxy_client
+                .command
+                .iter()
+                .all(|arg| !arg.contains("/tmp/project/.cladding/runtime/sockets"))
+        );
+        let proxy_nw_listener = spec
+            .proxy
+            .containers
+            .iter()
+            .find(|container| container.name == "demo-proxy-nw-sandbox-proxy-socket")
+            .expect("proxy nw listener");
+        assert_eq!(
+            proxy_nw_listener.command,
+            vec![
+                "socat".to_string(),
+                "UNIX-LISTEN:/run/cladding/sockets/nw-sandbox-proxy.sock,fork,reuseaddr"
+                    .to_string(),
+                "TCP:127.0.0.1:3129".to_string(),
+            ]
+        );
+        assert!(
+            proxy_nw_listener
+                .command
+                .iter()
+                .all(|arg| !arg.contains("/tmp/project/.cladding/runtime/sockets"))
+        );
         assert_eq!(
             spec.nw_sandbox.as_ref().expect("nw pod").containers[0].name,
             "demo-nw-sandbox-instance"
         );
+        let nw_proxy_client = spec
+            .nw_sandbox
+            .as_ref()
+            .expect("nw pod")
+            .containers
+            .iter()
+            .find(|container| container.name == "demo-nw-sandbox-proxy-client")
+            .expect("nw proxy client");
         assert_eq!(
-            spec.nw_sandbox.as_ref().expect("nw pod").containers[0].ports,
+            nw_proxy_client.command,
+            vec![
+                "socat".to_string(),
+                "TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr".to_string(),
+                "UNIX-CONNECT:/run/cladding/sockets/nw-sandbox-proxy.sock".to_string(),
+            ]
+        );
+        let nw_run_server = spec
+            .nw_sandbox
+            .as_ref()
+            .expect("nw pod")
+            .containers
+            .iter()
+            .find(|container| container.name == "demo-nw-sandbox-run-server")
+            .expect("nw run server");
+        assert_eq!(
+            nw_run_server.command,
+            vec![
+                "socat".to_string(),
+                "UNIX-LISTEN:/run/cladding/sockets/nw-sandbox-run.sock,fork,reuseaddr".to_string(),
+                "TCP:127.0.0.1:3000".to_string(),
+            ]
+        );
+        assert!(
+            nw_proxy_client
+                .command
+                .iter()
+                .all(|arg| !arg.contains("/tmp/project/.cladding/runtime/sockets"))
+        );
+        assert!(
+            nw_run_server
+                .command
+                .iter()
+                .all(|arg| !arg.contains("/tmp/project/.cladding/runtime/sockets"))
+        );
+        assert_eq!(
+            spec.nw_sandbox
+                .as_ref()
+                .expect("nw pod")
+                .containers
+                .iter()
+                .find(|container| container.name == "demo-nw-sandbox-instance")
+                .expect("nw app")
+                .ports,
             vec![3000]
+        );
+        assert!(
+            spec.nw_sandbox
+                .as_ref()
+                .expect("nw pod")
+                .containers
+                .iter()
+                .any(|container| container.name == "demo-nw-sandbox-run-server")
+        );
+        assert!(
+            spec.fs_sandbox
+                .as_ref()
+                .expect("fs pod")
+                .containers
+                .iter()
+                .any(|container| container.name == "demo-fs-sandbox-run-server")
+        );
+        assert_eq!(
+            spec.agent
+                .containers
+                .iter()
+                .find(|container| container.name == "demo-agent-instance")
+                .expect("agent app")
+                .env
+                .iter()
+                .find(|env| env.name == "RUN_NW_SANDBOX_SERVER")
+                .map(|env| env.value.as_str()),
+            Some("http://127.0.0.1:3001/raw")
+        );
+        assert_eq!(
+            spec.agent
+                .containers
+                .iter()
+                .find(|container| container.name == "demo-agent-instance")
+                .expect("agent app")
+                .env
+                .iter()
+                .find(|env| env.name == "RUN_FS_SANDBOX_SERVER")
+                .map(|env| env.value.as_str()),
+            Some("http://127.0.0.1:3002/raw")
         );
         assert_eq!(
             spec.fs_sandbox.as_ref().expect("fs pod").containers[0].image,
             "fs:image"
+        );
+        assert_eq!(
+            spec.required_host_paths()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            [
+                PathBuf::from("/tmp/project/.cladding/.."),
+                PathBuf::from("/tmp/project/.cladding/config"),
+                PathBuf::from("/tmp/project/.cladding/home"),
+                PathBuf::from("/tmp/project/.cladding/scripts"),
+                PathBuf::from("/tmp/project/.cladding/tools"),
+            ]
+            .into_iter()
+            .collect()
         );
     }
 
     #[test]
     fn build_runtime_spec_only_includes_enabled_components() {
         let config = execution_config(true, false, Vec::new());
-        let network_settings = NetworkSettings {
-            pool_index: 1,
-            network: "cladding-1".to_string(),
-            network_subnet: "10.90.1.0/24".to_string(),
-            proxy_ip: "10.90.1.2".to_string(),
-            proxy_name: "demo-proxy".to_string(),
-            agent_ip: "10.90.1.5".to_string(),
-            agent_name: "demo-agent".to_string(),
-            nw_sandbox: Some(ComponentNetworkSettings {
-                ip: "10.90.1.3".to_string(),
-                name: "demo-nw-sandbox".to_string(),
-            }),
-            fs_sandbox: None,
-        };
-
-        let spec = RuntimeSpec::build(
-            Path::new("/tmp/project/.cladding"),
-            &config,
-            &network_settings,
-        );
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
 
         assert!(spec.nw_sandbox.is_some());
         assert!(spec.fs_sandbox.is_none());
@@ -897,6 +1095,18 @@ mod tests {
         assert_eq!(
             spec.nw_sandbox.as_ref().expect("nw pod").containers[0].name,
             "demo-nw-sandbox-instance"
+        );
+        assert!(
+            spec.agent
+                .containers
+                .iter()
+                .any(|container| container.name == "demo-agent-nw-sandbox-run-client")
+        );
+        assert!(
+            spec.agent
+                .containers
+                .iter()
+                .all(|container| container.name != "demo-agent-fs-sandbox-run-client")
         );
     }
 
@@ -914,26 +1124,7 @@ mod tests {
                 ignore: false,
             }],
         );
-        let network_settings = NetworkSettings {
-            pool_index: 1,
-            network: "cladding-1".to_string(),
-            network_subnet: "10.90.1.0/24".to_string(),
-            proxy_ip: "10.90.1.2".to_string(),
-            proxy_name: "demo-proxy".to_string(),
-            agent_ip: "10.90.1.5".to_string(),
-            agent_name: "demo-agent".to_string(),
-            nw_sandbox: Some(ComponentNetworkSettings {
-                ip: "10.90.1.3".to_string(),
-                name: "demo-nw-sandbox".to_string(),
-            }),
-            fs_sandbox: None,
-        };
-
-        let spec = RuntimeSpec::build(
-            Path::new("/tmp/project/.cladding"),
-            &config,
-            &network_settings,
-        );
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let required = spec.required_host_paths();
 
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/config")));
@@ -943,6 +1134,7 @@ mod tests {
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/..")));
         assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/empty-mask")));
         assert!(required.contains(&PathBuf::from("/tmp/workspace")));
+        assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/sockets")));
     }
 
     #[test]
@@ -969,26 +1161,18 @@ mod tests {
                 },
             ],
         );
-        let network_settings = NetworkSettings {
-            pool_index: 1,
-            network: "cladding-1".to_string(),
-            network_subnet: "10.90.1.0/24".to_string(),
-            proxy_ip: "10.90.1.2".to_string(),
-            proxy_name: "demo-proxy".to_string(),
-            agent_ip: "10.90.1.5".to_string(),
-            agent_name: "demo-agent".to_string(),
-            nw_sandbox: None,
-            fs_sandbox: None,
-        };
-
-        let spec = RuntimeSpec::build(
-            Path::new("/tmp/project/.cladding"),
-            &config,
-            &network_settings,
-        );
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let required = spec.required_host_paths();
 
         assert!(!required.contains(&PathBuf::from("/tmp/ignored")));
         assert!(!required.contains(&PathBuf::from("/tmp/inactive")));
+    }
+
+    #[test]
+    fn runtime_expose_socket_path_uses_stable_layout() {
+        assert_eq!(
+            runtime_expose_socket_path(Path::new("/tmp/project/.cladding"), "agent", 3000, 9000),
+            PathBuf::from("/tmp/project/.cladding/runtime/expose/agent-3000-9000.sock")
+        );
     }
 }

@@ -1,6 +1,5 @@
 use crate::assets::containerfile;
 use crate::error::{Error, Result};
-use crate::network::{NetworkSettings, is_ipv4_cidr, parse_cladding_pool_index};
 use crate::runtime::{
     RuntimeContainer, RuntimeMount, RuntimeMountSource, RuntimePod, RuntimeSpec, RuntimeTask,
 };
@@ -9,6 +8,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::process::{Command, ExitStatus, Output, Stdio};
 
 pub fn podman_required(message: &str) -> Result<()> {
@@ -17,118 +18,6 @@ pub fn podman_required(message: &str) -> Result<()> {
     } else {
         eprintln!("missing: {message}");
         Err(Error::message("missing podman"))
-    }
-}
-
-pub fn ensure_network_settings(network_settings: &NetworkSettings) -> Result<()> {
-    let status = Command::new("podman")
-        .args(["network", "exists", &network_settings.network])
-        .status()
-        .with_context(|| "failed to check existing networks via podman")?;
-
-    match status.code() {
-        Some(0) => {
-            let output = Command::new("podman")
-                .args(["network", "inspect", &network_settings.network])
-                .output()
-                .with_context(|| "failed to inspect podman network")?;
-
-            if !output.status.success() {
-                return ensure_success_output(&output, "podman network inspect");
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.contains(&format!(
-                "\"subnet\": \"{}\"",
-                network_settings.network_subnet
-            )) {
-                eprintln!(
-                    "error: network {} exists but is not on {}",
-                    network_settings.network, network_settings.network_subnet
-                );
-                eprintln!(
-                    "hint: run 'podman network rm {}' and retry",
-                    network_settings.network
-                );
-                return Err(Error::message("network subnet mismatch"));
-            }
-        }
-        Some(1) => {
-            let status = Command::new("podman")
-                .args([
-                    "network",
-                    "create",
-                    "--subnet",
-                    &network_settings.network_subnet,
-                    &network_settings.network,
-                ])
-                .status()
-                .with_context(|| "failed to create podman network")?;
-            ensure_success(status, "podman network create")?;
-        }
-        _ => {
-            eprintln!("error: failed to check existing networks via podman");
-            return Err(Error::message("podman network exists failed"));
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnsureNetworkOutcome {
-    Ready,
-    SubnetMismatch,
-}
-
-pub fn ensure_pool_network_settings(
-    network_settings: &NetworkSettings,
-) -> Result<EnsureNetworkOutcome> {
-    let status = Command::new("podman")
-        .args(["network", "exists", &network_settings.network])
-        .status()
-        .with_context(|| "failed to check existing networks via podman")?;
-
-    match status.code() {
-        Some(0) => {
-            let output = Command::new("podman")
-                .args(["network", "inspect", &network_settings.network])
-                .output()
-                .with_context(|| "failed to inspect podman network")?;
-
-            if !output.status.success() {
-                return ensure_success_output(&output, "podman network inspect")
-                    .map(|_| EnsureNetworkOutcome::Ready);
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains(&format!(
-                "\"subnet\": \"{}\"",
-                network_settings.network_subnet
-            )) {
-                Ok(EnsureNetworkOutcome::Ready)
-            } else {
-                Ok(EnsureNetworkOutcome::SubnetMismatch)
-            }
-        }
-        Some(1) => {
-            let status = Command::new("podman")
-                .args([
-                    "network",
-                    "create",
-                    "--subnet",
-                    &network_settings.network_subnet,
-                    &network_settings.network,
-                ])
-                .status()
-                .with_context(|| "failed to create podman network")?;
-            ensure_success(status, "podman network create")?;
-            Ok(EnsureNetworkOutcome::Ready)
-        }
-        _ => {
-            eprintln!("error: failed to check existing networks via podman");
-            Err(Error::message("podman network exists failed"))
-        }
     }
 }
 
@@ -165,58 +54,9 @@ pub fn podman_build_image(image: &str, host_uid: u32, host_gid: u32) -> Result<(
     ensure_success(status, "podman build")
 }
 
-#[derive(Debug, Clone)]
-pub struct NetworkSubnet {
-    pub name: String,
-    pub subnet: String,
-}
-
-pub fn list_podman_network_subnets() -> Result<Vec<NetworkSubnet>> {
-    let output = Command::new("podman")
-        .args(["network", "ls", "--format", "{{.Name}}"])
-        .output()
-        .with_context(|| "failed to list podman networks")?;
-
-    if !output.status.success() {
-        return ensure_success_output(&output, "podman network ls").map(|_| Vec::new());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut subnets = Vec::new();
-
-    for name in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
-        let output = Command::new("podman")
-            .args([
-                "network",
-                "inspect",
-                "-f",
-                "{{range .Subnets}}{{.Subnet}}{{\"\\n\"}}{{end}}",
-                name,
-            ])
-            .output()
-            .with_context(|| "failed to inspect podman network")?;
-
-        if !output.status.success() {
-            return ensure_success_output(&output, "podman network inspect").map(|_| Vec::new());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines().map(str::trim) {
-            if is_ipv4_cidr(line) {
-                subnets.push(NetworkSubnet {
-                    name: name.to_string(),
-                    subnet: line.to_string(),
-                });
-            }
-        }
-    }
-
-    Ok(subnets)
-}
-
-/// Direct runtime helpers that assume the caller has already selected and ensured the
-/// desired `cladding-N` network.
+/// Direct runtime helpers for creating and cleaning up pods.
 pub fn runtime_create(spec: &RuntimeSpec) -> Result<()> {
+    prepare_runtime_socket_dir(&spec.project_root)?;
     ensure_runtime_empty_mask_dir(spec)?;
 
     for pod in runtime_pods(spec) {
@@ -362,13 +202,6 @@ pub struct RunningProject {
     pub pod_count: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct RunningProjectNetwork {
-    pub name: String,
-    pub project_root: String,
-    pub network: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExposeProxy {
     pub id: String,
@@ -376,6 +209,7 @@ pub struct ExposeProxy {
     pub host_port: u16,
     pub container_port: u16,
     pub status: String,
+    pub role: String,
 }
 
 pub fn list_running_projects() -> Result<Vec<RunningProject>> {
@@ -405,76 +239,25 @@ pub fn list_running_projects() -> Result<Vec<RunningProject>> {
     Ok(results)
 }
 
-pub fn list_running_project_networks() -> Result<Vec<RunningProjectNetwork>> {
-    let items = list_running_pod_items()?;
-    let mut networks: HashMap<(String, String), String> = HashMap::new();
-
-    for item in items {
-        let network = inspect_pool_network_for_pod(&item.pod_id)?;
-        let Some(network) = network else {
-            continue;
-        };
-
-        let key = (item.name.clone(), item.project_root.clone());
-        if let Some(existing) = networks.get(&key) {
-            if existing != &network {
-                eprintln!(
-                    "error: running project '{}' has pods on multiple cladding networks",
-                    item.name
-                );
-                eprintln!("project_root: {}", item.project_root);
-                eprintln!("networks: {existing}, {network}");
-                return Err(Error::message("inconsistent active network"));
-            }
-            continue;
-        }
-        networks.insert(key, network);
-    }
-
-    let mut results: Vec<RunningProjectNetwork> = networks
-        .into_iter()
-        .map(|((name, project_root), network)| RunningProjectNetwork {
-            name,
-            project_root,
-            network,
-        })
-        .collect();
-
-    results.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.project_root.cmp(&b.project_root))
-    });
-
-    Ok(results)
-}
-
 pub fn list_project_expose_proxies(
     project_name: &str,
     project_root: &str,
     include_stopped: bool,
 ) -> Result<Vec<ExposeProxy>> {
-    let items = list_expose_proxy_items(project_name, include_stopped)?;
-    let mut results = Vec::new();
+    list_project_expose_entries(
+        project_name,
+        project_root,
+        include_stopped,
+        Some("host-helper"),
+    )
+}
 
-    for item in items {
-        if item.project_root != project_root {
-            continue;
-        }
-        if item.target != "agent" {
-            continue;
-        }
-        results.push(item.proxy);
-    }
-
-    results.sort_by(|a, b| {
-        a.host_port
-            .cmp(&b.host_port)
-            .then_with(|| a.container_port.cmp(&b.container_port))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-
-    Ok(results)
+pub fn list_project_expose_containers(
+    project_name: &str,
+    project_root: &str,
+    include_stopped: bool,
+) -> Result<Vec<ExposeProxy>> {
+    list_project_expose_entries(project_name, project_root, include_stopped, None)
 }
 
 pub fn podman_container_exists(container_name: &str) -> Result<bool> {
@@ -524,7 +307,6 @@ pub fn podman_remove_containers(
 
 #[derive(Debug, Clone)]
 struct RunningPodItem {
-    pod_id: String,
     name: String,
     project_root: String,
 }
@@ -534,6 +316,7 @@ struct ExposeProxyItem {
     proxy: ExposeProxy,
     project_root: String,
     target: String,
+    role: String,
 }
 
 fn list_running_pod_items() -> Result<Vec<RunningPodItem>> {
@@ -574,16 +357,7 @@ fn list_running_pod_items() -> Result<Vec<RunningPodItem>> {
         let Some(project_root) = labels.get("project_root") else {
             continue;
         };
-        let pod_id = item
-            .get("Id")
-            .and_then(Value::as_str)
-            .or_else(|| item.get("ID").and_then(Value::as_str))
-            .unwrap_or_default();
-        if pod_id.is_empty() {
-            continue;
-        }
         pods.push(RunningPodItem {
-            pod_id: pod_id.to_string(),
             name: name.to_string(),
             project_root: project_root.to_string(),
         });
@@ -625,74 +399,46 @@ fn list_expose_proxy_items(
     Ok(parse_expose_proxy_items(&parsed))
 }
 
-fn inspect_pool_network_for_pod(pod_id: &str) -> Result<Option<String>> {
-    let inspect = Command::new("podman")
-        .args(["pod", "inspect", pod_id, "--format", "json"])
-        .output()
-        .with_context(|| "failed to inspect running pod")?;
-    if !inspect.status.success() {
-        return ensure_success_output(&inspect, "podman pod inspect").map(|_| None);
-    }
+fn list_project_expose_entries(
+    project_name: &str,
+    project_root: &str,
+    include_stopped: bool,
+    role_filter: Option<&str>,
+) -> Result<Vec<ExposeProxy>> {
+    let items = list_expose_proxy_items(project_name, include_stopped)?;
+    let mut results = project_expose_proxies_from_items(items, project_root, role_filter);
 
-    let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
-    let parsed: Value = serde_json::from_str(&inspect_stdout)
-        .with_context(|| "failed to parse podman pod inspect json output")?;
-    let Some(infra_id) = find_infra_container_id(&parsed) else {
-        return Ok(None);
-    };
+    results.sort_by(|a, b| {
+        a.host_port
+            .cmp(&b.host_port)
+            .then_with(|| a.container_port.cmp(&b.container_port))
+            .then_with(|| a.name.cmp(&b.name))
+    });
 
-    let inspect_infra = Command::new("podman")
-        .args(["container", "inspect", &infra_id, "--format", "json"])
-        .output()
-        .with_context(|| "failed to inspect pod infra container")?;
-    if !inspect_infra.status.success() {
-        return ensure_success_output(&inspect_infra, "podman container inspect").map(|_| None);
-    }
-
-    let inspect_infra_stdout = String::from_utf8_lossy(&inspect_infra.stdout);
-    let parsed: Value = serde_json::from_str(&inspect_infra_stdout)
-        .with_context(|| "failed to parse podman container inspect json output")?;
-    let Some(networks_obj) = find_networks_object(&parsed) else {
-        return Ok(None);
-    };
-
-    for key in networks_obj.keys() {
-        if parse_cladding_pool_index(key).is_some() {
-            return Ok(Some(key.to_string()));
-        }
-    }
-    Ok(None)
+    Ok(results)
 }
 
-fn find_infra_container_id(value: &Value) -> Option<String> {
-    if let Some(items) = value.as_array() {
-        for item in items {
-            if let Some(id) = find_infra_container_id(item) {
-                return Some(id);
-            }
-        }
-        return None;
-    }
-    value
-        .get("InfraContainerID")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(ToString::to_string)
-}
+fn project_expose_proxies_from_items(
+    items: Vec<ExposeProxyItem>,
+    project_root: &str,
+    role_filter: Option<&str>,
+) -> Vec<ExposeProxy> {
+    let mut results = Vec::new();
 
-fn find_networks_object(value: &Value) -> Option<&serde_json::Map<String, Value>> {
-    if let Some(items) = value.as_array() {
-        for item in items {
-            if let Some(networks) = find_networks_object(item) {
-                return Some(networks);
-            }
+    for item in items {
+        if item.project_root != project_root {
+            continue;
         }
-        return None;
+        if item.target != "agent" {
+            continue;
+        }
+        if role_filter.is_some_and(|role| item.role != role) {
+            continue;
+        }
+        results.push(item.proxy);
     }
-    value
-        .get("NetworkSettings")
-        .and_then(|network_settings| network_settings.get("Networks"))
-        .and_then(Value::as_object)
+
+    results
 }
 
 fn parse_labels(value: &Value) -> HashMap<String, String> {
@@ -747,6 +493,10 @@ fn parse_expose_proxy_item(value: &Value) -> Option<ExposeProxyItem> {
 
     let project_root = labels.get("project_root")?.to_string();
     let target = labels.get("cladding_expose_target")?.to_string();
+    let role = labels
+        .get("cladding_expose_role")
+        .cloned()
+        .unwrap_or_else(|| "host-helper".to_string());
     let container_port = labels
         .get("cladding_expose_container_port")?
         .parse::<u16>()
@@ -768,9 +518,11 @@ fn parse_expose_proxy_item(value: &Value) -> Option<ExposeProxyItem> {
             host_port,
             container_port,
             status,
+            role: role.clone(),
         },
         project_root,
         target,
+        role,
     })
 }
 
@@ -827,6 +579,60 @@ fn runtime_pods(spec: &RuntimeSpec) -> Vec<&RuntimePod> {
     pods
 }
 
+fn prepare_runtime_socket_dir(project_root: &Path) -> Result<()> {
+    let socket_dir = project_root.join("runtime/sockets");
+    clear_path(&socket_dir)?;
+    fs::create_dir_all(&socket_dir).with_context(|| {
+        format!(
+            "failed to create runtime socket directory {}",
+            socket_dir.display()
+        )
+    })?;
+    set_restrictive_dir_permissions(&socket_dir)?;
+    Ok(())
+}
+
+fn clear_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                fs::remove_dir_all(path)
+                    .with_context(|| format!("failed to remove directory {}", path.display()))?;
+            } else {
+                fs::remove_file(path)
+                    .with_context(|| format!("failed to remove file {}", path.display()))?;
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(anyhow::Error::new(err).into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_restrictive_dir_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("failed to read permissions for {}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions).with_context(|| {
+        format!(
+            "failed to set restrictive permissions on {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_restrictive_dir_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn ensure_runtime_empty_mask_dir(spec: &RuntimeSpec) -> Result<()> {
     for empty_mask in generated_empty_mask_dirs(spec) {
         fs::create_dir_all(&empty_mask).with_context(|| {
@@ -877,8 +683,10 @@ fn build_pod_create_command(pod: &RuntimePod) -> Command {
     append_label_args(&mut cmd, &pod.labels);
     cmd.arg("--network");
     cmd.arg(&pod.network_name);
-    cmd.arg("--ip");
-    cmd.arg(&pod.ip);
+    if !pod.ip.is_empty() {
+        cmd.arg("--ip");
+        cmd.arg(&pod.ip);
+    }
     if pod.userns_keep_id {
         cmd.arg("--userns");
         cmd.arg("keep-id");
@@ -1101,6 +909,21 @@ mod tests {
                     "project_root": "/tmp/demo/.cladding",
                     "cladding_expose": "true",
                     "cladding_expose_target": "agent",
+                    "cladding_expose_role": "host-helper",
+                    "cladding_expose_container_port": "3000",
+                    "cladding_expose_host_port": "9000"
+                }
+            },
+            {
+                "Id": "sidecar-1",
+                "Names": ["demo-expose-3000-9000-sidecar"],
+                "Status": "Up 3 seconds",
+                "Labels": {
+                    "cladding": "demo",
+                    "project_root": "/tmp/demo/.cladding",
+                    "cladding_expose": "true",
+                    "cladding_expose_target": "agent",
+                    "cladding_expose_role": "pod-sidecar",
                     "cladding_expose_container_port": "3000",
                     "cladding_expose_host_port": "9000"
                 }
@@ -1116,13 +939,54 @@ mod tests {
         ]);
 
         let items = parse_expose_proxy_items(&parsed);
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0].proxy.id, "abc123");
         assert_eq!(items[0].proxy.name, "demo-expose-3000-9000");
         assert_eq!(items[0].proxy.container_port, 3000);
         assert_eq!(items[0].proxy.host_port, 9000);
+        assert_eq!(items[0].proxy.role, "host-helper");
         assert_eq!(items[0].project_root, "/tmp/demo/.cladding");
         assert_eq!(items[0].target, "agent");
+        assert_eq!(items[1].proxy.role, "pod-sidecar");
+    }
+
+    #[test]
+    fn project_expose_proxies_from_items_filters_to_host_helper() {
+        let items = vec![
+            ExposeProxyItem {
+                proxy: ExposeProxy {
+                    id: "abc123".to_string(),
+                    name: "demo-expose-3000-9000".to_string(),
+                    host_port: 9000,
+                    container_port: 3000,
+                    status: "Up 3 seconds".to_string(),
+                    role: "host-helper".to_string(),
+                },
+                project_root: "/tmp/demo/.cladding".to_string(),
+                target: "agent".to_string(),
+                role: "host-helper".to_string(),
+            },
+            ExposeProxyItem {
+                proxy: ExposeProxy {
+                    id: "sidecar-1".to_string(),
+                    name: "demo-expose-3000-9000-sidecar".to_string(),
+                    host_port: 9000,
+                    container_port: 3000,
+                    status: "Up 3 seconds".to_string(),
+                    role: "pod-sidecar".to_string(),
+                },
+                project_root: "/tmp/demo/.cladding".to_string(),
+                target: "agent".to_string(),
+                role: "pod-sidecar".to_string(),
+            },
+        ];
+
+        let proxies =
+            project_expose_proxies_from_items(items, "/tmp/demo/.cladding", Some("host-helper"));
+
+        assert_eq!(proxies.len(), 1);
+        assert_eq!(proxies[0].id, "abc123");
+        assert_eq!(proxies[0].role, "host-helper");
     }
 
     #[test]
@@ -1162,8 +1026,8 @@ mod tests {
                     "/tmp/demo/.cladding".to_string(),
                 ),
             ]),
-            network_name: "cladding-1".to_string(),
-            ip: "10.90.1.5".to_string(),
+            network_name: "default".to_string(),
+            ip: String::new(),
             host_aliases: vec![RuntimeHostAlias {
                 ip: "10.90.1.2".to_string(),
                 hostnames: vec!["demo-proxy".to_string(), "proxy-alias".to_string()],
@@ -1188,9 +1052,7 @@ mod tests {
                 "--label",
                 "project_root=/tmp/demo/.cladding",
                 "--network",
-                "cladding-1",
-                "--ip",
-                "10.90.1.5",
+                "default",
                 "--userns",
                 "keep-id",
                 "--add-host",
@@ -1198,6 +1060,26 @@ mod tests {
                 "--add-host",
                 "proxy-alias:10.90.1.2",
             ]
+        );
+    }
+
+    #[test]
+    fn build_pod_create_command_supports_network_none_without_ip() {
+        let pod = RuntimePod {
+            name: "demo-agent".to_string(),
+            labels: std::collections::BTreeMap::new(),
+            network_name: "none".to_string(),
+            ip: String::new(),
+            host_aliases: Vec::new(),
+            init_tasks: Vec::new(),
+            containers: Vec::new(),
+            userns_keep_id: false,
+        };
+
+        let cmd = build_pod_create_command(&pod);
+        assert_eq!(
+            command_args(&cmd),
+            vec!["pod", "create", "--name", "demo-agent", "--network", "none"]
         );
     }
 
