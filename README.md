@@ -81,11 +81,9 @@ In short: the agent cannot freely access the network; users can run sandbox comm
   ```bash
   cladding expose 3000
   cladding expose 3000 9000
-  cladding expose list
-  cladding expose stop 9000
   ```
 
-  These mappings are runtime-only and are removed by `cladding down` and `cladding destroy`.
+  `cladding expose` runs in the foreground. Stop it with Ctrl-C.
 
 ### Configuring mounts
 
@@ -188,9 +186,7 @@ cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the agent container
 cladding run-with-scissors [--target nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] [cmd] # run a command in an enabled sandbox container
-cladding expose <containerport> [hostport] # publish an agent TCP port to localhost
-cladding expose list # show active published ports for the current project
-cladding expose stop <hostport> # remove one published localhost port
+cladding expose <containerport> [hostport] # block while forwarding localhost hostport to agent containerport
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding logs [agent|proxy|nw-sandbox|fs-sandbox] [podman logs args...] # view container logs
 cladding down         # stop associated pods

@@ -325,16 +325,6 @@ pub struct RunningProject {
     pub pod_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExposeProxy {
-    pub id: String,
-    pub name: String,
-    pub host_port: u16,
-    pub container_port: u16,
-    pub status: String,
-    pub role: String,
-}
-
 pub fn list_running_projects(verbose: bool) -> Result<Vec<RunningProject>> {
     let items = list_running_pod_items(verbose)?;
     let mut projects: HashMap<(String, String), usize> = HashMap::new();
@@ -360,30 +350,6 @@ pub fn list_running_projects(verbose: bool) -> Result<Vec<RunningProject>> {
     });
 
     Ok(results)
-}
-
-pub fn list_project_expose_proxies(
-    project_name: &str,
-    project_root: &str,
-    include_stopped: bool,
-    verbose: bool,
-) -> Result<Vec<ExposeProxy>> {
-    list_project_expose_entries(
-        project_name,
-        project_root,
-        include_stopped,
-        Some("host-helper"),
-        verbose,
-    )
-}
-
-pub fn list_project_expose_containers(
-    project_name: &str,
-    project_root: &str,
-    include_stopped: bool,
-    verbose: bool,
-) -> Result<Vec<ExposeProxy>> {
-    list_project_expose_entries(project_name, project_root, include_stopped, None, verbose)
 }
 
 pub fn podman_container_exists(container_name: &str) -> Result<bool> {
@@ -439,14 +405,6 @@ struct RunningPodItem {
     project_root: String,
 }
 
-#[derive(Debug, Clone)]
-struct ExposeProxyItem {
-    proxy: ExposeProxy,
-    project_root: String,
-    target: String,
-    role: String,
-}
-
 fn list_running_pod_items(verbose: bool) -> Result<Vec<RunningPodItem>> {
     let mut cmd = Command::new("podman");
     cmd.args([
@@ -496,84 +454,6 @@ fn list_running_pod_items(verbose: bool) -> Result<Vec<RunningPodItem>> {
     Ok(pods)
 }
 
-fn list_expose_proxy_items(
-    project_name: &str,
-    include_stopped: bool,
-    verbose: bool,
-) -> Result<Vec<ExposeProxyItem>> {
-    let mut cmd = Command::new("podman");
-    cmd.arg("ps");
-    if include_stopped {
-        cmd.arg("-a");
-    }
-    cmd.args([
-        "--filter",
-        "label=cladding_expose=true",
-        "--filter",
-        &format!("label=cladding={project_name}"),
-        "--format",
-        "json",
-    ]);
-
-    trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
-        .with_context(|| "failed to run podman ps for expose proxies")?;
-
-    if !output.status.success() {
-        return ensure_success_output(&output, "podman ps").map(|_| Vec::new());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Value =
-        serde_json::from_str(&stdout).with_context(|| "failed to parse podman ps json output")?;
-
-    Ok(parse_expose_proxy_items(&parsed))
-}
-
-fn list_project_expose_entries(
-    project_name: &str,
-    project_root: &str,
-    include_stopped: bool,
-    role_filter: Option<&str>,
-    verbose: bool,
-) -> Result<Vec<ExposeProxy>> {
-    let items = list_expose_proxy_items(project_name, include_stopped, verbose)?;
-    let mut results = project_expose_proxies_from_items(items, project_root, role_filter);
-
-    results.sort_by(|a, b| {
-        a.host_port
-            .cmp(&b.host_port)
-            .then_with(|| a.container_port.cmp(&b.container_port))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-
-    Ok(results)
-}
-
-fn project_expose_proxies_from_items(
-    items: Vec<ExposeProxyItem>,
-    project_root: &str,
-    role_filter: Option<&str>,
-) -> Vec<ExposeProxy> {
-    let mut results = Vec::new();
-
-    for item in items {
-        if item.project_root != project_root {
-            continue;
-        }
-        if item.target != "agent" {
-            continue;
-        }
-        if role_filter.is_some_and(|role| item.role != role) {
-            continue;
-        }
-        results.push(item.proxy);
-    }
-
-    results
-}
-
 fn parse_labels(value: &Value) -> HashMap<String, String> {
     let mut labels = HashMap::new();
     match value {
@@ -601,94 +481,6 @@ fn parse_labels(value: &Value) -> HashMap<String, String> {
         _ => {}
     }
     labels
-}
-
-fn parse_expose_proxy_items(value: &Value) -> Vec<ExposeProxyItem> {
-    let Some(items) = value.as_array() else {
-        return Vec::new();
-    };
-
-    let mut proxies = Vec::new();
-    for item in items {
-        let Some(proxy) = parse_expose_proxy_item(item) else {
-            continue;
-        };
-        proxies.push(proxy);
-    }
-    proxies
-}
-
-fn parse_expose_proxy_item(value: &Value) -> Option<ExposeProxyItem> {
-    let labels = value.get("Labels").map(parse_labels).unwrap_or_default();
-    if labels.get("cladding_expose").map(String::as_str) != Some("true") {
-        return None;
-    }
-
-    let project_root = labels.get("project_root")?.to_string();
-    let target = labels.get("cladding_expose_target")?.to_string();
-    let role = labels
-        .get("cladding_expose_role")
-        .cloned()
-        .unwrap_or_else(|| "host-helper".to_string());
-    let container_port = labels
-        .get("cladding_expose_container_port")?
-        .parse::<u16>()
-        .ok()?;
-    let host_port = labels
-        .get("cladding_expose_host_port")?
-        .parse::<u16>()
-        .ok()?;
-
-    let id = get_json_string(value, &["Id", "ID"])?;
-    let name = get_json_name(value)?;
-    let status =
-        get_json_string(value, &["Status"]).or_else(|| get_json_string(value, &["State"]))?;
-
-    Some(ExposeProxyItem {
-        proxy: ExposeProxy {
-            id,
-            name,
-            host_port,
-            container_port,
-            status,
-            role: role.clone(),
-        },
-        project_root,
-        target,
-        role,
-    })
-}
-
-fn get_json_string(value: &Value, keys: &[&str]) -> Option<String> {
-    for key in keys {
-        let Some(raw) = value.get(*key) else {
-            continue;
-        };
-        if let Some(string) = raw.as_str().filter(|s| !s.is_empty()) {
-            return Some(string.to_string());
-        }
-    }
-    None
-}
-
-fn get_json_name(value: &Value) -> Option<String> {
-    for key in ["Names", "Name"] {
-        let Some(raw) = value.get(key) else {
-            continue;
-        };
-        match raw {
-            Value::String(name) if !name.is_empty() => return Some(name.to_string()),
-            Value::Array(items) => {
-                for item in items {
-                    if let Some(name) = item.as_str().filter(|s| !s.is_empty()) {
-                        return Some(name.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn remove_output_is_missing_container(output: &Output) -> bool {
@@ -1090,113 +882,6 @@ mod tests {
             object_labels.get("cladding_expose").map(String::as_str),
             Some("true")
         );
-    }
-
-    #[test]
-    fn parse_expose_proxy_items_filters_and_extracts_expected_fields() {
-        let parsed = json!([
-            {
-                "Id": "abc123",
-                "Names": ["demo-expose-3000-9000"],
-                "Status": "Up 3 seconds",
-                "Labels": {
-                    "cladding": "demo",
-                    "project_root": "/tmp/demo/.cladding",
-                    "cladding_expose": "true",
-                    "cladding_expose_target": "agent",
-                    "cladding_expose_role": "host-helper",
-                    "cladding_expose_container_port": "3000",
-                    "cladding_expose_host_port": "9000"
-                }
-            },
-            {
-                "Id": "sidecar-1",
-                "Names": ["demo-expose-3000-9000-sidecar"],
-                "Status": "Up 3 seconds",
-                "Labels": {
-                    "cladding": "demo",
-                    "project_root": "/tmp/demo/.cladding",
-                    "cladding_expose": "true",
-                    "cladding_expose_target": "agent",
-                    "cladding_expose_role": "pod-sidecar",
-                    "cladding_expose_container_port": "3000",
-                    "cladding_expose_host_port": "9000"
-                }
-            },
-            {
-                "Id": "skip-me",
-                "Names": ["not-an-expose-proxy"],
-                "Status": "Up 3 seconds",
-                "Labels": {
-                    "cladding": "demo"
-                }
-            }
-        ]);
-
-        let items = parse_expose_proxy_items(&parsed);
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].proxy.id, "abc123");
-        assert_eq!(items[0].proxy.name, "demo-expose-3000-9000");
-        assert_eq!(items[0].proxy.container_port, 3000);
-        assert_eq!(items[0].proxy.host_port, 9000);
-        assert_eq!(items[0].proxy.role, "host-helper");
-        assert_eq!(items[0].project_root, "/tmp/demo/.cladding");
-        assert_eq!(items[0].target, "agent");
-        assert_eq!(items[1].proxy.role, "pod-sidecar");
-    }
-
-    #[test]
-    fn project_expose_proxies_from_items_filters_to_host_helper() {
-        let items = vec![
-            ExposeProxyItem {
-                proxy: ExposeProxy {
-                    id: "abc123".to_string(),
-                    name: "demo-expose-3000-9000".to_string(),
-                    host_port: 9000,
-                    container_port: 3000,
-                    status: "Up 3 seconds".to_string(),
-                    role: "host-helper".to_string(),
-                },
-                project_root: "/tmp/demo/.cladding".to_string(),
-                target: "agent".to_string(),
-                role: "host-helper".to_string(),
-            },
-            ExposeProxyItem {
-                proxy: ExposeProxy {
-                    id: "sidecar-1".to_string(),
-                    name: "demo-expose-3000-9000-sidecar".to_string(),
-                    host_port: 9000,
-                    container_port: 3000,
-                    status: "Up 3 seconds".to_string(),
-                    role: "pod-sidecar".to_string(),
-                },
-                project_root: "/tmp/demo/.cladding".to_string(),
-                target: "agent".to_string(),
-                role: "pod-sidecar".to_string(),
-            },
-        ];
-
-        let proxies =
-            project_expose_proxies_from_items(items, "/tmp/demo/.cladding", Some("host-helper"));
-
-        assert_eq!(proxies.len(), 1);
-        assert_eq!(proxies[0].id, "abc123");
-        assert_eq!(proxies[0].role, "host-helper");
-    }
-
-    #[test]
-    fn parse_expose_proxy_item_accepts_string_names_and_state_fallback() {
-        let parsed = json!({
-            "ID": "xyz789",
-            "Names": "demo-expose-4000-9100",
-            "State": "running",
-            "Labels": "cladding=demo,project_root=/tmp/demo/.cladding,cladding_expose=true,cladding_expose_target=agent,cladding_expose_container_port=4000,cladding_expose_host_port=9100"
-        });
-
-        let item = parse_expose_proxy_item(&parsed).expect("proxy item");
-        assert_eq!(item.proxy.id, "xyz789");
-        assert_eq!(item.proxy.name, "demo-expose-4000-9100");
-        assert_eq!(item.proxy.status, "running");
     }
 
     #[test]

@@ -9,9 +9,8 @@ use cladding::config::{
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
 use cladding::podman::{
-    list_project_expose_containers, list_project_expose_proxies, list_running_projects,
-    podman_build_image, podman_command, podman_container_exists, podman_remove_containers,
-    podman_required, runsc_available, runtime_cleanup, runtime_create,
+    list_running_projects, podman_build_image, podman_container_exists, podman_required,
+    runsc_available, runtime_cleanup, runtime_create,
 };
 use cladding::runtime::RuntimeSpec;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -20,12 +19,10 @@ use signal_hook::iterator::Signals;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::io::{self, ErrorKind, IsTerminal};
-use std::net::TcpListener;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CLADDING_BUILD_IMAGE: &str = "localhost/cladding-default:latest";
 const DEFAULT_CLI_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
@@ -105,29 +102,12 @@ enum CommandSpec {
 }
 
 #[derive(Debug, Args)]
-#[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
+#[command(arg_required_else_help = true)]
 struct ExposeArgs {
-    #[command(subcommand)]
-    command: Option<ExposeSubcommand>,
     #[arg(value_name = "CONTAINERPORT", value_parser = clap::value_parser!(u16).range(1..=65535))]
-    container_port: Option<u16>,
-    #[arg(
-        value_name = "HOSTPORT",
-        value_parser = clap::value_parser!(u16).range(1..=65535),
-        requires = "container_port"
-    )]
+    container_port: u16,
+    #[arg(value_name = "HOSTPORT", value_parser = clap::value_parser!(u16).range(1..=65535))]
     host_port: Option<u16>,
-}
-
-#[derive(Debug, Subcommand)]
-enum ExposeSubcommand {
-    /// Remove a published host port for the current project
-    Stop {
-        #[arg(value_name = "HOSTPORT", value_parser = clap::value_parser!(u16).range(1..=65535))]
-        host_port: u16,
-    },
-    /// List published host ports for the current project
-    List,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -823,21 +803,12 @@ fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
 
 fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
-    let project_root = current_project_root(context)?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose));
     record_cleanup_result(
         &mut cleanup_error,
         remove_legacy_runtime_pods(&config, verbose),
-    );
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_project_expose_containers(&config, &project_root, true, verbose),
-    );
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_runtime_expose_dir(&context.project_root),
     );
 
     match cleanup_error {
@@ -848,21 +819,12 @@ fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
 
 fn cmd_destroy(context: &Context) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
-    let project_root = current_project_root(context)?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false));
     record_cleanup_result(
         &mut cleanup_error,
         remove_legacy_runtime_pods(&config, false),
-    );
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_project_expose_containers(&config, &project_root, true, false),
-    );
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_runtime_expose_dir(&context.project_root),
     );
 
     match cleanup_error {
@@ -891,16 +853,72 @@ fn cmd_ps(_context: &Context) -> Result<()> {
 }
 
 fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
-    match &args.command {
-        Some(ExposeSubcommand::Stop { host_port }) => cmd_expose_stop(context, *host_port),
-        Some(ExposeSubcommand::List) => cmd_expose_list(context),
-        None => {
-            let Some(container_port) = args.container_port else {
-                return Err(Error::message("missing container port"));
-            };
-            cmd_expose_create(context, container_port, args.host_port)
-        }
+    podman_required("podman (required for cladding expose)")?;
+    socat_required()?;
+
+    let config = load_cladding_config_v2(&context.project_root)?;
+    let status = project_runtime_status(context, &config, false)?;
+    if !status.already_running {
+        eprintln!("error: cladding project '{}' is not running", config.name);
+        eprintln!("hint: run 'cladding up'");
+        return Err(Error::message("project is not running"));
     }
+
+    let (_, agent_container_name) = agent_runtime_names(&config.name);
+    if !podman_container_exists(&agent_container_name)? {
+        eprintln!(
+            "error: target container '{}' is missing for project '{}'",
+            agent_container_name, config.name
+        );
+        eprintln!("hint: run 'cladding up'");
+        return Err(Error::message("missing agent container"));
+    }
+
+    let host_port = args.host_port.unwrap_or(args.container_port);
+    let current_exe =
+        env::current_exe().with_context(|| "failed to determine current executable")?;
+    let status = build_blocking_expose_command(&current_exe, args.container_port, host_port)
+        .status()
+        .with_context(|| "failed to run socat")?;
+
+    cladding::podman::ensure_success(status, "socat")
+}
+
+fn socat_required() -> Result<()> {
+    if command_exists_on_path("socat") {
+        Ok(())
+    } else {
+        eprintln!("missing: socat (required for cladding expose)");
+        Err(Error::message("missing socat"))
+    }
+}
+
+fn command_exists_on_path(command: &str) -> bool {
+    env::var_os("PATH")
+        .as_deref()
+        .is_some_and(|paths| env::split_paths(paths).any(|path| is_executable(&path.join(command))))
+}
+
+fn build_blocking_expose_command(
+    current_exe: &Path,
+    container_port: u16,
+    host_port: u16,
+) -> Command {
+    let mut cmd = Command::new("socat");
+    cmd.arg(format!(
+        "TCP-LISTEN:{host_port},bind=127.0.0.1,reuseaddr,fork"
+    ));
+    let current_exe = shell_single_quote_path(current_exe);
+    cmd.arg(format!(
+        "EXEC:{current_exe} run socat STDIO TCP\\:127.0.0.1\\:{container_port}"
+    ));
+    cmd
+}
+
+fn shell_single_quote_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let escaped = path.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
@@ -1157,225 +1175,12 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
     cladding::podman::ensure_success(status, "podman exec")
 }
 
-fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u16>) -> Result<()> {
-    podman_required("podman (required for cladding expose)")?;
-
-    let config = load_cladding_config_v2(&context.project_root)?;
-    let project_root = current_project_root(context)?;
-    let (agent_pod_name, agent_container_name) = agent_runtime_names(&config.name);
-
-    if !podman_container_exists(&agent_container_name)? {
-        eprintln!(
-            "error: target container '{}' is missing for project '{}'",
-            agent_container_name, config.name
-        );
-        eprintln!("hint: run 'cladding up'");
-        return Err(Error::message("missing agent container"));
-    }
-
-    ensure_runtime_expose_dir(&context.project_root)?;
-
-    let existing = list_project_expose_containers(&config.name, &project_root, false, false)?;
-    if let Some(proxy) = existing
-        .iter()
-        .find(|proxy| proxy.container_port == container_port)
-    {
-        eprintln!(
-            "error: container port {container_port} is already exposed for project '{}' on localhost:{}",
-            config.name, proxy.host_port
-        );
-        return Err(Error::message("container port already exposed"));
-    }
-
-    let start_host_port = host_port.unwrap_or(container_port);
-    for candidate_host_port in start_host_port..=u16::MAX {
-        if !host_port_appears_available(candidate_host_port) {
-            continue;
-        }
-
-        let socket_path =
-            runtime_expose_socket_path(&context.project_root, container_port, candidate_host_port);
-        clear_runtime_path(&socket_path)?;
-
-        match try_start_expose_bridge_pair(
-            &config,
-            &project_root,
-            &agent_pod_name,
-            container_port,
-            candidate_host_port,
-            &socket_path,
-        ) {
-            Ok(ExposeCreateOutcome::Started) => {
-                println!(
-                    "exposed: localhost:{candidate_host_port} -> {}:{container_port}",
-                    agent_container_name
-                );
-                return Ok(());
-            }
-            Ok(ExposeCreateOutcome::HostPortConflict) => {
-                let _ = clear_runtime_path(&socket_path);
-                continue;
-            }
-            Err(err) => {
-                let _ = clear_runtime_path(&socket_path);
-                return Err(err);
-            }
-        }
-    }
-
-    eprintln!("error: could not allocate a free host port starting at {start_host_port}");
-    Err(Error::message("could not allocate free host port"))
-}
-
-fn cmd_expose_stop(context: &Context, host_port: u16) -> Result<()> {
-    podman_required("podman (required for cladding expose stop)")?;
-
-    let config = load_cladding_config_v2(&context.project_root)?;
-    let project_root = current_project_root(context)?;
-    let proxies = list_project_expose_containers(&config.name, &project_root, true, false)?;
-    let matched: Vec<_> = proxies
-        .into_iter()
-        .filter(|proxy| proxy.host_port == host_port)
-        .collect();
-
-    if matched.is_empty() {
-        eprintln!(
-            "error: no expose proxy for project '{}' publishes localhost:{host_port}",
-            config.name
-        );
-        return Err(Error::message("host port not found"));
-    }
-
-    let ids: Vec<String> = matched.iter().map(|proxy| proxy.id.clone()).collect();
-    let socket_path =
-        runtime_expose_socket_path(&context.project_root, matched[0].container_port, host_port);
-    let mut cleanup_error = None;
-    record_cleanup_result(
-        &mut cleanup_error,
-        podman_remove_containers(&ids, true, true, false),
-    );
-    record_cleanup_result(&mut cleanup_error, clear_runtime_path(&socket_path));
-    if let Some(err) = cleanup_error {
-        return Err(err);
-    }
-    println!("stopped: localhost:{host_port}");
-    Ok(())
-}
-
-fn cmd_expose_list(context: &Context) -> Result<()> {
-    podman_required("podman (required for cladding expose list)")?;
-
-    let config = load_cladding_config_v2(&context.project_root)?;
-    let project_root = current_project_root(context)?;
-    let proxies = list_project_expose_proxies(&config.name, &project_root, false, false)?;
-
-    if proxies.is_empty() {
-        println!("no exposed ports for project '{}'", config.name);
-        return Ok(());
-    }
-
-    println!("HOST PORT  CONTAINER PORT  STATUS");
-    for proxy in proxies {
-        println!(
-            "{:<9}  {:<14}  {}",
-            proxy.host_port, proxy.container_port, proxy.status
-        );
-    }
-
-    Ok(())
-}
-
-fn remove_project_expose_containers(
-    config: &ExecutionConfig,
-    project_root: &str,
-    force: bool,
-    verbose: bool,
-) -> Result<()> {
-    let proxies = list_project_expose_containers(&config.name, project_root, true, verbose)?;
-    if proxies.is_empty() {
-        return Ok(());
-    }
-
-    let ids: Vec<String> = proxies.into_iter().map(|proxy| proxy.id).collect();
-    podman_remove_containers(&ids, force, true, verbose)
-}
-
 fn record_cleanup_result(target: &mut Option<Error>, result: Result<()>) {
     if let Err(err) = result {
         if target.is_none() {
             *target = Some(err);
         }
     }
-}
-
-fn ensure_runtime_expose_dir(project_root: &Path) -> Result<()> {
-    let expose_dir = runtime_expose_dir(project_root);
-    if let Ok(metadata) = fs::symlink_metadata(&expose_dir) {
-        if !metadata.is_dir() {
-            clear_runtime_path(&expose_dir)?;
-        }
-    }
-    fs::create_dir_all(&expose_dir).with_context(|| {
-        format!(
-            "failed to create runtime expose directory {}",
-            expose_dir.display()
-        )
-    })?;
-    set_restrictive_dir_permissions(&expose_dir)?;
-    Ok(())
-}
-
-fn remove_runtime_expose_dir(project_root: &Path) -> Result<()> {
-    clear_runtime_path(&runtime_expose_dir(project_root))
-}
-
-fn clear_runtime_path(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.is_dir() {
-                fs::remove_dir_all(path)
-                    .with_context(|| format!("failed to remove directory {}", path.display()))?;
-            } else {
-                fs::remove_file(path)
-                    .with_context(|| format!("failed to remove file {}", path.display()))?;
-            }
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(anyhow::Error::new(err).into());
-        }
-    }
-    Ok(())
-}
-
-fn runtime_expose_dir(project_root: &Path) -> PathBuf {
-    project_root.join("runtime/expose")
-}
-
-fn runtime_expose_socket_path(project_root: &Path, container_port: u16, host_port: u16) -> PathBuf {
-    runtime_expose_dir(project_root).join(format!("agent-{container_port}-{host_port}.sock"))
-}
-
-#[cfg(unix)]
-fn set_restrictive_dir_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)
-        .with_context(|| format!("failed to read permissions for {}", path.display()))?
-        .permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(path, permissions).with_context(|| {
-        format!(
-            "failed to set restrictive permissions on {}",
-            path.display()
-        )
-    })?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_restrictive_dir_permissions(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn remove_legacy_runtime_pods(config: &ExecutionConfig, verbose: bool) -> Result<()> {
@@ -1408,164 +1213,6 @@ fn podman_pod_rm_output_is_missing(output: &std::process::Output) -> bool {
         || stderr.contains("no pod with id or name")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExposeCreateOutcome {
-    Started,
-    HostPortConflict,
-}
-
-fn build_expose_pod_sidecar_command(
-    config: &ExecutionConfig,
-    project_root: &str,
-    sidecar_name: &str,
-    agent_pod_name: &str,
-    container_port: u16,
-    host_port: u16,
-    socket_name: &str,
-    expose_dir: &Path,
-) -> Command {
-    let mut cmd = podman_command(config.use_runsc);
-    cmd.arg("run").arg("-d");
-    cmd.arg("--name").arg(&sidecar_name);
-    cmd.arg("--pod").arg(agent_pod_name);
-    cmd.arg("--volume")
-        .arg(format!("{}:/run/cladding/expose", expose_dir.display()));
-    append_expose_labels(
-        &mut cmd,
-        &config.name,
-        project_root,
-        container_port,
-        host_port,
-        "pod-sidecar",
-    );
-    cmd.arg("alpine/socat")
-        .arg(format!(
-            "UNIX-LISTEN:/run/cladding/expose/{socket_name},fork,reuseaddr"
-        ))
-        .arg(format!("TCP:127.0.0.1:{container_port}"));
-    cmd
-}
-
-fn build_expose_host_helper_command(
-    config: &ExecutionConfig,
-    project_root: &str,
-    helper_name: &str,
-    host_port: u16,
-    container_port: u16,
-    socket_name: &str,
-    expose_dir: &Path,
-) -> Command {
-    let mut cmd = podman_command(config.use_runsc);
-    cmd.arg("run").arg("-d");
-    cmd.arg("--name").arg(&helper_name);
-    cmd.arg("--network").arg("host");
-    cmd.arg("--volume")
-        .arg(format!("{}:/run/cladding/expose", expose_dir.display()));
-    append_expose_labels(
-        &mut cmd,
-        &config.name,
-        project_root,
-        container_port,
-        host_port,
-        "host-helper",
-    );
-    cmd.arg("alpine/socat")
-        .arg(format!(
-            "TCP-LISTEN:{host_port},bind=127.0.0.1,fork,reuseaddr"
-        ))
-        .arg(format!("UNIX-CONNECT:/run/cladding/expose/{socket_name}"));
-    cmd
-}
-
-fn try_start_expose_bridge_pair(
-    config: &ExecutionConfig,
-    project_root: &str,
-    agent_pod_name: &str,
-    container_port: u16,
-    host_port: u16,
-    socket_path: &Path,
-) -> Result<ExposeCreateOutcome> {
-    let socket_name = socket_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| Error::message("invalid expose socket path"))?;
-
-    let sidecar_name =
-        unique_expose_container_name(&config.name, "pod-sidecar", container_port, host_port);
-    let helper_name =
-        unique_expose_container_name(&config.name, "host-helper", container_port, host_port);
-    let expose_dir = socket_path
-        .parent()
-        .ok_or_else(|| Error::message("invalid expose socket path"))?;
-
-    let sidecar_output = build_expose_pod_sidecar_command(
-        config,
-        project_root,
-        &sidecar_name,
-        agent_pod_name,
-        container_port,
-        host_port,
-        socket_name,
-        expose_dir,
-    )
-    .output()
-    .with_context(|| "failed to run podman run for cladding expose pod-sidecar")?;
-
-    if !sidecar_output.status.success() {
-        if podman_output_is_bind_conflict(&sidecar_output) {
-            return Ok(ExposeCreateOutcome::HostPortConflict);
-        }
-        cladding::podman::ensure_success_output(&sidecar_output, "podman run")?;
-        return Err(Error::message("podman run failed"));
-    }
-
-    let helper_output = build_expose_host_helper_command(
-        config,
-        project_root,
-        &helper_name,
-        host_port,
-        container_port,
-        socket_name,
-        expose_dir,
-    )
-    .output()
-    .with_context(|| "failed to run podman run for cladding expose host-helper")?;
-
-    if helper_output.status.success() {
-        return Ok(ExposeCreateOutcome::Started);
-    }
-
-    let _ = podman_remove_containers(&[sidecar_name, helper_name], true, true, false);
-
-    if podman_output_is_bind_conflict(&helper_output) {
-        return Ok(ExposeCreateOutcome::HostPortConflict);
-    }
-
-    cladding::podman::ensure_success_output(&helper_output, "podman run")?;
-    Err(Error::message("podman run failed"))
-}
-
-fn append_expose_labels(
-    cmd: &mut Command,
-    project_name: &str,
-    project_root: &str,
-    container_port: u16,
-    host_port: u16,
-    role: &str,
-) {
-    for (key, value) in [
-        ("cladding", project_name.to_string()),
-        ("project_root", project_root.to_string()),
-        ("cladding_expose", "true".to_string()),
-        ("cladding_expose_target", "agent".to_string()),
-        ("cladding_expose_role", role.to_string()),
-        ("cladding_expose_container_port", container_port.to_string()),
-        ("cladding_expose_host_port", host_port.to_string()),
-    ] {
-        cmd.arg("--label").arg(format!("{key}={value}"));
-    }
-}
-
 fn runtime_container_name(pod_name: &str) -> String {
     format!("{pod_name}-instance")
 }
@@ -1578,30 +1225,6 @@ fn agent_runtime_names(project_name: &str) -> (String, String) {
     let agent_pod_name = project_component_name(project_name, "agent");
     let agent_container_name = runtime_container_name(&agent_pod_name);
     (agent_pod_name, agent_container_name)
-}
-
-fn unique_expose_container_name(
-    project_name: &str,
-    role: &str,
-    container_port: u16,
-    host_port: u16,
-) -> String {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    format!("{project_name}-expose-{role}-{container_port}-{host_port}-{suffix}")
-}
-
-fn host_port_appears_available(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
-}
-
-fn podman_output_is_bind_conflict(output: &std::process::Output) -> bool {
-    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    stderr.contains("address already in use")
-        || stderr.contains("port is already allocated")
-        || stderr.contains("bind")
 }
 
 fn image_is_buildable_by_cladding(image: &str) -> bool {
@@ -1687,12 +1310,23 @@ mod tests {
     }
 
     #[test]
-    fn expose_create_args_parse_without_subcommand() {
+    fn expose_container_port_parses() {
+        let cli = Cli::try_parse_from(["cladding", "expose", "3000"]).expect("cli parse");
+        match cli.command.expect("command") {
+            CommandSpec::Expose(args) => {
+                assert_eq!(args.container_port, 3000);
+                assert_eq!(args.host_port, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expose_container_and_host_ports_parse() {
         let cli = Cli::try_parse_from(["cladding", "expose", "3000", "9000"]).expect("cli parse");
         match cli.command.expect("command") {
             CommandSpec::Expose(args) => {
-                assert!(args.command.is_none());
-                assert_eq!(args.container_port, Some(3000));
+                assert_eq!(args.container_port, 3000);
                 assert_eq!(args.host_port, Some(9000));
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1715,148 +1349,37 @@ mod tests {
     }
 
     #[test]
-    fn expose_stop_subcommand_parses() {
-        let cli = Cli::try_parse_from(["cladding", "expose", "stop", "9000"]).expect("cli parse");
-        match cli.command.expect("command") {
-            CommandSpec::Expose(ExposeArgs {
-                command: Some(ExposeSubcommand::Stop { host_port }),
-                ..
-            }) => assert_eq!(host_port, 9000),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn expose_list_subcommand_parses() {
-        let cli = Cli::try_parse_from(["cladding", "expose", "list"]).expect("cli parse");
-        match cli.command.expect("command") {
-            CommandSpec::Expose(ExposeArgs {
-                command: Some(ExposeSubcommand::List),
-                ..
-            }) => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn expose_requires_action_or_ports() {
+    fn expose_without_ports_fails() {
         assert!(Cli::try_parse_from(["cladding", "expose"]).is_err());
     }
 
     #[test]
-    fn expose_label_args_include_role() {
-        let mut cmd = Command::new("podman");
-        append_expose_labels(
-            &mut cmd,
-            "demo",
-            "/tmp/demo/.cladding",
-            3000,
-            9000,
-            "host-helper",
-        );
-
-        assert_eq!(
-            cmd.get_args()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-            vec![
-                "--label",
-                "cladding=demo",
-                "--label",
-                "project_root=/tmp/demo/.cladding",
-                "--label",
-                "cladding_expose=true",
-                "--label",
-                "cladding_expose_target=agent",
-                "--label",
-                "cladding_expose_role=host-helper",
-                "--label",
-                "cladding_expose_container_port=3000",
-                "--label",
-                "cladding_expose_host_port=9000",
-            ]
-        );
+    fn expose_list_fails_to_parse() {
+        assert!(Cli::try_parse_from(["cladding", "expose", "list"]).is_err());
     }
 
     #[test]
-    fn expose_sidecar_command_adds_runsc_flags_when_enabled() {
-        let config = ExecutionConfig {
-            name: "demo".to_string(),
-            use_runsc: true,
-            agent: ExecutionComponentConfig {
-                enabled: true,
-                image: "agent:image".to_string(),
-            },
-            nw_sandbox: None,
-            fs_sandbox: None,
-            mounts: Vec::new(),
-        };
-        let cmd = build_expose_pod_sidecar_command(
-            &config,
-            "/tmp/demo/.cladding",
-            "demo-expose-pod-sidecar-3000-9000-123",
-            "demo-agent",
-            3000,
-            9000,
-            "agent-3000-9000.sock",
-            Path::new("/tmp/demo/.cladding/runtime/expose"),
-        );
+    fn expose_stop_fails_to_parse() {
+        assert!(Cli::try_parse_from(["cladding", "expose", "stop", "9000"]).is_err());
+    }
 
+    #[test]
+    fn build_blocking_expose_command_places_ports_and_bind() {
+        let cmd = build_blocking_expose_command(
+            Path::new("/tmp/cladding test/bin's/cladding"),
+            5432,
+            15432,
+        );
         let args = command_args(&cmd);
-        assert_eq!(args[0], "--runtime");
-        assert_eq!(args[1], "runsc");
-        assert_eq!(args[2], "--runtime-flag");
-        assert_eq!(args[3], "ignore-cgroups");
-        assert_eq!(args[4], "--runtime-flag");
-        assert_eq!(args[5], "host-uds=all");
-        assert_eq!(args[6], "run");
-        assert_eq!(args[7], "-d");
-        assert_eq!(args[8], "--name");
-        assert!(args[9].starts_with("demo-expose-pod-sidecar-3000-9000-"));
-        assert_eq!(args[10], "--pod");
-        assert_eq!(args[11], "demo-agent");
-    }
 
-    #[test]
-    fn expose_host_helper_command_omits_runsc_flags_when_disabled() {
-        let config = ExecutionConfig {
-            name: "demo".to_string(),
-            use_runsc: false,
-            agent: ExecutionComponentConfig {
-                enabled: true,
-                image: "agent:image".to_string(),
-            },
-            nw_sandbox: None,
-            fs_sandbox: None,
-            mounts: Vec::new(),
-        };
-        let cmd = build_expose_host_helper_command(
-            &config,
-            "/tmp/demo/.cladding",
-            "demo-expose-host-helper-3000-9000-123",
-            9000,
-            3000,
-            "agent-3000-9000.sock",
-            Path::new("/tmp/demo/.cladding/runtime/expose"),
-        );
-
-        let args = command_args(&cmd);
-        assert!(!args.iter().any(|arg| arg == "--runtime"));
-        assert!(!args.iter().any(|arg| arg == "--runtime-flag"));
-        assert_eq!(args[0], "run");
-        assert_eq!(args[1], "-d");
-        assert_eq!(args[2], "--name");
-        assert!(args[3].starts_with("demo-expose-host-helper-3000-9000-"));
-        assert_eq!(args[4], "--network");
-        assert_eq!(args[5], "host");
-    }
-
-    #[test]
-    fn runtime_expose_socket_path_uses_expected_layout() {
+        assert_eq!(cmd.get_program().to_string_lossy(), "socat");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "TCP-LISTEN:15432,bind=127.0.0.1,reuseaddr,fork");
         assert_eq!(
-            runtime_expose_socket_path(&PathBuf::from("/tmp/project/.cladding"), 3000, 9000),
-            PathBuf::from("/tmp/project/.cladding/runtime/expose/agent-3000-9000.sock")
+            args[1],
+            "EXEC:'/tmp/cladding test/bin'\\''s/cladding' run socat STDIO TCP\\:127.0.0.1\\:5432"
         );
+        assert!(!args.iter().any(|arg| arg.starts_with("--")));
     }
 
     #[test]

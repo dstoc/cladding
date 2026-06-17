@@ -10,8 +10,6 @@ const RUNTIME_PROXY_AGENT_SOCKET_DIR: &str = "proxy/agent";
 const RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR: &str = "proxy/nw-sandbox";
 const RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR: &str = "run/nw-sandbox";
 const RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR: &str = "run/fs-sandbox";
-#[allow(dead_code)]
-const RUNTIME_EXPOSE_DIR: &str = "runtime/expose";
 const RUNTIME_PROXY_AGENT_MOUNT_PATH: &str = "/run/cladding/proxy/agent";
 const RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/proxy/nw-sandbox";
 const RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/nw-sandbox";
@@ -576,11 +574,6 @@ fn runtime_scoped_socket_dir(project_root: &Path, socket_dir: &str) -> PathBuf {
 }
 
 #[allow(dead_code)]
-fn runtime_expose_dir(project_root: &Path) -> PathBuf {
-    project_root.join(RUNTIME_EXPOSE_DIR)
-}
-
-#[allow(dead_code)]
 fn runtime_socket_path(project_root: &Path, socket_name: &str) -> PathBuf {
     runtime_socket_dir(project_root).join(socket_name)
 }
@@ -647,16 +640,6 @@ exec {primary_command}
 "#
         ),
     ]
-}
-
-#[allow(dead_code)]
-fn runtime_expose_socket_path(
-    project_root: &Path,
-    pod_name: &str,
-    container_port: u16,
-    host_port: u16,
-) -> PathBuf {
-    runtime_expose_dir(project_root).join(format!("{pod_name}-{container_port}-{host_port}.sock"))
 }
 
 fn build_agent_mounts(
@@ -1283,14 +1266,6 @@ mod tests {
             ]
             .into_iter()
             .collect()
-        );
-    }
-
-    #[test]
-    fn runtime_expose_socket_path_uses_stable_layout() {
-        assert_eq!(
-            runtime_expose_socket_path(Path::new("/tmp/project/.cladding"), "agent", 3000, 9000),
-            PathBuf::from("/tmp/project/.cladding/runtime/expose/agent-3000-9000.sock")
         );
     }
 
