@@ -1,5 +1,7 @@
 # PRD: Dynamic Shared Network Allocation in `cladding up`
 
+> Status: Historical. Superseded by the current runtime model in `docs/features/current-runtime-summary.md`; the shared `cladding-N` pool is no longer part of the implementation.
+
 ## Objective
 Move cladding network allocation from `cladding init` to `cladding up`, using a shared global pool of Podman networks named `cladding-N`.
 

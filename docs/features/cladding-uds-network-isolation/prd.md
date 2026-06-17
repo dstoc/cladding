@@ -1,5 +1,7 @@
 # PRD: UDS-Based Network Isolation
 
+> Status: Historical. Superseded by `docs/features/current-runtime-summary.md` and `docs/features/cladding-blocking-expose/prd.md`; keep this document for the pre-inline-bridge design record.
+
 ## Objective
 Replace in-container nftables jailers with a Unix-domain-socket communication model.
 

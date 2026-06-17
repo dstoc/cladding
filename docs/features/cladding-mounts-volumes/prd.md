@@ -1,5 +1,7 @@
 # PRD: Cladding Mounts + Volumes
 
+> Status: Historical. Superseded by the current direct-Podman runtime and `docs/features/current-runtime-summary.md`; this doc keeps the older kube-era mount model for reference.
+
 ## Objective
 Enable users to configure additional container mounts in `cladding.json` via a single `mounts` list, supporting:
 - Named Podman volumes mounted into both `agent` and `nw-sandbox`.

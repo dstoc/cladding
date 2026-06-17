@@ -1,5 +1,7 @@
 # PRD: Cladding Expose Port Proxy
 
+> Status: Historical. Superseded by `docs/features/cladding-blocking-expose/prd.md`; keep this doc for the older detached-helper-container design record.
+
 ## Objective
 Add a project-scoped port exposure feature to `cladding` that lets a developer publish a port from the current project’s `agent` container to the host.
 

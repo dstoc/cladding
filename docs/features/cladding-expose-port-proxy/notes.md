@@ -1,5 +1,7 @@
 # Notes: Cladding Expose Port Proxy
 
+> Status: Historical. Superseded by `docs/features/cladding-blocking-expose/prd.md`; these notes describe the older detached proxy-container approach.
+
 ## Research Scope
 - Feature request: add `cladding expose start <port>` to proxy a port from `agent` out to the host.
 - Requested behavior:

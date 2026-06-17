@@ -1,5 +1,7 @@
 # Questions: Cladding Expose Port Proxy
 
+> Status: Historical. Superseded by `docs/features/cladding-blocking-expose/prd.md`; the answers below document the older detached-helper-container design choices.
+
 ## Q1 (resolved)
 - Question: When the user runs `cladding expose start <port>`, should cladding try to bind that same host port exactly, or should it treat `<port>` as the internal target port and auto-pick an available host port when needed?
 - Why it matters: This changes the command contract, the `list`/`stop` UX, error handling, and whether users can rely on deterministic `localhost:<port>` behavior.

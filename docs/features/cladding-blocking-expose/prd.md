@@ -12,7 +12,7 @@ cladding expose <container-port> [host-port]
 starts a foreground listener on `127.0.0.1:<host-port>` and forwards each connection through `cladding run` to `127.0.0.1:<container-port>` inside the agent container. The user stops the expose session with Ctrl-C.
 
 ## Motivation
-`cladding expose` was originally designed around persistent helper containers:
+`cladding expose` was originally designed around persistent detached expose state:
 
 - an expose sidecar inside the agent pod
 - a host-facing helper container
@@ -100,7 +100,7 @@ cladding expose stop <host-port>
 
 There is no project-owned expose state to list or stop. A running expose session is the process the user started. Ctrl-C is the stop operation.
 
-`cladding down` and `cladding destroy` no longer need to remove expose helper containers or `.cladding/runtime/expose`.
+`cladding down` and `cladding destroy` no longer need to remove persistent expose resources or `.cladding/runtime/expose`.
 
 ### Implementation model
 Use host `socat` as the first implementation.
@@ -210,7 +210,7 @@ Remove or rewrite tests that assert:
 1. Do not support detached expose mappings in this implementation.
 2. Do not preserve `cladding expose list`.
 3. Do not preserve `cladding expose stop`.
-4. Do not create expose helper containers.
+4. Do not create persistent expose containers.
 5. Do not create `.cladding/runtime/expose` socket files.
 6. Do not expose ports from nw-sandbox or fs-sandbox.
 7. Do not add automatic host-port search.
@@ -220,7 +220,7 @@ Remove or rewrite tests that assert:
 1. Remove `ExposeSubcommand` and simplify `ExposeArgs` to only positional `container_port` and optional `host_port`.
 2. Replace `cmd_expose_create`, `cmd_expose_stop`, and `cmd_expose_list` with one blocking `cmd_expose`.
 3. Remove expose cleanup calls from `cmd_down` and `cmd_destroy`.
-4. Remove expose helper-container listing imports and call sites from `cladding/src/cli.rs`.
+4. Remove expose-resource listing imports and call sites from `cladding/src/cli.rs`.
 5. Remove expose-specific Podman listing types and helpers from `cladding/src/podman.rs` if they are no longer referenced.
 6. Add a small `socat_required` helper or reuse the existing executable lookup pattern.
 7. Add `build_blocking_expose_command(container_port, host_port)` and unit tests.
@@ -247,7 +247,7 @@ cladding expose 3000 9000
 
 Users who need multiple exposed ports should run one `cladding expose` process per mapping, usually in separate terminals.
 
-There is no migration for existing detached expose helper containers. `cladding down` and `cladding destroy` may keep a best-effort legacy cleanup pass for one release if desired, but new expose sessions should not create any persistent resources.
+There is no migration for existing detached expose mappings. `cladding down` and `cladding destroy` may keep a best-effort legacy cleanup pass for one release if desired, but new expose sessions should not create any persistent resources.
 
 ## Verification
 Manual verification:
@@ -257,7 +257,7 @@ Manual verification:
 3. From the host, run `curl http://127.0.0.1:18000/` and confirm it reaches the agent service.
 4. Press Ctrl-C in the `cladding expose` terminal.
 5. Confirm `curl http://127.0.0.1:18000/` no longer connects.
-6. Confirm `podman ps` shows no expose helper containers were created.
+6. Confirm `podman ps` shows no detached expose containers were created.
 7. Confirm `cladding down` does not need expose cleanup to complete.
 
 Automated verification:
@@ -270,5 +270,5 @@ Automated verification:
 1. `cladding expose <container-port> [host-port]` starts a blocking localhost forward to the agent container.
 2. Ctrl-C stops the expose session without requiring `cladding expose stop`.
 3. `cladding expose list` and `cladding expose stop` are removed from the CLI.
-4. The implementation does not create expose helper containers or runtime expose socket files.
+4. The implementation does not create persistent expose containers or runtime expose socket files.
 5. The implementation works with the agent as a standalone container.

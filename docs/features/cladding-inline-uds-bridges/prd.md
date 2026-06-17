@@ -1,5 +1,7 @@
 # PRD: Native Sandbox UDS and Single Proxy Bridge Sidecar
 
+> Status: Historical. Superseded by `docs/features/current-runtime-summary.md`; this proposal records the bridge-consolidation step that led to the current runtime.
+
 ## Objective
 Reduce Cladding's steady-state container count by removing all persistent sidecars except one proxy-pod bridge sidecar.
 

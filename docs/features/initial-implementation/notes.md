@@ -1,5 +1,7 @@
 Here is the complete architectural summary of the **Podman-based Secure Sandbox Environment** we have built. You can pass this directly to another agent or engineer to replicate the setup.
 
+> Status: Historical. Superseded by `docs/features/current-runtime-summary.md`; this note preserves the earliest kube-era architecture summary.
+
 ### 1. High-Level Architecture
 
 We transitioned from `docker-compose` to **Kubernetes-style Pods** running natively in Podman. This eliminates race conditions and provides strict network isolation.

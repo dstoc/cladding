@@ -806,10 +806,6 @@ fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     let spec = RuntimeSpec::build(&context.project_root, &config);
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose));
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_legacy_runtime_pods(&config, verbose),
-    );
 
     match cleanup_error {
         Some(err) => Err(err),
@@ -822,10 +818,6 @@ fn cmd_destroy(context: &Context) -> Result<()> {
     let spec = RuntimeSpec::build(&context.project_root, &config);
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false));
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_legacy_runtime_pods(&config, false),
-    );
 
     match cleanup_error {
         Some(err) => Err(err),
@@ -1181,36 +1173,6 @@ fn record_cleanup_result(target: &mut Option<Error>, result: Result<()>) {
             *target = Some(err);
         }
     }
-}
-
-fn remove_legacy_runtime_pods(config: &ExecutionConfig, verbose: bool) -> Result<()> {
-    let legacy_names = [
-        format!("{}-cli-pod", config.name),
-        format!("{}-sandbox-pod", config.name),
-        format!("{}-proxy-pod", config.name),
-    ];
-
-    for name in legacy_names {
-        let mut cmd = Command::new("podman");
-        cmd.args(["pod", "rm", "-f", &name]);
-        cladding::podman::trace_command(&cmd, verbose);
-        let output = cmd
-            .output()
-            .with_context(|| "failed to run podman pod rm")?;
-        if output.status.success() || podman_pod_rm_output_is_missing(&output) {
-            continue;
-        }
-        return cladding::podman::ensure_success_output(&output, "podman pod rm");
-    }
-
-    Ok(())
-}
-
-fn podman_pod_rm_output_is_missing(output: &std::process::Output) -> bool {
-    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    stderr.contains("no such pod")
-        || stderr.contains("no pod with name or id")
-        || stderr.contains("no pod with id or name")
 }
 
 fn runtime_container_name(pod_name: &str) -> String {

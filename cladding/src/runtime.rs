@@ -19,9 +19,7 @@ const RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/fs-sandbox";
 pub struct RuntimeSpec {
     pub project_name: String,
     pub project_root: PathBuf,
-    pub project_root_label: String,
     pub use_runsc: bool,
-    pub custom_mounts: Vec<RuntimeCustomMount>,
     pub proxy: RuntimePod,
     pub agent: RuntimePod,
     pub nw_sandbox: Option<RuntimePod>,
@@ -54,7 +52,6 @@ impl RuntimeNames {
 impl RuntimeSpec {
     pub fn build(project_root: &Path, config: &ExecutionConfig) -> Self {
         let project_root = project_root.to_path_buf();
-        let project_root_label = project_root.display().to_string();
         let custom_mounts = build_custom_mounts(&config.name, &config.mounts);
         let names = RuntimeNames::from_config(config);
 
@@ -82,9 +79,7 @@ impl RuntimeSpec {
         Self {
             project_name: config.name.clone(),
             project_root,
-            project_root_label,
             use_runsc: config.use_runsc,
-            custom_mounts,
             proxy,
             agent,
             nw_sandbox,
@@ -131,9 +126,6 @@ pub struct RuntimePod {
     pub use_runsc: bool,
     pub labels: BTreeMap<String, String>,
     pub network_name: String,
-    pub ip: String,
-    pub host_aliases: Vec<RuntimeHostAlias>,
-    pub init_tasks: Vec<RuntimeTask>,
     pub containers: Vec<RuntimeContainer>,
     pub userns_keep_id: bool,
 }
@@ -155,18 +147,6 @@ pub struct RuntimeContainer {
     pub ports: Vec<u16>,
     pub stdin: bool,
     pub tty: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct RuntimeTask {
-    pub name: String,
-    pub image: String,
-    pub command: Vec<String>,
-    pub env: Vec<RuntimeEnvVar>,
-    pub mounts: Vec<RuntimeMount>,
-    pub run_as_user: Option<u32>,
-    pub run_as_group: Option<u32>,
-    pub added_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,12 +177,6 @@ pub enum RuntimeMountSource {
     NamedVolume { claim_name: String },
     GeneratedEmptyMask { path: PathBuf },
     EmptyDir,
-}
-
-#[derive(Debug, Clone)]
-pub struct RuntimeHostAlias {
-    pub ip: String,
-    pub hostnames: Vec<String>,
 }
 
 fn build_proxy_pod(
@@ -248,9 +222,6 @@ fn build_proxy_pod(
         use_runsc: false,
         labels: build_labels(&config.name, project_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
-        ip: String::new(),
-        host_aliases: Vec::new(),
-        init_tasks: Vec::new(),
         containers,
         userns_keep_id: false,
     }
@@ -352,9 +323,6 @@ fn build_agent_pod(
         use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "agent"),
         network_name: NETWORK_NONE.to_string(),
-        ip: String::new(),
-        host_aliases: Vec::new(),
-        init_tasks: Vec::new(),
         containers: vec![RuntimeContainer {
             name: runtime_container_name(&names.agent_name),
             image: config.agent_image().to_string(),
@@ -455,9 +423,6 @@ fn build_nw_sandbox_pod(
         use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "nw-sandbox"),
         network_name: NETWORK_NONE.to_string(),
-        ip: String::new(),
-        host_aliases: Vec::new(),
-        init_tasks: Vec::new(),
         containers: vec![RuntimeContainer {
             name: runtime_container_name(component_name),
             image: config.nw_sandbox_image().to_string(),
@@ -500,9 +465,6 @@ fn build_fs_sandbox_pod(
         use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "fs-sandbox"),
         network_name: NETWORK_NONE.to_string(),
-        ip: String::new(),
-        host_aliases: Vec::new(),
-        init_tasks: Vec::new(),
         containers: vec![RuntimeContainer {
             name: runtime_container_name(component_name),
             image: config.fs_sandbox_image().to_string(),
@@ -571,11 +533,6 @@ fn runtime_socket_dir(project_root: &Path) -> PathBuf {
 
 fn runtime_scoped_socket_dir(project_root: &Path, socket_dir: &str) -> PathBuf {
     runtime_socket_dir(project_root).join(socket_dir)
-}
-
-#[allow(dead_code)]
-fn runtime_socket_path(project_root: &Path, socket_name: &str) -> PathBuf {
-    runtime_socket_dir(project_root).join(socket_name)
 }
 
 fn runtime_socket_mount_path(mount_dir: &str, socket_name: &str) -> String {
@@ -860,17 +817,6 @@ done
 }
 
 fn collect_required_host_paths(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) {
-    for task in &pod.init_tasks {
-        for mount in &task.mounts {
-            if let RuntimeMountSource::HostPath { path } = &mount.source {
-                if is_generated_runtime_path(path) {
-                    continue;
-                }
-                paths.insert(path.clone());
-            }
-        }
-    }
-
     for container in &pod.containers {
         for mount in &container.mounts {
             if let RuntimeMountSource::HostPath { path } = &mount.source {
@@ -884,16 +830,6 @@ fn collect_required_host_paths(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) 
 }
 
 fn collect_generated_runtime_socket_dirs(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) {
-    for task in &pod.init_tasks {
-        for mount in &task.mounts {
-            if let RuntimeMountSource::HostPath { path } = &mount.source {
-                if is_generated_runtime_path(path) {
-                    paths.insert(path.clone());
-                }
-            }
-        }
-    }
-
     for container in &pod.containers {
         for mount in &container.mounts {
             if let RuntimeMountSource::HostPath { path } = &mount.source {
@@ -987,12 +923,9 @@ mod tests {
             spec.proxy.labels.get("project_root").map(String::as_str),
             Some("/tmp/project/.cladding")
         );
-        assert!(spec.proxy.host_aliases.is_empty());
         assert_eq!(spec.proxy.network_name, "default");
         assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
         assert_eq!(spec.agent.network_name, "none");
-        assert_eq!(spec.agent.host_aliases.len(), 0);
-        assert_eq!(spec.agent.init_tasks.len(), 0);
         assert!(spec.agent.userns_keep_id);
         assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert_eq!(spec.proxy.containers.len(), 2);
@@ -1202,19 +1135,6 @@ mod tests {
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/..")));
         assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/empty-mask")));
         assert!(required.contains(&PathBuf::from("/tmp/workspace")));
-        assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/sockets")));
-        assert!(!required.contains(&PathBuf::from(
-            "/tmp/project/.cladding/runtime/sockets/proxy/agent"
-        )));
-        assert!(!required.contains(&PathBuf::from(
-            "/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"
-        )));
-        assert!(!required.contains(&PathBuf::from(
-            "/tmp/project/.cladding/runtime/sockets/run/nw-sandbox"
-        )));
-        assert!(!required.contains(&PathBuf::from(
-            "/tmp/project/.cladding/runtime/sockets/run/fs-sandbox"
-        )));
     }
 
     #[test]
