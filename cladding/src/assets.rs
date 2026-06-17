@@ -13,8 +13,8 @@ static SCRIPTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../scripts");
 static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
 static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
 
-const RUN_IN_NW_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_NW_SANDBOX_SERVER:?RUN_NW_SANDBOX_SERVER must be set}\"\nRUN_REMOTE_SERVER=\"$RUN_NW_SANDBOX_SERVER\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
-const RUN_IN_FS_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_FS_SANDBOX_SERVER:?RUN_FS_SANDBOX_SERVER must be set}\"\nRUN_REMOTE_SERVER=\"$RUN_FS_SANDBOX_SERVER\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
+const RUN_IN_NW_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_NW_SANDBOX_SOCKET:?RUN_NW_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_NW_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
+const RUN_IN_FS_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_FS_SANDBOX_SOCKET:?RUN_FS_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_FS_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
 pub fn config_top_level_entries() -> Vec<String> {
     let mut names = std::collections::BTreeSet::new();
     for entry in CONFIG_DIR.dirs() {

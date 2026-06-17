@@ -38,12 +38,21 @@ Policy checks are advisory and point-in-time:
 Environment variables:
 
 - `MCP_BIND_ADDR` (optional): bind address, default `127.0.0.1:8000`
+- `MCP_BIND_UDS` (optional): absolute Unix socket path; when set, `mcp-run` binds the same `/mcp`, `/raw`, and `/check` app to that socket
 - `POLICY_DIR` (recommended): directory containing `.rego` policy files
 
 Example:
 
 ```bash
 export MCP_BIND_ADDR=0.0.0.0:3000
+export POLICY_DIR=/opt/config/nw_sandbox
+mcp-run
+```
+
+Unix socket example:
+
+```bash
+export MCP_BIND_UDS=/tmp/mcp-run.sock
 export POLICY_DIR=/opt/config/nw_sandbox
 mcp-run
 ```
@@ -340,6 +349,8 @@ Output from MCP tool calls is capped at 1 MiB per stream; truncated output appen
 `run-remote` is a low-level client for `/raw` that streams stdout/stderr locally. Cladding installs wrapper scripts such as `run-in-nw-sandbox` and `run-in-fs-sandbox` that set `RUN_REMOTE_SERVER` from the component-specific endpoint before calling `run-remote`.
 
 - Requires `RUN_REMOTE_SERVER` (full URL, usually `http://127.0.0.1:8000/raw`)
+- Or `RUN_REMOTE_SOCKET` (absolute Unix socket path); the client sends HTTP over that socket and targets `/raw` or `/check` as needed
+- `RUN_REMOTE_SERVER` and `RUN_REMOTE_SOCKET` are mutually exclusive
 - Requires `--` delimiter before executable
 - Supports env forwarding with `--keep-env`
 - `--check` switches from `/raw` streaming to `/check` JSON output
@@ -360,6 +371,16 @@ run-remote --keep-env=API_TOKEN,CI -- curl -I https://example.com
 run-remote --keep-env API_TOKEN -- curl -I https://example.com
 
 # policy-only preflight
+run-remote --check -- curl -I https://example.com
+```
+
+Unix socket example:
+
+```bash
+export RUN_REMOTE_SOCKET=/tmp/mcp-run.sock
+
+run-remote -- curl -I https://example.com
+
 run-remote --check -- curl -I https://example.com
 ```
 

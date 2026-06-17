@@ -56,7 +56,7 @@ pub fn podman_build_image(image: &str, host_uid: u32, host_gid: u32) -> Result<(
 
 /// Direct runtime helpers for creating and cleaning up pods.
 pub fn runtime_create(spec: &RuntimeSpec) -> Result<()> {
-    prepare_runtime_socket_dir(&spec.project_root)?;
+    prepare_runtime_socket_dirs(spec)?;
     ensure_runtime_empty_mask_dir(spec)?;
 
     for pod in runtime_pods(spec) {
@@ -579,16 +579,29 @@ fn runtime_pods(spec: &RuntimeSpec) -> Vec<&RuntimePod> {
     pods
 }
 
-fn prepare_runtime_socket_dir(project_root: &Path) -> Result<()> {
-    let socket_dir = project_root.join("runtime/sockets");
-    clear_path(&socket_dir)?;
-    fs::create_dir_all(&socket_dir).with_context(|| {
+fn prepare_runtime_socket_dirs(spec: &RuntimeSpec) -> Result<()> {
+    let mut socket_dirs = spec.generated_runtime_socket_dirs().into_iter();
+    let Some(root_socket_dir) = socket_dirs.next() else {
+        return Ok(());
+    };
+
+    clear_path(&root_socket_dir)?;
+    fs::create_dir_all(&root_socket_dir).with_context(|| {
         format!(
             "failed to create runtime socket directory {}",
-            socket_dir.display()
+            root_socket_dir.display()
         )
     })?;
-    set_restrictive_dir_permissions(&socket_dir)?;
+    set_restrictive_dir_permissions(&root_socket_dir)?;
+
+    for socket_dir in socket_dirs {
+        fs::create_dir_all(&socket_dir).with_context(|| {
+            format!(
+                "failed to create runtime socket directory {}",
+                socket_dir.display()
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -1177,7 +1190,7 @@ mod tests {
             image: "alpine:latest".to_string(),
             command: vec![
                 "/bin/sh".to_string(),
-                "/opt/scripts/jail_agent.sh".to_string(),
+                "/opt/scripts/proxy_startup.sh".to_string(),
             ],
             env: vec![RuntimeEnvVar {
                 name: "CLADDING_PROXY_NAME".to_string(),
@@ -1232,7 +1245,7 @@ mod tests {
                 "--entrypoint",
                 "/bin/sh",
                 "alpine:latest",
-                "/opt/scripts/jail_agent.sh",
+                "/opt/scripts/proxy_startup.sh",
             ]
         );
     }

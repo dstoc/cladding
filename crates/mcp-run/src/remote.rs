@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use futures_util::StreamExt;
@@ -18,6 +19,10 @@ pub enum RemoteClientError {
     MissingServerUrl,
     #[error("RUN_REMOTE_SERVER must be a full URL (example: http://127.0.0.1:8000/raw)")]
     InvalidServerUrl,
+    #[error("RUN_REMOTE_SERVER and RUN_REMOTE_SOCKET cannot both be set")]
+    ConflictingEndpointConfig,
+    #[error("RUN_REMOTE_SOCKET must be an absolute path: {0}")]
+    InvalidSocketPath(String),
     #[error("missing required `--` delimiter before remote executable")]
     MissingDelimiter,
     #[error("missing remote executable after `--`")]
@@ -50,6 +55,64 @@ struct ParsedArgs {
     args: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct RemoteTransport {
+    client: reqwest::Client,
+    raw_url: String,
+    check_url: String,
+}
+
+impl RemoteTransport {
+    fn from_config(
+        server_url: Option<String>,
+        socket_path: Option<String>,
+    ) -> Result<Self, RemoteClientError> {
+        let server_url = normalize_env_value(server_url);
+        let socket_path = normalize_env_value(socket_path);
+
+        if server_url.is_some() && socket_path.is_some() {
+            return Err(RemoteClientError::ConflictingEndpointConfig);
+        }
+
+        if let Some(socket_path) = socket_path {
+            let socket_path = validate_socket_path(socket_path)?;
+            let client = build_unix_socket_client(&socket_path)?;
+            return Ok(Self {
+                client,
+                raw_url: "http://localhost/raw".to_string(),
+                check_url: "http://localhost/check".to_string(),
+            });
+        }
+
+        let server_url = resolve_server_url(server_url)?;
+        let check_url = derive_check_server_url(&server_url)?;
+        Ok(Self {
+            client: reqwest::Client::new(),
+            raw_url: server_url,
+            check_url,
+        })
+    }
+
+    async fn run_raw<WOut: Write, WErr: Write>(
+        &self,
+        payload: RunCommandInput,
+        stdout: &mut WOut,
+        stderr: &mut WErr,
+    ) -> Result<i32, RemoteClientError> {
+        run_remote_request_with_client(&self.client, &self.raw_url, payload, stdout, stderr).await
+    }
+
+    async fn run_check<WOut: Write, WErr: Write>(
+        &self,
+        payload: RunCommandInput,
+        stdout: &mut WOut,
+        stderr: &mut WErr,
+    ) -> Result<i32, RemoteClientError> {
+        run_remote_check_request_with_client(&self.client, &self.check_url, payload, stdout, stderr)
+            .await
+    }
+}
+
 pub async fn run_remote_from_env(args: Vec<String>) -> Result<i32, RemoteClientError> {
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
@@ -64,6 +127,7 @@ async fn run_remote_from_env_with_io<WOut: Write, WErr: Write>(
     run_remote_with_context(
         args,
         std::env::var("RUN_REMOTE_SERVER").ok(),
+        std::env::var("RUN_REMOTE_SOCKET").ok(),
         || {
             std::env::current_dir()
                 .map(|path| path.to_string_lossy().to_string())
@@ -79,6 +143,7 @@ async fn run_remote_from_env_with_io<WOut: Write, WErr: Write>(
 async fn run_remote_with_context<WOut: Write, WErr: Write, FEnv, FCwd>(
     args: Vec<String>,
     server_url: Option<String>,
+    socket_path: Option<String>,
     cwd: FCwd,
     env_lookup: FEnv,
     stdout: &mut WOut,
@@ -89,16 +154,15 @@ where
     FCwd: FnOnce() -> Result<String, RemoteClientError>,
 {
     let parsed = parse_args(&args)?;
-    let server_url = resolve_server_url(server_url)?;
+    let transport = RemoteTransport::from_config(server_url, socket_path)?;
     let env = collect_forwarded_env(&parsed.keep_env, env_lookup)?;
     let cwd = cwd()?;
     let payload = build_payload(parsed.executable, parsed.args, cwd, env);
 
     if parsed.check {
-        let check_url = derive_check_server_url(&server_url)?;
-        run_remote_check_request(&check_url, payload, stdout, stderr).await
+        transport.run_check(payload, stdout, stderr).await
     } else {
-        run_remote_request(&server_url, payload, stdout, stderr).await
+        transport.run_raw(payload, stdout, stderr).await
     }
 }
 
@@ -116,6 +180,7 @@ fn build_payload(
     }
 }
 
+#[allow(dead_code)]
 pub async fn run_remote_request<WOut: Write, WErr: Write>(
     server_url: &str,
     payload: RunCommandInput,
@@ -123,46 +188,36 @@ pub async fn run_remote_request<WOut: Write, WErr: Write>(
     stderr: &mut WErr,
 ) -> Result<i32, RemoteClientError> {
     let client = reqwest::Client::new();
-    let response = client
-        .post(server_url)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(RemoteClientError::Request)?;
+    run_remote_request_with_client(&client, server_url, payload, stdout, stderr).await
+}
+
+async fn run_remote_request_with_client<WOut: Write, WErr: Write>(
+    client: &reqwest::Client,
+    server_url: &str,
+    payload: RunCommandInput,
+    stdout: &mut WOut,
+    stderr: &mut WErr,
+) -> Result<i32, RemoteClientError> {
+    let response = post_json(client, server_url, &payload).await?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.map_err(RemoteClientError::Request)?;
-        let message = serde_json::from_str::<RawErrorBody>(&body)
-            .map(|decoded| decoded.error)
-            .unwrap_or_else(|_| body.trim().to_string());
-        return Err(RemoteClientError::ServerRejected { status, message });
+        return Err(server_rejected(response).await);
     }
 
     process_stream(response, stdout, stderr).await
 }
 
-async fn run_remote_check_request<WOut: Write, WErr: Write>(
+async fn run_remote_check_request_with_client<WOut: Write, WErr: Write>(
+    client: &reqwest::Client,
     server_url: &str,
     payload: RunCommandInput,
     stdout: &mut WOut,
     _stderr: &mut WErr,
 ) -> Result<i32, RemoteClientError> {
-    let client = reqwest::Client::new();
-    let response = client
-        .post(server_url)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(RemoteClientError::Request)?;
+    let response = post_json(client, server_url, &payload).await?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.map_err(RemoteClientError::Request)?;
-        let message = serde_json::from_str::<RawErrorBody>(&body)
-            .map(|decoded| decoded.error)
-            .unwrap_or_else(|_| body.trim().to_string());
-        return Err(RemoteClientError::ServerRejected { status, message });
+        return Err(server_rejected(response).await);
     }
 
     let body = response.bytes().await.map_err(RemoteClientError::Request)?;
@@ -179,6 +234,59 @@ async fn run_remote_check_request<WOut: Write, WErr: Write>(
         .map_err(RemoteClientError::OutputWrite)?;
 
     Ok(if decision.allowed { 0 } else { 1 })
+}
+
+async fn post_json(
+    client: &reqwest::Client,
+    server_url: &str,
+    payload: &RunCommandInput,
+) -> Result<reqwest::Response, RemoteClientError> {
+    client
+        .post(server_url)
+        .json(payload)
+        .send()
+        .await
+        .map_err(RemoteClientError::Request)
+}
+
+async fn server_rejected(response: reqwest::Response) -> RemoteClientError {
+    let status = response.status();
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(error) => return RemoteClientError::Request(error),
+    };
+    let message = serde_json::from_str::<RawErrorBody>(&body)
+        .map(|decoded| decoded.error)
+        .unwrap_or_else(|_| body.trim().to_string());
+    RemoteClientError::ServerRejected { status, message }
+}
+
+fn validate_socket_path(socket_path: String) -> Result<PathBuf, RemoteClientError> {
+    let path = PathBuf::from(socket_path.clone());
+    if !path.is_absolute() {
+        return Err(RemoteClientError::InvalidSocketPath(socket_path));
+    }
+    Ok(path)
+}
+
+fn normalize_env_value(raw: Option<String>) -> Option<String> {
+    raw.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(unix)]
+fn build_unix_socket_client(path: &Path) -> Result<reqwest::Client, RemoteClientError> {
+    reqwest::Client::builder()
+        .unix_socket(path)
+        .build()
+        .map_err(RemoteClientError::Request)
+}
+
+#[cfg(not(unix))]
+fn build_unix_socket_client(_path: &Path) -> Result<reqwest::Client, RemoteClientError> {
+    Err(RemoteClientError::InvalidSocketPath(
+        "unix socket support is unavailable on this platform".to_string(),
+    ))
 }
 
 async fn process_stream<WOut: Write, WErr: Write>(
@@ -468,6 +576,64 @@ mod tests {
         assert!(err.to_string().contains("MISSING"));
     }
 
+    #[test]
+    fn run_remote_rejects_conflicting_endpoint_config() {
+        let err = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(async {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                run_remote_with_context(
+                    vec!["--".to_string(), "echo".to_string()],
+                    Some("http://127.0.0.1:8000/raw".to_string()),
+                    Some("/tmp/run-remote.sock".to_string()),
+                    || Ok("/work".to_string()),
+                    |_name| None,
+                    &mut stdout,
+                    &mut stderr,
+                )
+                .await
+            })
+            .expect_err("conflicting config rejected");
+
+        assert!(matches!(err, RemoteClientError::ConflictingEndpointConfig));
+    }
+
+    #[test]
+    fn run_remote_ignores_empty_endpoint_values_before_conflict_check() {
+        let transport = RemoteTransport::from_config(
+            Some("http://127.0.0.1:8000/raw".to_string()),
+            Some("   ".to_string()),
+        )
+        .expect("empty socket value should be ignored");
+
+        assert_eq!(transport.raw_url, "http://127.0.0.1:8000/raw");
+        assert_eq!(transport.check_url, "http://127.0.0.1:8000/check");
+    }
+
+    #[test]
+    fn run_remote_rejects_relative_socket_path() {
+        let err = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(async {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                run_remote_with_context(
+                    vec!["--".to_string(), "echo".to_string()],
+                    None,
+                    Some("relative.sock".to_string()),
+                    || Ok("/work".to_string()),
+                    |_name| None,
+                    &mut stdout,
+                    &mut stderr,
+                )
+                .await
+            })
+            .expect_err("relative socket path rejected");
+
+        assert!(matches!(err, RemoteClientError::InvalidSocketPath(_)));
+    }
+
     async fn start_server(router: Router) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -477,6 +643,19 @@ mod tests {
             let _ = axum::serve(listener, router).await;
         });
         (format!("http://{addr}/raw"), task)
+    }
+
+    #[cfg(unix)]
+    async fn start_unix_server(
+        router: Router,
+    ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let socket_path = tempdir.path().join("mcp-run.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind unix");
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (socket_path.to_string_lossy().into_owned(), task, tempdir)
     }
 
     fn event_line(event: RawStreamEvent) -> Vec<u8> {
@@ -654,6 +833,7 @@ mod tests {
         let code = run_remote_with_context(
             args,
             Some(url),
+            None,
             || Ok("/work".to_string()),
             |name| match name {
                 "API_TOKEN" => Some("secret".to_string()),
@@ -713,6 +893,7 @@ mod tests {
         let code = run_remote_with_context(
             args,
             Some(url),
+            None,
             || Ok("/work".to_string()),
             |_name| None,
             &mut stdout,
@@ -758,6 +939,7 @@ mod tests {
         let code = run_remote_with_context(
             args,
             Some(url),
+            None,
             || Ok("/work".to_string()),
             |_name| None,
             &mut stdout,
@@ -771,6 +953,132 @@ mod tests {
             serde_json::from_slice(&stdout).expect("stdout should contain JSON decision");
         assert!(decision.allowed);
         assert!(stdout.starts_with(b"{"));
+
+        server_task.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_socket_raw_request_uses_uds_transport() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct RawState {
+            hits: Arc<AtomicUsize>,
+        }
+
+        async fn handler(State(state): State<RawState>, body: Bytes) -> Response {
+            state.hits.fetch_add(1, Ordering::SeqCst);
+            let input: RunCommandInput = serde_json::from_slice(&body).expect("request body");
+            assert_eq!(input.executable, "echo");
+            assert_eq!(input.args, vec!["hello"]);
+
+            let lines = [
+                event_line(RawStreamEvent::Start {}),
+                event_line(RawStreamEvent::Stdout {
+                    data_b64: base64::engine::general_purpose::STANDARD.encode(b"uds"),
+                }),
+                event_line(RawStreamEvent::Exit { exit_code: Some(0) }),
+            ]
+            .concat();
+
+            let mut response = Response::new(Body::from(lines));
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-ndjson"),
+            );
+            response
+        }
+
+        let state = RawState {
+            hits: Arc::new(AtomicUsize::new(0)),
+        };
+        let router = Router::new()
+            .route("/raw", post(handler))
+            .with_state(state.clone());
+        let (socket_path, server_task, _tempdir) = start_unix_server(router).await;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_remote_with_context(
+            vec!["--".to_string(), "echo".to_string(), "hello".to_string()],
+            None,
+            Some(socket_path),
+            || Ok("/work".to_string()),
+            |_name| None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .expect("uds raw request should succeed");
+
+        assert_eq!(code, 0);
+        assert_eq!(stdout, b"uds");
+        assert_eq!(state.hits.load(Ordering::SeqCst), 1);
+
+        server_task.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_socket_check_request_uses_uds_transport() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct CheckState {
+            hits: Arc<AtomicUsize>,
+        }
+
+        async fn handler(State(state): State<CheckState>, body: Bytes) -> Response {
+            state.hits.fetch_add(1, Ordering::SeqCst);
+            let input: RunCommandInput = serde_json::from_slice(&body).expect("request body");
+            assert_eq!(input.executable, "echo");
+
+            (
+                StatusCode::OK,
+                axum::Json(RunCommandCheckOutput {
+                    allowed: true,
+                    reason: None,
+                    executable: input.executable,
+                    resolved_path: Some("/usr/bin/echo".to_string()),
+                    hash: Some("abc".to_string()),
+                    cwd: Some("/work".to_string()),
+                    policy_mode: "rego".to_string(),
+                }),
+            )
+                .into_response()
+        }
+
+        let state = CheckState {
+            hits: Arc::new(AtomicUsize::new(0)),
+        };
+        let router = Router::new()
+            .route("/check", post(handler))
+            .with_state(state.clone());
+        let (socket_path, server_task, _tempdir) = start_unix_server(router).await;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_remote_with_context(
+            vec!["--check".to_string(), "--".to_string(), "echo".to_string()],
+            None,
+            Some(socket_path),
+            || Ok("/work".to_string()),
+            |_name| None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .expect("uds check request should succeed");
+
+        assert_eq!(code, 0);
+        assert_eq!(state.hits.load(Ordering::SeqCst), 1);
+        let decision: RunCommandCheckOutput =
+            serde_json::from_slice(&stdout).expect("stdout should contain decision");
+        assert!(decision.allowed);
 
         server_task.abort();
     }

@@ -1,3 +1,4 @@
+use std::fs;
 use std::net::{AddrParseError, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,23 +24,47 @@ pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8000";
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub bind_addr: SocketAddr,
+    pub bind_addr: Option<SocketAddr>,
+    pub bind_uds: Option<PathBuf>,
     pub policy_dir: Option<PathBuf>,
     pub default_cwd: PathBuf,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let bind_raw = std::env::var("MCP_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.into());
+        Self::from_env_with(|name| std::env::var(name).ok())
+    }
+
+    fn from_env_with<F>(mut lookup: F) -> Result<Self, ConfigError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let bind_uds_raw = normalize_env_value(lookup("MCP_BIND_UDS"));
+        let bind_addr_raw = normalize_env_value(lookup("MCP_BIND_ADDR"));
+
+        if bind_uds_raw.is_some() && bind_addr_raw.is_some() {
+            return Err(ConfigError::ConflictingBindTargets);
+        }
+
+        let bind_uds = bind_uds_raw
+            .map(PathBuf::from)
+            .map(validate_bind_uds_config)
+            .transpose()?;
+
         let bind_addr =
-            bind_raw
-                .parse::<SocketAddr>()
-                .map_err(|source| ConfigError::InvalidBindAddr {
-                    value: bind_raw,
-                    source,
-                })?;
-        let policy_dir = std::env::var("POLICY_DIR")
-            .ok()
+            if bind_uds.is_some() {
+                None
+            } else {
+                let bind_raw = bind_addr_raw.unwrap_or_else(|| DEFAULT_BIND_ADDR.into());
+                Some(bind_raw.parse::<SocketAddr>().map_err(|source| {
+                    ConfigError::InvalidBindAddr {
+                        value: bind_raw,
+                        source,
+                    }
+                })?)
+            };
+
+        let policy_dir = lookup("POLICY_DIR")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
@@ -49,6 +74,7 @@ impl AppConfig {
 
         Ok(Self {
             bind_addr,
+            bind_uds,
             policy_dir,
             default_cwd,
         })
@@ -65,13 +91,83 @@ fn validate_default_cwd(default_cwd: &Path) -> Result<(), ConfigError> {
     }
 }
 
+fn normalize_env_value(raw: Option<String>) -> Option<String> {
+    raw.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_bind_uds_config(bind_uds: PathBuf) -> Result<PathBuf, ConfigError> {
+    if !bind_uds.is_absolute() {
+        return Err(ConfigError::RelativeBindUds {
+            value: bind_uds.to_string_lossy().into_owned(),
+        });
+    }
+
+    let parent = bind_uds
+        .parent()
+        .ok_or_else(|| ConfigError::MissingBindUdsParent {
+            value: bind_uds.to_string_lossy().into_owned(),
+        })?;
+
+    if !parent.is_dir() {
+        return Err(ConfigError::MissingBindUdsParent {
+            value: bind_uds.to_string_lossy().into_owned(),
+        });
+    }
+
+    Ok(bind_uds)
+}
+
+fn prepare_bind_uds_path(bind_uds: &Path) -> Result<(), ConfigError> {
+    let metadata = match fs::symlink_metadata(bind_uds) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(ConfigError::BindUdsMetadata { source: error }),
+    };
+
+    if !is_unix_socket(&metadata) {
+        return Err(ConfigError::BindUdsNotSocket {
+            path: bind_uds.to_path_buf(),
+        });
+    }
+
+    fs::remove_file(bind_uds).map_err(|source| ConfigError::BindUdsRemove { source })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_unix_socket(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+
+    metadata.file_type().is_socket()
+}
+
+#[cfg(not(unix))]
+fn is_unix_socket(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("MCP_BIND_ADDR and MCP_BIND_UDS cannot both be set")]
+    ConflictingBindTargets,
     #[error("invalid MCP_BIND_ADDR '{value}': {source}")]
     InvalidBindAddr {
         value: String,
         source: AddrParseError,
     },
+    #[error("MCP_BIND_UDS must be an absolute path: '{value}'")]
+    RelativeBindUds { value: String },
+    #[error("MCP_BIND_UDS parent directory does not exist: '{value}'")]
+    MissingBindUdsParent { value: String },
+    #[error("MCP_BIND_UDS path exists but is not a unix socket: {path:?}")]
+    BindUdsNotSocket { path: PathBuf },
+    #[error("failed to inspect MCP_BIND_UDS path: {source}")]
+    BindUdsMetadata { source: std::io::Error },
+    #[error("failed to remove stale MCP_BIND_UDS socket: {source}")]
+    BindUdsRemove { source: std::io::Error },
+    #[error("MCP_BIND_UDS is not supported on this platform")]
+    BindUdsUnsupportedPlatform,
     #[error("failed to get current working directory: {source}")]
     CurrentDir { source: std::io::Error },
     #[error("default cwd must be absolute: {cwd:?}")]
@@ -186,7 +282,8 @@ pub async fn serve(config: AppConfig) -> Result<(), AppError> {
     policy_engine.start_watcher();
 
     tracing::info!(
-        bind_addr = %config.bind_addr,
+        bind_addr = ?config.bind_addr,
+        bind_uds = ?config.bind_uds.as_ref().map(|path| path.display().to_string()),
         policy_mode = match policy_engine.mode() {
             PolicyMode::Rego => "rego",
             PolicyMode::DenyAll => "deny-all",
@@ -196,8 +293,28 @@ pub async fn serve(config: AppConfig) -> Result<(), AppError> {
     );
 
     let app = build_app(policy_engine, config.default_cwd.clone());
-    let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
-    axum::serve(listener, app).await?;
+    if let Some(bind_uds) = config.bind_uds.as_deref() {
+        #[cfg(not(unix))]
+        {
+            let _ = bind_uds;
+            return Err(ConfigError::BindUdsUnsupportedPlatform.into());
+        }
+
+        #[cfg(unix)]
+        {
+            prepare_bind_uds_path(bind_uds)?;
+            let listener = tokio::net::UnixListener::bind(bind_uds)?;
+            axum::serve(listener, app).await?;
+        }
+    } else {
+        let bind_addr = config.bind_addr.unwrap_or_else(|| {
+            DEFAULT_BIND_ADDR
+                .parse()
+                .expect("default bind address is valid")
+        });
+        let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+        axum::serve(listener, app).await?;
+    }
     Ok(())
 }
 
@@ -217,6 +334,7 @@ mod tests {
     use rmcp::ServiceExt;
     use rmcp::model::CallToolRequestParams;
     use rmcp::transport::StreamableHttpClientTransport;
+    use std::fs;
     use std::time::Duration;
 
     fn find_executable(name: &str) -> Option<String> {
@@ -244,10 +362,22 @@ mod tests {
         PolicyEngine::from_rego_for_tests(&[("main.rego", &main)])
     }
 
+    fn config_from_env(
+        bind_addr: Option<&str>,
+        bind_uds: Option<&str>,
+    ) -> Result<AppConfig, ConfigError> {
+        AppConfig::from_env_with(|name| match name {
+            "MCP_BIND_ADDR" => bind_addr.map(|value| value.to_string()),
+            "MCP_BIND_UDS" => bind_uds.map(|value| value.to_string()),
+            _ => None,
+        })
+    }
+
     #[tokio::test]
     async fn serve_rejects_relative_default_cwd() {
         let config = AppConfig {
-            bind_addr: "127.0.0.1:0".parse().expect("bind addr"),
+            bind_addr: Some("127.0.0.1:0".parse().expect("bind addr")),
+            bind_uds: None,
             policy_dir: None,
             default_cwd: PathBuf::from("."),
         };
@@ -260,6 +390,71 @@ mod tests {
         assert!(matches!(
             error,
             AppError::Config(ConfigError::RelativeDefaultCwd { .. })
+        ));
+    }
+
+    #[test]
+    fn from_env_rejects_conflicting_bind_targets() {
+        let error = config_from_env(Some("127.0.0.1:0"), Some("/tmp/mcp-run.sock"))
+            .expect_err("conflicting bind targets rejected");
+
+        assert!(matches!(error, ConfigError::ConflictingBindTargets));
+    }
+
+    #[test]
+    fn from_env_ignores_empty_bind_values_before_conflict_check() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let socket_path = tempdir.path().join("mcp-run.sock");
+
+        let config = AppConfig::from_env_with(|name| match name {
+            "MCP_BIND_ADDR" => Some("   ".to_string()),
+            "MCP_BIND_UDS" => Some(socket_path.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .expect("empty addr should not conflict");
+
+        assert!(config.bind_addr.is_none());
+        assert_eq!(config.bind_uds, Some(socket_path));
+    }
+
+    #[test]
+    fn from_env_rejects_relative_uds_path() {
+        let error =
+            config_from_env(None, Some("relative.sock")).expect_err("relative uds path rejected");
+
+        assert!(matches!(error, ConfigError::RelativeBindUds { .. }));
+    }
+
+    #[test]
+    fn from_env_rejects_missing_uds_parent() {
+        let path = PathBuf::from("/definitely-missing-parent/mcp-run.sock");
+        let error = config_from_env(None, Some(path.to_str().expect("path string")))
+            .expect_err("missing parent rejected");
+
+        assert!(matches!(error, ConfigError::MissingBindUdsParent { .. }));
+    }
+
+    #[tokio::test]
+    async fn serve_rejects_existing_non_socket_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let socket_path = tempdir.path().join("mcp-run.sock");
+        fs::write(&socket_path, b"not a socket").expect("create stale file");
+
+        let config = AppConfig {
+            bind_addr: None,
+            bind_uds: Some(socket_path.clone()),
+            policy_dir: None,
+            default_cwd: std::env::current_dir().expect("current dir"),
+        };
+
+        let error = tokio::time::timeout(Duration::from_secs(1), serve(config))
+            .await
+            .expect("serve validation returned")
+            .expect_err("non-socket path rejected");
+
+        assert!(matches!(
+            error,
+            AppError::Config(ConfigError::BindUdsNotSocket { path }) if path == socket_path
         ));
     }
 
