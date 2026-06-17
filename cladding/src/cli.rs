@@ -60,9 +60,17 @@ enum CommandSpec {
     /// Check requirements
     Check,
     /// Start the system
-    Up,
+    Up {
+        /// Show Podman commands before executing them
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Stop the system
-    Down,
+    Down {
+        /// Show Podman commands before executing them
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Force-remove running containers
     Destroy,
     /// Run a command in the agent container
@@ -203,8 +211,8 @@ pub fn run() -> Result<()> {
             update_scripts,
         } => cmd_init(&context, name.as_deref(), update_scripts),
         CommandSpec::Check => cmd_check(&context),
-        CommandSpec::Up => cmd_up(&context),
-        CommandSpec::Down => cmd_down(&context),
+        CommandSpec::Up { verbose } => cmd_up(&context, verbose),
+        CommandSpec::Down { verbose } => cmd_down(&context, verbose),
         CommandSpec::Destroy => cmd_destroy(&context),
         CommandSpec::Run { env, args } => cmd_run(&context, &env, &args),
         CommandSpec::RunWithScissors { target, env, args } => {
@@ -445,7 +453,7 @@ fn cmd_check(context: &Context) -> Result<()> {
     check_required_config_files(context, &config)?;
     check_required_scripts_files(context)?;
     let script_mismatch = report_script_mismatch(context, "error")?;
-    check_required_images(&config)?;
+    check_required_images(&config, false)?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     check_required_host_paths(&spec)?;
     if legacy_config_entries_present {
@@ -660,7 +668,7 @@ fn check_required_host_paths(spec: &RuntimeSpec) -> Result<()> {
     Ok(())
 }
 
-fn check_required_images(config: &ExecutionConfig) -> Result<()> {
+fn check_required_images(config: &ExecutionConfig, verbose: bool) -> Result<()> {
     let mut missing = false;
     let mut images = vec![("agent", config.agent_image())];
     if config.nw_sandbox_enabled() {
@@ -675,9 +683,10 @@ fn check_required_images(config: &ExecutionConfig) -> Result<()> {
         if !seen.insert(image.to_string()) {
             continue;
         }
-        let status = Command::new("podman")
-            .args(["image", "exists", image])
-            .status();
+        let mut cmd = Command::new("podman");
+        cmd.args(["image", "exists", image]);
+        cladding::podman::trace_command(&cmd, verbose);
+        let status = cmd.status();
 
         match status {
             Ok(status) if status.success() => {}
@@ -720,12 +729,13 @@ fn current_project_root(context: &Context) -> Result<String> {
 fn project_runtime_status(
     context: &Context,
     config: &ExecutionConfig,
+    verbose: bool,
 ) -> Result<ProjectRuntimeStatus> {
     let current_project_root = current_project_root(context)?;
 
     let mut conflicting_roots = Vec::new();
     let mut already_running = false;
-    for project in list_running_projects()? {
+    for project in list_running_projects(verbose)? {
         if project.name != config.name {
             continue;
         }
@@ -761,9 +771,9 @@ fn project_runtime_status(
     })
 }
 
-fn cmd_up(context: &Context) -> Result<()> {
+fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
-    let status = project_runtime_status(context, &config)?;
+    let status = project_runtime_status(context, &config, verbose)?;
 
     if status.already_running {
         println!(
@@ -774,7 +784,7 @@ fn cmd_up(context: &Context) -> Result<()> {
     }
 
     check_required_binaries(context, &config)?;
-    check_required_images(&config)?;
+    check_required_images(&config, verbose)?;
     check_required_config_files(context, &config)?;
     check_required_scripts_files(context)?;
     warn_on_script_mismatch(context)?;
@@ -782,19 +792,22 @@ fn cmd_up(context: &Context) -> Result<()> {
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;
-    runtime_create(&spec)
+    runtime_create(&spec, verbose)
 }
 
-fn cmd_down(context: &Context) -> Result<()> {
+fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     let mut cleanup_error = None;
-    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec));
-    record_cleanup_result(&mut cleanup_error, remove_legacy_runtime_pods(&config));
+    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose));
     record_cleanup_result(
         &mut cleanup_error,
-        remove_project_expose_containers(&config, &project_root, true),
+        remove_legacy_runtime_pods(&config, verbose),
+    );
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_project_expose_containers(&config, &project_root, true, verbose),
     );
     record_cleanup_result(
         &mut cleanup_error,
@@ -812,11 +825,14 @@ fn cmd_destroy(context: &Context) -> Result<()> {
     let project_root = current_project_root(context)?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     let mut cleanup_error = None;
-    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec));
-    record_cleanup_result(&mut cleanup_error, remove_legacy_runtime_pods(&config));
+    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false));
     record_cleanup_result(
         &mut cleanup_error,
-        remove_project_expose_containers(&config, &project_root, true),
+        remove_legacy_runtime_pods(&config, false),
+    );
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_project_expose_containers(&config, &project_root, true, false),
     );
     record_cleanup_result(
         &mut cleanup_error,
@@ -831,7 +847,7 @@ fn cmd_destroy(context: &Context) -> Result<()> {
 
 fn cmd_ps(_context: &Context) -> Result<()> {
     podman_required("podman (required for cladding ps)")?;
-    let projects = list_running_projects()?;
+    let projects = list_running_projects(false)?;
     if projects.is_empty() {
         println!("no running cladding projects");
         return Ok(());
@@ -990,7 +1006,7 @@ fn run_podman_exec(
         return Err(Error::message(format!("missing {command_name} command")));
     }
 
-    let status = project_runtime_status(context, config)?;
+    let status = project_runtime_status(context, config, false)?;
     if !status.already_running {
         eprintln!("error: cladding project '{}' is not running", config.name);
         eprintln!("hint: run 'cladding up'");
@@ -1133,7 +1149,7 @@ fn cmd_expose_create(context: &Context, container_port: u16, host_port: Option<u
 
     ensure_runtime_expose_dir(&context.project_root)?;
 
-    let existing = list_project_expose_containers(&config.name, &project_root, false)?;
+    let existing = list_project_expose_containers(&config.name, &project_root, false, false)?;
     if let Some(proxy) = existing
         .iter()
         .find(|proxy| proxy.container_port == container_port)
@@ -1190,7 +1206,7 @@ fn cmd_expose_stop(context: &Context, host_port: u16) -> Result<()> {
 
     let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
-    let proxies = list_project_expose_containers(&config.name, &project_root, true)?;
+    let proxies = list_project_expose_containers(&config.name, &project_root, true, false)?;
     let matched: Vec<_> = proxies
         .into_iter()
         .filter(|proxy| proxy.host_port == host_port)
@@ -1210,7 +1226,7 @@ fn cmd_expose_stop(context: &Context, host_port: u16) -> Result<()> {
     let mut cleanup_error = None;
     record_cleanup_result(
         &mut cleanup_error,
-        podman_remove_containers(&ids, true, true),
+        podman_remove_containers(&ids, true, true, false),
     );
     record_cleanup_result(&mut cleanup_error, clear_runtime_path(&socket_path));
     if let Some(err) = cleanup_error {
@@ -1225,7 +1241,7 @@ fn cmd_expose_list(context: &Context) -> Result<()> {
 
     let config = load_cladding_config_v2(&context.project_root)?;
     let project_root = current_project_root(context)?;
-    let proxies = list_project_expose_proxies(&config.name, &project_root, false)?;
+    let proxies = list_project_expose_proxies(&config.name, &project_root, false, false)?;
 
     if proxies.is_empty() {
         println!("no exposed ports for project '{}'", config.name);
@@ -1247,14 +1263,15 @@ fn remove_project_expose_containers(
     config: &ExecutionConfig,
     project_root: &str,
     force: bool,
+    verbose: bool,
 ) -> Result<()> {
-    let proxies = list_project_expose_containers(&config.name, project_root, true)?;
+    let proxies = list_project_expose_containers(&config.name, project_root, true, verbose)?;
     if proxies.is_empty() {
         return Ok(());
     }
 
     let ids: Vec<String> = proxies.into_iter().map(|proxy| proxy.id).collect();
-    podman_remove_containers(&ids, force, true)
+    podman_remove_containers(&ids, force, true, verbose)
 }
 
 fn record_cleanup_result(target: &mut Option<Error>, result: Result<()>) {
@@ -1335,7 +1352,7 @@ fn set_restrictive_dir_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_legacy_runtime_pods(config: &ExecutionConfig) -> Result<()> {
+fn remove_legacy_runtime_pods(config: &ExecutionConfig, verbose: bool) -> Result<()> {
     let legacy_names = [
         format!("{}-cli-pod", config.name),
         format!("{}-sandbox-pod", config.name),
@@ -1343,8 +1360,10 @@ fn remove_legacy_runtime_pods(config: &ExecutionConfig) -> Result<()> {
     ];
 
     for name in legacy_names {
-        let output = Command::new("podman")
-            .args(["pod", "rm", "-f", &name])
+        let mut cmd = Command::new("podman");
+        cmd.args(["pod", "rm", "-f", &name]);
+        cladding::podman::trace_command(&cmd, verbose);
+        let output = cmd
             .output()
             .with_context(|| "failed to run podman pod rm")?;
         if output.status.success() || podman_pod_rm_output_is_missing(&output) {
@@ -1458,7 +1477,7 @@ fn try_start_expose_bridge_pair(
         return Ok(ExposeCreateOutcome::Started);
     }
 
-    let _ = podman_remove_containers(&[sidecar_name], true, true);
+    let _ = podman_remove_containers(&[sidecar_name, helper_name], true, true, false);
 
     if podman_output_is_bind_conflict(&helper_output) {
         return Ok(ExposeCreateOutcome::HostPortConflict);
@@ -1612,6 +1631,21 @@ mod tests {
                 assert_eq!(args.container_port, Some(3000));
                 assert_eq!(args.host_port, Some(9000));
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn up_and_down_verbose_flags_parse() {
+        let up = Cli::try_parse_from(["cladding", "up", "-v"]).expect("cli parse");
+        match up.command.expect("command") {
+            CommandSpec::Up { verbose } => assert!(verbose),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let down = Cli::try_parse_from(["cladding", "down", "--verbose"]).expect("cli parse");
+        match down.command.expect("command") {
+            CommandSpec::Down { verbose } => assert!(verbose),
             other => panic!("unexpected command: {other:?}"),
         }
     }

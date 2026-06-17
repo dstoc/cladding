@@ -7,6 +7,7 @@ use anyhow::Context as _;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -54,56 +55,88 @@ pub fn podman_build_image(image: &str, host_uid: u32, host_gid: u32) -> Result<(
     ensure_success(status, "podman build")
 }
 
+pub fn trace_command(cmd: &Command, verbose: bool) {
+    if verbose {
+        eprintln!("+ {}", format_command(cmd));
+    }
+}
+
+fn format_command(cmd: &Command) -> String {
+    std::iter::once(cmd.get_program())
+        .chain(cmd.get_args())
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &OsStr) -> String {
+    let value = value.to_string_lossy();
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '=' | ',')
+    }) {
+        return value.into_owned();
+    }
+
+    format!("'{}'", value.replace('\'', r#"'\''"#))
+}
+
 /// Direct runtime helpers for creating and cleaning up pods.
-pub fn runtime_create(spec: &RuntimeSpec) -> Result<()> {
+pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     prepare_runtime_socket_dirs(spec)?;
     ensure_runtime_empty_mask_dir(spec)?;
 
     for pod in runtime_pods(spec) {
-        pod_create(pod)?;
+        pod_create(pod, verbose)?;
     }
 
     for pod in runtime_pods(spec) {
         for task in &pod.init_tasks {
-            run_pod_task(pod, task)?;
+            run_pod_task(pod, task, verbose)?;
         }
     }
 
     for pod in runtime_pods(spec) {
         for container in &pod.containers {
-            container_create(&pod.name, container)?;
+            container_create(&pod.name, container, verbose)?;
         }
     }
 
     for pod in runtime_pods(spec) {
         for container in &pod.containers {
-            container_start(&container.name)?;
+            container_start(&container.name, verbose)?;
         }
     }
 
     Ok(())
 }
 
-pub fn runtime_cleanup(spec: &RuntimeSpec) -> Result<()> {
+pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     for pod in runtime_pods(spec) {
         for container in &pod.containers {
-            container_rm(&container.name)?;
+            container_rm(&container.name, verbose)?;
         }
-        pod_rm(&pod.name)?;
+        pod_rm(&pod.name, verbose)?;
     }
 
     Ok(())
 }
 
-pub fn pod_create(pod: &RuntimePod) -> Result<()> {
-    let status = build_pod_create_command(pod)
+pub fn pod_create(pod: &RuntimePod, verbose: bool) -> Result<()> {
+    let mut cmd = build_pod_create_command(pod);
+    trace_command(&cmd, verbose);
+    let status = cmd
         .status()
         .with_context(|| format!("failed to run podman pod create for {}", pod.name))?;
     ensure_success(status, "podman pod create")
 }
 
-pub fn pod_rm(pod_name: &str) -> Result<()> {
-    let output = build_pod_rm_command(pod_name)
+pub fn pod_rm(pod_name: &str, verbose: bool) -> Result<()> {
+    let mut cmd = build_pod_rm_command(pod_name);
+    trace_command(&cmd, verbose);
+    let output = cmd
         .output()
         .with_context(|| format!("failed to run podman pod rm for {pod_name}"))?;
 
@@ -114,20 +147,22 @@ pub fn pod_rm(pod_name: &str) -> Result<()> {
     ensure_success_output(&output, "podman pod rm")
 }
 
-pub fn container_create(pod_name: &str, container: &RuntimeContainer) -> Result<()> {
-    let status = build_container_create_command(pod_name, container)
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to run podman container create for {} in pod {pod_name}",
-                container.name
-            )
-        })?;
+pub fn container_create(pod_name: &str, container: &RuntimeContainer, verbose: bool) -> Result<()> {
+    let mut cmd = build_container_create_command(pod_name, container);
+    trace_command(&cmd, verbose);
+    let status = cmd.status().with_context(|| {
+        format!(
+            "failed to run podman container create for {} in pod {pod_name}",
+            container.name
+        )
+    })?;
     ensure_success(status, "podman container create")
 }
 
-pub fn container_start(container_name: &str) -> Result<()> {
-    let status = build_container_start_command(container_name)
+pub fn container_start(container_name: &str, verbose: bool) -> Result<()> {
+    let mut cmd = build_container_start_command(container_name);
+    trace_command(&cmd, verbose);
+    let status = cmd
         .status()
         .with_context(|| format!("failed to run podman container start for {container_name}"))?;
     ensure_success(status, "podman container start")
@@ -150,8 +185,10 @@ pub fn container_wait(container_name: &str) -> Result<i32> {
     Ok(code)
 }
 
-pub fn container_rm(container_name: &str) -> Result<()> {
-    let output = build_container_rm_command(container_name)
+pub fn container_rm(container_name: &str, verbose: bool) -> Result<()> {
+    let mut cmd = build_container_rm_command(container_name);
+    trace_command(&cmd, verbose);
+    let output = cmd
         .output()
         .with_context(|| format!("failed to run podman rm for {container_name}"))?;
 
@@ -212,8 +249,8 @@ pub struct ExposeProxy {
     pub role: String,
 }
 
-pub fn list_running_projects() -> Result<Vec<RunningProject>> {
-    let items = list_running_pod_items()?;
+pub fn list_running_projects(verbose: bool) -> Result<Vec<RunningProject>> {
+    let items = list_running_pod_items(verbose)?;
     let mut projects: HashMap<(String, String), usize> = HashMap::new();
     for item in items {
         let key = (item.name, item.project_root);
@@ -243,12 +280,14 @@ pub fn list_project_expose_proxies(
     project_name: &str,
     project_root: &str,
     include_stopped: bool,
+    verbose: bool,
 ) -> Result<Vec<ExposeProxy>> {
     list_project_expose_entries(
         project_name,
         project_root,
         include_stopped,
         Some("host-helper"),
+        verbose,
     )
 }
 
@@ -256,8 +295,9 @@ pub fn list_project_expose_containers(
     project_name: &str,
     project_root: &str,
     include_stopped: bool,
+    verbose: bool,
 ) -> Result<Vec<ExposeProxy>> {
-    list_project_expose_entries(project_name, project_root, include_stopped, None)
+    list_project_expose_entries(project_name, project_root, include_stopped, None, verbose)
 }
 
 pub fn podman_container_exists(container_name: &str) -> Result<bool> {
@@ -280,6 +320,7 @@ pub fn podman_remove_containers(
     container_ids: &[String],
     force: bool,
     ignore_missing: bool,
+    verbose: bool,
 ) -> Result<()> {
     for container_id in container_ids {
         let mut cmd = Command::new("podman");
@@ -289,6 +330,7 @@ pub fn podman_remove_containers(
         }
         cmd.arg(container_id);
 
+        trace_command(&cmd, verbose);
         let output = cmd.output().with_context(|| "failed to run podman rm")?;
 
         if output.status.success() {
@@ -319,18 +361,20 @@ struct ExposeProxyItem {
     role: String,
 }
 
-fn list_running_pod_items() -> Result<Vec<RunningPodItem>> {
-    let output = Command::new("podman")
-        .args([
-            "pod",
-            "ps",
-            "--filter",
-            "label=cladding",
-            "--filter",
-            "status=running",
-            "--format",
-            "json",
-        ])
+fn list_running_pod_items(verbose: bool) -> Result<Vec<RunningPodItem>> {
+    let mut cmd = Command::new("podman");
+    cmd.args([
+        "pod",
+        "ps",
+        "--filter",
+        "label=cladding",
+        "--filter",
+        "status=running",
+        "--format",
+        "json",
+    ]);
+    trace_command(&cmd, verbose);
+    let output = cmd
         .output()
         .with_context(|| "failed to run podman pod ps")?;
 
@@ -369,6 +413,7 @@ fn list_running_pod_items() -> Result<Vec<RunningPodItem>> {
 fn list_expose_proxy_items(
     project_name: &str,
     include_stopped: bool,
+    verbose: bool,
 ) -> Result<Vec<ExposeProxyItem>> {
     let mut cmd = Command::new("podman");
     cmd.arg("ps");
@@ -384,6 +429,7 @@ fn list_expose_proxy_items(
         "json",
     ]);
 
+    trace_command(&cmd, verbose);
     let output = cmd
         .output()
         .with_context(|| "failed to run podman ps for expose proxies")?;
@@ -404,8 +450,9 @@ fn list_project_expose_entries(
     project_root: &str,
     include_stopped: bool,
     role_filter: Option<&str>,
+    verbose: bool,
 ) -> Result<Vec<ExposeProxy>> {
-    let items = list_expose_proxy_items(project_name, include_stopped)?;
+    let items = list_expose_proxy_items(project_name, include_stopped, verbose)?;
     let mut results = project_expose_proxies_from_items(items, project_root, role_filter);
 
     results.sort_by(|a, b| {
@@ -655,7 +702,7 @@ fn ensure_runtime_empty_mask_dir(spec: &RuntimeSpec) -> Result<()> {
     Ok(())
 }
 
-fn run_pod_task(pod: &RuntimePod, task: &RuntimeTask) -> Result<()> {
+fn run_pod_task(pod: &RuntimePod, task: &RuntimeTask, verbose: bool) -> Result<()> {
     let mut cmd = Command::new("podman");
     cmd.arg("run");
     cmd.arg("--rm");
@@ -681,6 +728,7 @@ fn run_pod_task(pod: &RuntimePod, task: &RuntimeTask) -> Result<()> {
     cmd.arg(&task.image);
     append_command_args(&mut cmd, &task.command);
 
+    trace_command(&cmd, verbose);
     let status = cmd.status().with_context(|| {
         format!(
             "failed to run podman task {} in pod {}",
@@ -1093,6 +1141,43 @@ mod tests {
         assert_eq!(
             command_args(&cmd),
             vec!["pod", "create", "--name", "demo-agent", "--network", "none"]
+        );
+    }
+
+    #[test]
+    fn build_pod_create_command_does_not_include_runtime_flags() {
+        let pod = RuntimePod {
+            name: "demo-agent".to_string(),
+            labels: std::collections::BTreeMap::new(),
+            network_name: "default".to_string(),
+            ip: String::new(),
+            host_aliases: Vec::new(),
+            init_tasks: Vec::new(),
+            containers: Vec::new(),
+            userns_keep_id: false,
+        };
+
+        let cmd = build_pod_create_command(&pod);
+        let args = command_args(&cmd);
+        assert!(!args.iter().any(|arg| arg == "--runtime"));
+        assert!(!args.iter().any(|arg| arg == "--runtime-flag"));
+    }
+
+    #[test]
+    fn format_command_quotes_shell_sensitive_args() {
+        let mut cmd = Command::new("podman");
+        cmd.args([
+            "run",
+            "--name",
+            "demo agent",
+            "image:latest",
+            "echo",
+            "it's ok",
+        ]);
+
+        assert_eq!(
+            format_command(&cmd),
+            "podman run --name 'demo agent' image:latest echo 'it'\\''s ok'"
         );
     }
 
