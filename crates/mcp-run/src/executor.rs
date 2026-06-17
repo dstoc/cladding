@@ -321,6 +321,7 @@ fn resolve_authorized_cwd_absolute(
     effective_input: PathBuf,
 ) -> Result<AuthorizedCwd, ValidationError> {
     use std::ffi::CString;
+    use std::mem::MaybeUninit;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::ffi::OsStrExt;
 
@@ -353,22 +354,28 @@ fn resolve_authorized_cwd_absolute(
                 "cwd component contains a nul byte",
             )
         })?;
-        let mut how = unsafe { std::mem::zeroed::<libc::open_how>() };
-        how.flags = (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64;
-        how.resolve = libc::RESOLVE_NO_SYMLINKS;
         let fd = unsafe {
-            libc::syscall(
-                libc::SYS_openat2,
+            libc::openat(
                 parent_fd,
                 component.as_ptr(),
-                &how,
-                std::mem::size_of::<libc::open_how>(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
         if fd < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut stat = MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let stat = unsafe { stat.assume_init() };
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => Ok(fd),
+            libc::S_IFLNK => Err(std::io::Error::from_raw_os_error(libc::ELOOP)),
+            _ => Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
         }
     }
 
@@ -1141,6 +1148,51 @@ mod tests {
             assert!(decision.resolved_path.is_none());
             assert!(decision.hash.is_none());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn check_rejects_proc_fd_magic_link_cwd() {
+        use std::os::fd::AsRawFd;
+
+        let true_path = match find_executable("true") {
+            Some(path) => path,
+            None => return,
+        };
+        let proc_fd = Path::new("/proc")
+            .join(std::process::id().to_string())
+            .join("fd");
+        if !proc_fd.exists() {
+            return;
+        }
+
+        let temp = tempfile::tempdir_in(default_cwd_for_tests()).expect("tempdir");
+        let cwd = std::fs::File::open(temp.path()).expect("open tempdir");
+        let magic_link_cwd = proc_fd.join(cwd.as_raw_fd().to_string());
+        let policy_engine = rego_engine_allow_commands(&[&true_path]);
+
+        let decision = check_command(
+            &policy_engine,
+            default_cwd_for_tests().as_path(),
+            RunCommandInput {
+                executable: true_path,
+                args: vec![],
+                cwd: Some(magic_link_cwd.to_string_lossy().into_owned()),
+                env: None,
+            },
+        );
+
+        assert!(!decision.allowed);
+        assert!(decision.cwd.is_none());
+        assert!(
+            decision
+                .reason
+                .as_deref()
+                .expect("reason")
+                .contains("symlink or magic link")
+        );
+        assert!(decision.resolved_path.is_none());
+        assert!(decision.hash.is_none());
     }
 
     #[cfg(all(target_os = "linux", unix))]
