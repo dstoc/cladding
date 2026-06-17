@@ -1,10 +1,10 @@
 Cladding lets you run an agent in a constrained container environment where network access is intentionally narrow:
 
-- The agent runs in `<name>-agent`.
-- Optional delegated sandboxes run in `<name>-nw-sandbox` and `<name>-fs-sandbox`.
-- HTTP(S) egress is mediated by `<name>-proxy`, which uses separate Squid listeners to distinguish agent traffic from network-sandbox traffic.
+- The agent runs as a standalone `--network none` container named `<name>-agent-instance`.
+- Optional delegated sandboxes run as standalone `--network none` containers named `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance`.
+- HTTP(S) egress is mediated by the `<name>-proxy` pod. Execution containers reach it through scoped Unix-domain socket mounts and local `socat` loopback bridges, and Squid uses separate listeners to distinguish agent traffic from network-sandbox traffic.
 - The agent can reach `host.containers.internal` only on ports listed in [`config-template/agent/host_ports.lst`](config-template/agent/host_ports.lst).
-- `<name>-nw-sandbox` and `<name>-fs-sandbox` each serve [`mcp-run`](crates/mcp-run/README.md) and execute commands only when allowed by their Rego policy modules under `.cladding/config/`.
+- `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance` each serve [`mcp-run`](crates/mcp-run/README.md) on a mounted Unix socket and execute commands only when allowed by their Rego policy modules under `.cladding/config/`.
 - Proxy allow-lists come from:
   - `.cladding/config/agent/domains.lst` (template: [`config-template/agent/domains.lst`](config-template/agent/domains.lst))
   - `.cladding/config/nw_sandbox/domains.lst` when network sandboxing is enabled (template: [`config-template/nw_sandbox/domains.lst`](config-template/nw_sandbox/domains.lst))
@@ -138,10 +138,18 @@ Default mounts may be overridden by adding an entry with the same `mount` value,
 
 ## Architecture + Network Controls
 
+Current runtime shape:
+
+- `<name>-proxy` is the only Podman pod. It contains `<name>-proxy-instance` and `<name>-proxy-bridge`.
+- `<name>-agent-instance`, `<name>-nw-sandbox-instance`, and `<name>-fs-sandbox-instance` are standalone execution containers with `--network none`.
+- Execution containers communicate through scoped Unix-domain socket mounts under `.cladding/runtime/sockets`.
+- `use_runsc`, when enabled, applies only to the standalone execution containers.
+
 ```mermaid
 flowchart TB
-  subgraph C["<name>-agent"]
-    CA[agent instance]
+  subgraph C["standalone: <name>-agent-instance"]
+    CA[agent process]
+    CAP[socat 127.0.0.1:3128]
   end
 
   subgraph H[volumes]
@@ -150,15 +158,17 @@ flowchart TB
   end
 
 
-  subgraph S["<name>-nw-sandbox"]
-    SA[nw-sandbox instance: mcp-run :3000]
+  subgraph S["standalone: <name>-nw-sandbox-instance"]
+    SAP[socat 127.0.0.1:3128]
+    SA[mcp-run on /run/cladding/run/nw-sandbox/run.sock]
   end
 
-  subgraph F["<name>-fs-sandbox"]
-    FA[fs-sandbox instance: mcp-run :3000]
+  subgraph F["standalone: <name>-fs-sandbox-instance"]
+    FA[mcp-run on /run/cladding/run/fs-sandbox/run.sock]
   end
 
-  subgraph P["<name>-proxy"]
+  subgraph P["pod: <name>-proxy"]
+    PB[proxy bridge sidecar]
     PX1[Squid listener 127.0.0.1:3128]
     PX2[Squid listener 127.0.0.1:3129]
   end
@@ -170,13 +180,19 @@ flowchart TB
   HOME --> SA
   HOME --> FA
 
-  CA -- MCP tool calls --> SA
-  CA -- MCP tool calls --> FA
-  CA -- HTTP(S) via proxy --> PX1
-  SA -- HTTP(S) via proxy --> PX2
+  CA -- run-remote over UDS --> SA
+  CA -- run-remote over UDS --> FA
+  CA -- HTTP(S) proxy env --> CAP
+  CAP -- proxy/agent/proxy.sock --> PB
+  SAP -- proxy/nw-sandbox/proxy.sock --> PB
+  PB --> PX1
+  PB --> PX2
+  SA -- HTTP(S) proxy env --> SAP
   PX1 -- listener identity, allowlisted domains only --> NET[(Internet)]
   PX2 -- listener identity, allowlisted domains only --> NET
 ```
+
+The filesystem sandbox has no proxy socket mount and no proxy environment by default. It can run allowed commands through `mcp-run`, but it is not given HTTP(S) egress.
 
 ## Useful Commands
 
@@ -189,7 +205,7 @@ cladding run-with-scissors [--target nw-sandbox|fs-sandbox] [--env KEY[=VALUE] .
 cladding expose <containerport> [hostport] # block while forwarding localhost hostport to agent containerport
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding logs [agent|proxy|nw-sandbox|fs-sandbox] [podman logs args...] # view container logs
-cladding down         # stop associated pods
+cladding down         # stop managed containers and the proxy pod
 cladding destroy      # force-remove running containers
 cladding up           # starts the containers
 cladding logs proxy -f       # follow proxy logs
@@ -197,4 +213,4 @@ cladding logs nw-sandbox -f  # follow network sandbox (mcp-run) logs
 cladding logs fs-sandbox -f  # follow filesystem sandbox (mcp-run) logs
 ```
 
-Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to ask an enabled sandbox to run an allowlisted command. These wrappers call `run-remote` with the component-specific endpoint injected into the agent environment.
+Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to ask an enabled sandbox to run an allowlisted command. These wrappers call `run-remote` over the component-specific Unix socket injected into the agent environment.
