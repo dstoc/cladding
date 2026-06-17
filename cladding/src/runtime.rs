@@ -22,6 +22,7 @@ pub struct RuntimeSpec {
     pub project_name: String,
     pub project_root: PathBuf,
     pub project_root_label: String,
+    pub use_runsc: bool,
     pub custom_mounts: Vec<RuntimeCustomMount>,
     pub proxy: RuntimePod,
     pub agent: RuntimePod,
@@ -84,6 +85,7 @@ impl RuntimeSpec {
             project_name: config.name.clone(),
             project_root,
             project_root_label,
+            use_runsc: config.use_runsc,
             custom_mounts,
             proxy,
             agent,
@@ -127,6 +129,8 @@ impl RuntimeSpec {
 #[derive(Debug, Clone)]
 pub struct RuntimePod {
     pub name: String,
+    pub placement: RuntimePlacement,
+    pub use_runsc: bool,
     pub labels: BTreeMap<String, String>,
     pub network_name: String,
     pub ip: String,
@@ -134,6 +138,12 @@ pub struct RuntimePod {
     pub init_tasks: Vec<RuntimeTask>,
     pub containers: Vec<RuntimeContainer>,
     pub userns_keep_id: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimePlacement {
+    Pod,
+    Standalone,
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +246,8 @@ fn build_proxy_pod(
 
     RuntimePod {
         name: names.proxy_name.clone(),
+        placement: RuntimePlacement::Pod,
+        use_runsc: false,
         labels: build_labels(&config.name, project_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
         ip: String::new(),
@@ -338,6 +350,8 @@ fn build_agent_pod(
 
     RuntimePod {
         name: names.agent_name.clone(),
+        placement: RuntimePlacement::Standalone,
+        use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "agent"),
         network_name: NETWORK_NONE.to_string(),
         ip: String::new(),
@@ -439,6 +453,8 @@ fn build_nw_sandbox_pod(
 
     RuntimePod {
         name: component_name.to_string(),
+        placement: RuntimePlacement::Standalone,
+        use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "nw-sandbox"),
         network_name: NETWORK_NONE.to_string(),
         ip: String::new(),
@@ -482,6 +498,8 @@ fn build_fs_sandbox_pod(
 
     RuntimePod {
         name: component_name.to_string(),
+        placement: RuntimePlacement::Standalone,
+        use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "fs-sandbox"),
         network_name: NETWORK_NONE.to_string(),
         ip: String::new(),
@@ -929,9 +947,11 @@ mod tests {
         nw_enabled: bool,
         fs_enabled: bool,
         mounts: Vec<ResolvedMountConfig>,
+        use_runsc: bool,
     ) -> ExecutionConfig {
         ExecutionConfig {
             name: "demo".to_string(),
+            use_runsc,
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
@@ -973,10 +993,11 @@ mod tests {
 
     #[test]
     fn build_runtime_spec_fully_enabled_uses_five_containers() {
-        let config = execution_config(true, true, Vec::new());
+        let config = execution_config(true, true, Vec::new(), false);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
 
         assert_eq!(spec.project_name, "demo");
+        assert!(!spec.use_runsc);
         assert_eq!(spec.proxy.name, "demo-proxy");
         assert_eq!(spec.agent.containers[0].name, "demo-agent-instance");
         assert_eq!(
@@ -985,10 +1006,12 @@ mod tests {
         );
         assert!(spec.proxy.host_aliases.is_empty());
         assert_eq!(spec.proxy.network_name, "default");
+        assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
         assert_eq!(spec.agent.network_name, "none");
         assert_eq!(spec.agent.host_aliases.len(), 0);
         assert_eq!(spec.agent.init_tasks.len(), 0);
         assert!(spec.agent.userns_keep_id);
+        assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert_eq!(spec.proxy.containers.len(), 2);
         assert_eq!(spec.agent.containers.len(), 1);
         assert_eq!(
@@ -1120,7 +1143,7 @@ mod tests {
 
     #[test]
     fn build_runtime_spec_only_includes_enabled_components() {
-        let config = execution_config(true, false, Vec::new());
+        let config = execution_config(true, false, Vec::new(), false);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let agent = container(&spec.agent, "demo-agent-instance");
 
@@ -1184,6 +1207,7 @@ mod tests {
                 targets: vec![MountTarget::Agent],
                 ignore: false,
             }],
+            false,
         );
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let required = spec.required_host_paths();
@@ -1233,6 +1257,7 @@ mod tests {
                     ignore: false,
                 },
             ],
+            false,
         );
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let required = spec.required_host_paths();
@@ -1243,7 +1268,7 @@ mod tests {
 
     #[test]
     fn generated_runtime_socket_dirs_include_nested_socket_mounts() {
-        let config = execution_config(true, true, Vec::new());
+        let config = execution_config(true, true, Vec::new(), true);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let generated = spec.generated_runtime_socket_dirs();
 
@@ -1267,5 +1292,39 @@ mod tests {
             runtime_expose_socket_path(Path::new("/tmp/project/.cladding"), "agent", 3000, 9000),
             PathBuf::from("/tmp/project/.cladding/runtime/expose/agent-3000-9000.sock")
         );
+    }
+
+    #[test]
+    fn runtime_spec_threads_use_runsc_flag() {
+        let config = execution_config(false, false, Vec::new(), true);
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+
+        assert!(spec.use_runsc);
+        assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
+        assert!(!spec.proxy.use_runsc);
+        assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
+        assert!(spec.agent.use_runsc);
+        assert!(spec.agent.userns_keep_id);
+    }
+
+    #[test]
+    fn execution_components_are_standalone_containers() {
+        let config = execution_config(true, true, Vec::new(), true);
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+
+        assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
+        assert!(!spec.proxy.use_runsc);
+        assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
+        assert!(spec.agent.use_runsc);
+        assert_eq!(
+            spec.nw_sandbox.as_ref().expect("nw pod").placement,
+            RuntimePlacement::Standalone
+        );
+        assert!(spec.nw_sandbox.as_ref().expect("nw pod").use_runsc);
+        assert_eq!(
+            spec.fs_sandbox.as_ref().expect("fs pod").placement,
+            RuntimePlacement::Standalone
+        );
+        assert!(spec.fs_sandbox.as_ref().expect("fs pod").use_runsc);
     }
 }

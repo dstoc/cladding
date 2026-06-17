@@ -17,6 +17,7 @@ pub struct ExecutionComponentConfig {
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
     pub name: String,
+    pub use_runsc: bool,
     pub agent: ExecutionComponentConfig,
     pub nw_sandbox: Option<ExecutionComponentConfig>,
     pub fs_sandbox: Option<ExecutionComponentConfig>,
@@ -60,11 +61,13 @@ pub fn load_cladding_config_v2(project_root: &Path) -> Result<ExecutionConfig> {
     validate_top_level_keys(&parsed, &config_path)?;
 
     let name = get_config_string(&parsed, "name", &config_path)?;
+    let use_runsc = get_config_bool(&parsed, "use_runsc", &config_path)?;
     let agent = parse_component_object(&parsed, "agent", true, &config_path)?;
     let nw_sandbox = parse_component_object(&parsed, "nw_sandbox", false, &config_path)?;
     let fs_sandbox = parse_component_object(&parsed, "fs_sandbox", false, &config_path)?;
     let execution_config = ExecutionConfig {
         name: name.clone(),
+        use_runsc,
         agent: agent.expect("required component already validated"),
         nw_sandbox,
         fs_sandbox,
@@ -116,7 +119,14 @@ fn validate_top_level_keys(parsed: &serde_json::Value, config_path: &Path) -> Re
         return Err(Error::message("invalid cladding.json"));
     };
 
-    let allowed = ["name", "agent", "nw_sandbox", "fs_sandbox", "mounts"];
+    let allowed = [
+        "name",
+        "use_runsc",
+        "agent",
+        "nw_sandbox",
+        "fs_sandbox",
+        "mounts",
+    ];
     let mut invalid = false;
     for key in object.keys() {
         if allowed.contains(&key.as_str()) {
@@ -157,6 +167,17 @@ fn get_config_string(parsed: &serde_json::Value, key: &str, config_path: &Path) 
             eprintln!("file: {}", config_path.display());
             Error::message("invalid cladding.json")
         })
+}
+
+fn get_config_bool(parsed: &serde_json::Value, key: &str, config_path: &Path) -> Result<bool> {
+    match parsed.get(key) {
+        Some(value) => value.as_bool().ok_or_else(|| {
+            eprintln!("error: cladding.json invalid field '{key}' (expected boolean)");
+            eprintln!("file: {}", config_path.display());
+            Error::message("invalid cladding.json")
+        }),
+        None => Ok(false),
+    }
 }
 
 fn parse_component_object(
@@ -679,6 +700,7 @@ mod tests {
         .unwrap();
 
         let config = load_cladding_config_v2(&temp).unwrap();
+        assert!(!config.use_runsc);
         assert_eq!(config.agent_image(), "agent:image");
         assert_eq!(config.nw_sandbox_image(), "sandbox:image");
         assert!(config.nw_sandbox_enabled());
@@ -697,6 +719,76 @@ mod tests {
             vec![MountTarget::Agent, MountTarget::NwSandbox]
         );
         assert_eq!(config.mounts[1].targets, vec![MountTarget::FsSandbox]);
+    }
+
+    #[test]
+    fn load_cladding_config_defaults_use_runsc_to_false() {
+        let temp = create_temp_dir("default-use-runsc");
+        fs::write(
+            temp.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "agent": {
+    "image": "agent:image"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cladding_config_v2(&temp).unwrap();
+        assert!(!config.use_runsc);
+    }
+
+    #[test]
+    fn load_cladding_config_accepts_explicit_use_runsc_values() {
+        let temp = create_temp_dir("explicit-use-runsc");
+        fs::write(
+            temp.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "use_runsc": true,
+  "agent": {
+    "image": "agent:image"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cladding_config_v2(&temp).unwrap();
+        assert!(config.use_runsc);
+
+        fs::write(
+            temp.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "use_runsc": false,
+  "agent": {
+    "image": "agent:image"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cladding_config_v2(&temp).unwrap();
+        assert!(!config.use_runsc);
+    }
+
+    #[test]
+    fn load_cladding_config_rejects_non_boolean_use_runsc() {
+        let temp = create_temp_dir("non-boolean-use-runsc");
+        fs::write(
+            temp.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "use_runsc": "yes",
+  "agent": {
+    "image": "agent:image"
+  }
+}"#,
+        )
+        .unwrap();
+
+        assert!(load_cladding_config_v2(&temp).is_err());
     }
 
     #[test]

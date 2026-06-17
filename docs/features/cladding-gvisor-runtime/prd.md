@@ -65,7 +65,7 @@ Semantics:
 The config should not expose `runsc` path or runtime flag knobs in the first implementation. Cladding should call `runsc` through Podman using the supported default command shape. If a host needs a specific `runsc` binary, it should configure Podman's runtime path outside the project config.
 
 ### Podman flags
-When `use_runsc` is true, pass the runtime options to managed `podman create` and `podman run` calls:
+When `use_runsc` is true, pass the runtime options as global Podman options before the subcommand:
 
 ```text
 --runtime runsc
@@ -82,6 +82,7 @@ When `use_runsc` is true, pass the runtime options to managed `podman create` an
 
 Apply the runtime consistently to Cladding-created containers:
 
+- pod infra containers created by `podman pod create`
 - agent instance container
 - nw-sandbox instance container, when enabled
 - fs-sandbox instance container, when enabled
@@ -90,14 +91,20 @@ Apply the runtime consistently to Cladding-created containers:
 - transient `cladding expose` pod-sidecar and host-helper containers
 - any future one-shot setup containers created through the runtime helper layer
 
-Do not add runtime flags to `podman pod create`. Runtime selection is a container-level setting in the direct Podman model.
+Apply the runtime options to `podman pod create` as well as `podman run`. Podman pods have infra containers, and the infra container must not fall back to Podman's default runtime when `use_runsc` is enabled.
 
 ### User namespace behavior
 The current direct runtime uses `--userns keep-id` for the agent, nw-sandbox, and fs-sandbox pods, and does not use it for the proxy pod.
 
-The first implementation should preserve that behavior. If the selected `runsc` build cannot start a `--userns keep-id` pod/container combination, Cladding should fail with the Podman/runsc error instead of silently changing ownership semantics.
+The first implementation should preserve that behavior. The agent, nw-sandbox, and fs-sandbox pods should keep `--userns keep-id` under `use_runsc=true`.
 
 Do not add a fallback that drops `--userns keep-id` when `use_runsc` is true.
+
+When `use_runsc=true`, create the keep-id execution pods with `--infra=false`. In local testing, standalone `runsc + --userns keep-id` works, and `runsc` pods with `--infra=false` work. The failing combination is a default pod infra container plus a later `runsc` container joining the infra container's keep-id user namespace.
+
+Podman does not allow `pod create --infra=false` to also specify a pod network mode. For runsc no-infra execution pods, omit pod-level `--network` and pass the execution pod's network mode, currently `none`, to the managed instance container's `podman run` command.
+
+Keep the proxy pod on the default infra behavior for now. The proxy pod does not use `--userns keep-id`, and it is intentionally multi-container from startup.
 
 ### Scope of runtime selection
 Initial runtime selection should be global for all Cladding-managed containers.
@@ -136,11 +143,12 @@ Validation should not require launching a container. The authoritative compatibi
 2. Extend top-level unknown-key validation to allow `use_runsc`.
 3. Add tests for default, valid boolean, non-boolean, and unknown-key behavior.
 4. Thread the runtime setting into the runtime spec or Podman execution layer.
-5. Add a Podman command helper that appends `--runtime runsc --runtime-flag ignore-cgroups --runtime-flag host-uds=all` to container create/run commands when enabled.
-6. Apply the helper to managed container creation, runtime task execution, and `cladding expose` helper containers.
-7. Add `cladding check` validation for `runsc` availability when `use_runsc` is true.
-8. Add unit tests for command construction with and without `use_runsc`.
-9. Document the host prerequisite that Podman must be able to resolve `runsc`.
+5. Add a Podman command helper that appends `--runtime runsc --runtime-flag ignore-cgroups --runtime-flag host-uds=all` before Podman subcommands when enabled.
+6. Apply the helper to pod creation, managed instance container startup, runtime task execution, and `cladding expose` helper containers.
+7. Use `--infra=false` for `use_runsc=true` agent, nw-sandbox, and fs-sandbox pods while preserving `--userns keep-id`.
+8. Add `cladding check` validation for `runsc` availability when `use_runsc` is true.
+9. Add unit tests for command construction with and without `use_runsc`.
+10. Document the host prerequisite that Podman must be able to resolve `runsc`.
 
 ## Migration plan
 Existing projects do not need to change.
@@ -179,7 +187,7 @@ or the equivalent Podman inspect field for confirming the selected runtime in th
 
 ## Success criteria
 1. gVisor support is opt-in through `use_runsc` in `cladding.json`.
-2. Cladding passes `--runtime runsc`, `--runtime-flag ignore-cgroups`, and `--runtime-flag host-uds=all` through direct Podman container commands.
+2. Cladding passes `--runtime runsc`, `--runtime-flag ignore-cgroups`, and `--runtime-flag host-uds=all` as global options on direct Podman commands that create pods or run containers.
 3. Existing projects keep using the default Podman runtime when the config is absent.
 4. Runtime failures produce actionable Podman/runsc error output.
 5. Current UDS communication, proxy access, and user namespace behavior are preserved.

@@ -10,8 +10,8 @@ use cladding::error::{Error, Result};
 use cladding::fs_utils::{canonicalize_path, is_broken_symlink, is_executable, path_is_symlink};
 use cladding::podman::{
     list_project_expose_containers, list_project_expose_proxies, list_running_projects,
-    podman_build_image, podman_container_exists, podman_remove_containers, podman_required,
-    runtime_cleanup, runtime_create,
+    podman_build_image, podman_command, podman_container_exists, podman_remove_containers,
+    podman_required, runsc_available, runtime_cleanup, runtime_create,
 };
 use cladding::runtime::RuntimeSpec;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -450,6 +450,7 @@ fn cmd_check(context: &Context) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
 
     check_required_binaries(context, &config)?;
+    check_runsc_runtime(&config, false)?;
     check_required_config_files(context, &config)?;
     check_required_scripts_files(context)?;
     let script_mismatch = report_script_mismatch(context, "error")?;
@@ -715,6 +716,30 @@ fn check_required_images(config: &ExecutionConfig, verbose: bool) -> Result<()> 
     Ok(())
 }
 
+fn check_runsc_runtime(config: &ExecutionConfig, verbose: bool) -> Result<()> {
+    if !config.use_runsc {
+        return Ok(());
+    }
+
+    match runsc_available(verbose) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            eprintln!(
+                "missing: runsc (not found on PATH and Podman does not report a runtime named 'runsc')"
+            );
+            eprintln!("hint: install runsc or configure Podman to expose a runtime named 'runsc'");
+            Err(Error::message("missing runsc runtime"))
+        }
+        Err(err) => {
+            eprintln!("error: failed to check runsc availability: {err}");
+            eprintln!(
+                "hint: install runsc or verify 'podman info' can inspect configured runtimes"
+            );
+            Err(Error::message("failed to check runsc availability"))
+        }
+    }
+}
+
 struct ProjectRuntimeStatus {
     current_project_root: String,
     already_running: bool,
@@ -784,6 +809,7 @@ fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     }
 
     check_required_binaries(context, &config)?;
+    check_runsc_runtime(&config, verbose)?;
     check_required_images(&config, verbose)?;
     check_required_config_files(context, &config)?;
     check_required_scripts_files(context)?;
@@ -1388,6 +1414,69 @@ enum ExposeCreateOutcome {
     HostPortConflict,
 }
 
+fn build_expose_pod_sidecar_command(
+    config: &ExecutionConfig,
+    project_root: &str,
+    sidecar_name: &str,
+    agent_pod_name: &str,
+    container_port: u16,
+    host_port: u16,
+    socket_name: &str,
+    expose_dir: &Path,
+) -> Command {
+    let mut cmd = podman_command(config.use_runsc);
+    cmd.arg("run").arg("-d");
+    cmd.arg("--name").arg(&sidecar_name);
+    cmd.arg("--pod").arg(agent_pod_name);
+    cmd.arg("--volume")
+        .arg(format!("{}:/run/cladding/expose", expose_dir.display()));
+    append_expose_labels(
+        &mut cmd,
+        &config.name,
+        project_root,
+        container_port,
+        host_port,
+        "pod-sidecar",
+    );
+    cmd.arg("alpine/socat")
+        .arg(format!(
+            "UNIX-LISTEN:/run/cladding/expose/{socket_name},fork,reuseaddr"
+        ))
+        .arg(format!("TCP:127.0.0.1:{container_port}"));
+    cmd
+}
+
+fn build_expose_host_helper_command(
+    config: &ExecutionConfig,
+    project_root: &str,
+    helper_name: &str,
+    host_port: u16,
+    container_port: u16,
+    socket_name: &str,
+    expose_dir: &Path,
+) -> Command {
+    let mut cmd = podman_command(config.use_runsc);
+    cmd.arg("run").arg("-d");
+    cmd.arg("--name").arg(&helper_name);
+    cmd.arg("--network").arg("host");
+    cmd.arg("--volume")
+        .arg(format!("{}:/run/cladding/expose", expose_dir.display()));
+    append_expose_labels(
+        &mut cmd,
+        &config.name,
+        project_root,
+        container_port,
+        host_port,
+        "host-helper",
+    );
+    cmd.arg("alpine/socat")
+        .arg(format!(
+            "TCP-LISTEN:{host_port},bind=127.0.0.1,fork,reuseaddr"
+        ))
+        .arg(format!("UNIX-CONNECT:/run/cladding/expose/{socket_name}"));
+    cmd
+}
+
 fn try_start_expose_bridge_pair(
     config: &ExecutionConfig,
     project_root: &str,
@@ -1409,33 +1498,18 @@ fn try_start_expose_bridge_pair(
         .parent()
         .ok_or_else(|| Error::message("invalid expose socket path"))?;
 
-    let mut sidecar_cmd = Command::new("podman");
-    sidecar_cmd
-        .arg("run")
-        .arg("-d")
-        .arg("--name")
-        .arg(&sidecar_name)
-        .arg("--pod")
-        .arg(agent_pod_name)
-        .arg("--volume")
-        .arg(format!("{}:/run/cladding/expose", expose_dir.display()));
-    append_expose_labels(
-        &mut sidecar_cmd,
-        &config.name,
+    let sidecar_output = build_expose_pod_sidecar_command(
+        config,
         project_root,
+        &sidecar_name,
+        agent_pod_name,
         container_port,
         host_port,
-        "pod-sidecar",
-    );
-    sidecar_cmd
-        .arg("alpine/socat")
-        .arg(format!(
-            "UNIX-LISTEN:/run/cladding/expose/{socket_name},fork,reuseaddr"
-        ))
-        .arg(format!("TCP:127.0.0.1:{container_port}"));
-    let sidecar_output = sidecar_cmd
-        .output()
-        .with_context(|| "failed to run podman run for cladding expose pod-sidecar")?;
+        socket_name,
+        expose_dir,
+    )
+    .output()
+    .with_context(|| "failed to run podman run for cladding expose pod-sidecar")?;
 
     if !sidecar_output.status.success() {
         if podman_output_is_bind_conflict(&sidecar_output) {
@@ -1445,33 +1519,17 @@ fn try_start_expose_bridge_pair(
         return Err(Error::message("podman run failed"));
     }
 
-    let mut helper_cmd = Command::new("podman");
-    helper_cmd
-        .arg("run")
-        .arg("-d")
-        .arg("--name")
-        .arg(&helper_name)
-        .arg("--network")
-        .arg("host")
-        .arg("--volume")
-        .arg(format!("{}:/run/cladding/expose", expose_dir.display()));
-    append_expose_labels(
-        &mut helper_cmd,
-        &config.name,
+    let helper_output = build_expose_host_helper_command(
+        config,
         project_root,
-        container_port,
+        &helper_name,
         host_port,
-        "host-helper",
-    );
-    helper_cmd
-        .arg("alpine/socat")
-        .arg(format!(
-            "TCP-LISTEN:{host_port},bind=127.0.0.1,fork,reuseaddr"
-        ))
-        .arg(format!("UNIX-CONNECT:/run/cladding/expose/{socket_name}"));
-    let helper_output = helper_cmd
-        .output()
-        .with_context(|| "failed to run podman run for cladding expose host-helper")?;
+        container_port,
+        socket_name,
+        expose_dir,
+    )
+    .output()
+    .with_context(|| "failed to run podman run for cladding expose host-helper")?;
 
     if helper_output.status.success() {
         return Ok(ExposeCreateOutcome::Started);
@@ -1622,6 +1680,12 @@ mod tests {
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn command_args(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn expose_create_args_parse_without_subcommand() {
         let cli = Cli::try_parse_from(["cladding", "expose", "3000", "9000"]).expect("cli parse");
@@ -1712,6 +1776,79 @@ mod tests {
                 "cladding_expose_host_port=9000",
             ]
         );
+    }
+
+    #[test]
+    fn expose_sidecar_command_adds_runsc_flags_when_enabled() {
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: true,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            mounts: Vec::new(),
+        };
+        let cmd = build_expose_pod_sidecar_command(
+            &config,
+            "/tmp/demo/.cladding",
+            "demo-expose-pod-sidecar-3000-9000-123",
+            "demo-agent",
+            3000,
+            9000,
+            "agent-3000-9000.sock",
+            Path::new("/tmp/demo/.cladding/runtime/expose"),
+        );
+
+        let args = command_args(&cmd);
+        assert_eq!(args[0], "--runtime");
+        assert_eq!(args[1], "runsc");
+        assert_eq!(args[2], "--runtime-flag");
+        assert_eq!(args[3], "ignore-cgroups");
+        assert_eq!(args[4], "--runtime-flag");
+        assert_eq!(args[5], "host-uds=all");
+        assert_eq!(args[6], "run");
+        assert_eq!(args[7], "-d");
+        assert_eq!(args[8], "--name");
+        assert!(args[9].starts_with("demo-expose-pod-sidecar-3000-9000-"));
+        assert_eq!(args[10], "--pod");
+        assert_eq!(args[11], "demo-agent");
+    }
+
+    #[test]
+    fn expose_host_helper_command_omits_runsc_flags_when_disabled() {
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            mounts: Vec::new(),
+        };
+        let cmd = build_expose_host_helper_command(
+            &config,
+            "/tmp/demo/.cladding",
+            "demo-expose-host-helper-3000-9000-123",
+            9000,
+            3000,
+            "agent-3000-9000.sock",
+            Path::new("/tmp/demo/.cladding/runtime/expose"),
+        );
+
+        let args = command_args(&cmd);
+        assert!(!args.iter().any(|arg| arg == "--runtime"));
+        assert!(!args.iter().any(|arg| arg == "--runtime-flag"));
+        assert_eq!(args[0], "run");
+        assert_eq!(args[1], "-d");
+        assert_eq!(args[2], "--name");
+        assert!(args[3].starts_with("demo-expose-host-helper-3000-9000-"));
+        assert_eq!(args[4], "--network");
+        assert_eq!(args[5], "host");
     }
 
     #[test]
@@ -1882,6 +2019,7 @@ acl from_agent myportname agent
 
         let config = ExecutionConfig {
             name: "demo".to_string(),
+            use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
@@ -1910,6 +2048,7 @@ acl from_agent myportname agent
 
         let config = ExecutionConfig {
             name: "demo".to_string(),
+            use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
@@ -1942,6 +2081,7 @@ acl from_agent myportname agent
     ) -> ExecutionConfig {
         ExecutionConfig {
             name: "demo".to_string(),
+            use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),

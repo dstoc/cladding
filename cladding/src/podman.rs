@@ -1,7 +1,9 @@
 use crate::assets::containerfile;
 use crate::error::{Error, Result};
+use crate::fs_utils::is_executable;
 use crate::runtime::{
-    RuntimeContainer, RuntimeMount, RuntimeMountSource, RuntimePod, RuntimeSpec, RuntimeTask,
+    RuntimeContainer, RuntimeMount, RuntimeMountSource, RuntimePlacement, RuntimePod, RuntimeSpec,
+    RuntimeTask,
 };
 use anyhow::Context as _;
 use serde_json::Value;
@@ -55,6 +57,57 @@ pub fn podman_build_image(image: &str, host_uid: u32, host_gid: u32) -> Result<(
     ensure_success(status, "podman build")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PodmanRuntimeOptions {
+    use_runsc: bool,
+    network_none: bool,
+}
+
+impl PodmanRuntimeOptions {
+    fn new(use_runsc: bool) -> Self {
+        Self {
+            use_runsc,
+            network_none: false,
+        }
+    }
+
+    fn with_network_none(mut self, network_none: bool) -> Self {
+        self.network_none = network_none;
+        self
+    }
+}
+
+pub fn append_runtime_args(cmd: &mut Command, use_runsc: bool) {
+    append_runtime_args_with_options(cmd, PodmanRuntimeOptions::new(use_runsc));
+}
+
+fn append_runtime_args_with_options(cmd: &mut Command, options: PodmanRuntimeOptions) {
+    if !options.use_runsc {
+        return;
+    }
+
+    cmd.arg("--runtime");
+    cmd.arg("runsc");
+    cmd.arg("--runtime-flag");
+    cmd.arg("ignore-cgroups");
+    cmd.arg("--runtime-flag");
+    cmd.arg("host-uds=all");
+    if options.network_none {
+        cmd.arg("--runtime-flag");
+        cmd.arg("network=none");
+    }
+}
+
+pub fn podman_command(use_runsc: bool) -> Command {
+    podman_command_with_options(PodmanRuntimeOptions::new(use_runsc))
+}
+
+fn podman_command_with_options(options: PodmanRuntimeOptions) -> Command {
+    let mut cmd = Command::new("podman");
+    append_runtime_args_with_options(&mut cmd, options);
+    cmd
+}
+
 pub fn trace_command(cmd: &Command, verbose: bool) {
     if verbose {
         eprintln!("+ {}", format_command(cmd));
@@ -83,30 +136,55 @@ fn shell_quote(value: &OsStr) -> String {
     format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
-/// Direct runtime helpers for creating and cleaning up pods.
+pub fn runsc_available(verbose: bool) -> Result<bool> {
+    if command_exists("runsc") {
+        return Ok(true);
+    }
+
+    if !command_exists("podman") {
+        return Ok(false);
+    }
+
+    let mut cmd = Command::new("podman");
+    cmd.args(["info", "--format", "{{json .Host.OCIRuntimes}}"]);
+    trace_command(&cmd, verbose);
+    let output = cmd.output().with_context(|| "failed to run podman info")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            "failed to inspect podman runtimes".to_string()
+        } else {
+            format!("failed to inspect podman runtimes: {stderr}")
+        };
+        return Err(Error::message(message));
+    }
+
+    let runtimes: Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| "failed to parse podman info output")?;
+    Ok(podman_info_reports_runtime_named(&runtimes, "runsc"))
+}
+
+/// Direct runtime helpers for creating and cleaning up Podman resources.
 pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     prepare_runtime_socket_dirs(spec)?;
     ensure_runtime_empty_mask_dir(spec)?;
 
     for pod in runtime_pods(spec) {
-        pod_create(pod, verbose)?;
+        if pod.placement == RuntimePlacement::Pod {
+            pod_create(pod.use_runsc, pod, verbose)?;
+        }
     }
 
     for pod in runtime_pods(spec) {
         for task in &pod.init_tasks {
-            run_pod_task(pod, task, verbose)?;
+            run_pod_task(pod.use_runsc, pod, task, verbose)?;
         }
     }
 
     for pod in runtime_pods(spec) {
         for container in &pod.containers {
-            container_create(&pod.name, container, verbose)?;
-        }
-    }
-
-    for pod in runtime_pods(spec) {
-        for container in &pod.containers {
-            container_start(&container.name, verbose)?;
+            container_run(pod.use_runsc, pod, container, verbose)?;
         }
     }
 
@@ -118,14 +196,16 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
         for container in &pod.containers {
             container_rm(&container.name, verbose)?;
         }
+        // For standalone components this is best-effort cleanup for projects
+        // started by older builds where execution components were still pods.
         pod_rm(&pod.name, verbose)?;
     }
 
     Ok(())
 }
 
-pub fn pod_create(pod: &RuntimePod, verbose: bool) -> Result<()> {
-    let mut cmd = build_pod_create_command(pod);
+pub fn pod_create(use_runsc: bool, pod: &RuntimePod, verbose: bool) -> Result<()> {
+    let mut cmd = build_pod_create_command(use_runsc, pod);
     trace_command(&cmd, verbose);
     let status = cmd
         .status()
@@ -147,25 +227,21 @@ pub fn pod_rm(pod_name: &str, verbose: bool) -> Result<()> {
     ensure_success_output(&output, "podman pod rm")
 }
 
-pub fn container_create(pod_name: &str, container: &RuntimeContainer, verbose: bool) -> Result<()> {
-    let mut cmd = build_container_create_command(pod_name, container);
+pub fn container_run(
+    use_runsc: bool,
+    pod: &RuntimePod,
+    container: &RuntimeContainer,
+    verbose: bool,
+) -> Result<()> {
+    let mut cmd = build_container_run_command(use_runsc, pod, container);
     trace_command(&cmd, verbose);
     let status = cmd.status().with_context(|| {
         format!(
-            "failed to run podman container create for {} in pod {pod_name}",
-            container.name
+            "failed to run podman container {} in pod {}",
+            container.name, pod.name
         )
     })?;
-    ensure_success(status, "podman container create")
-}
-
-pub fn container_start(container_name: &str, verbose: bool) -> Result<()> {
-    let mut cmd = build_container_start_command(container_name);
-    trace_command(&cmd, verbose);
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to run podman container start for {container_name}"))?;
-    ensure_success(status, "podman container start")
+    ensure_success(status, "podman run")
 }
 
 pub fn container_wait(container_name: &str) -> Result<i32> {
@@ -224,12 +300,22 @@ pub fn ensure_success_output(output: &Output, context: &'static str) -> Result<(
 }
 
 fn command_exists(command: &str) -> bool {
-    env::var_os("PATH").is_some_and(|paths| {
-        env::split_paths(&paths).any(|path| {
+    command_exists_in_path(command, env::var_os("PATH").as_deref())
+}
+
+fn command_exists_in_path(command: &str, paths: Option<&std::ffi::OsStr>) -> bool {
+    paths.is_some_and(|paths| {
+        env::split_paths(paths).any(|path| {
             let candidate = path.join(command);
-            candidate.is_file()
+            is_executable(&candidate)
         })
     })
+}
+
+fn podman_info_reports_runtime_named(value: &Value, runtime_name: &str) -> bool {
+    value
+        .as_object()
+        .is_some_and(|runtimes| runtimes.contains_key(runtime_name))
 }
 
 #[derive(Debug, Clone)]
@@ -702,32 +788,13 @@ fn ensure_runtime_empty_mask_dir(spec: &RuntimeSpec) -> Result<()> {
     Ok(())
 }
 
-fn run_pod_task(pod: &RuntimePod, task: &RuntimeTask, verbose: bool) -> Result<()> {
-    let mut cmd = Command::new("podman");
-    cmd.arg("run");
-    cmd.arg("--rm");
-    cmd.arg("--pod");
-    cmd.arg(&pod.name);
-    cmd.arg("--name");
-    cmd.arg(format!("{}-{}", pod.name, task.name));
-
-    if let Some(user) = task.run_as_user {
-        let group = task.run_as_group.unwrap_or(user);
-        cmd.arg("--user");
-        cmd.arg(format!("{user}:{group}"));
-    }
-
-    for capability in &task.added_capabilities {
-        cmd.arg("--cap-add");
-        cmd.arg(capability);
-    }
-
-    append_env_args(&mut cmd, &task.env);
-    append_mount_args(&mut cmd, &pod.name, &task.mounts);
-    append_entrypoint_arg(&mut cmd, &task.command);
-    cmd.arg(&task.image);
-    append_command_args(&mut cmd, &task.command);
-
+fn run_pod_task(
+    use_runsc: bool,
+    pod: &RuntimePod,
+    task: &RuntimeTask,
+    verbose: bool,
+) -> Result<()> {
+    let mut cmd = build_task_run_command(use_runsc, pod, task);
     trace_command(&cmd, verbose);
     let status = cmd.status().with_context(|| {
         format!(
@@ -738,8 +805,10 @@ fn run_pod_task(pod: &RuntimePod, task: &RuntimeTask, verbose: bool) -> Result<(
     ensure_success(status, "podman run")
 }
 
-fn build_pod_create_command(pod: &RuntimePod) -> Command {
-    let mut cmd = Command::new("podman");
+fn build_pod_create_command(use_runsc: bool, pod: &RuntimePod) -> Command {
+    let mut cmd = podman_command_with_options(
+        PodmanRuntimeOptions::new(use_runsc).with_network_none(pod.network_name == "none"),
+    );
     cmd.args(["pod", "create", "--name", &pod.name]);
     append_label_args(&mut cmd, &pod.labels);
     cmd.arg("--network");
@@ -762,11 +831,35 @@ fn build_pod_rm_command(pod_name: &str) -> Command {
     cmd
 }
 
-fn build_container_create_command(pod_name: &str, container: &RuntimeContainer) -> Command {
-    let mut cmd = Command::new("podman");
-    cmd.arg("create");
-    cmd.arg("--pod");
-    cmd.arg(pod_name);
+fn build_container_run_command(
+    use_runsc: bool,
+    pod: &RuntimePod,
+    container: &RuntimeContainer,
+) -> Command {
+    let mut cmd =
+        podman_command_with_options(PodmanRuntimeOptions::new(use_runsc).with_network_none(
+            pod.placement == RuntimePlacement::Standalone && pod.network_name == "none",
+        ));
+    cmd.arg("run");
+    cmd.arg("-d");
+    match pod.placement {
+        RuntimePlacement::Pod => {
+            cmd.arg("--pod");
+            cmd.arg(&pod.name);
+        }
+        RuntimePlacement::Standalone => {
+            append_label_args(&mut cmd, &pod.labels);
+            cmd.arg("--network");
+            cmd.arg(&pod.network_name);
+            if pod.userns_keep_id {
+                cmd.arg("--userns");
+                cmd.arg("keep-id");
+            }
+            cmd.arg("--hostname");
+            cmd.arg(&pod.name);
+            append_host_alias_args(&mut cmd, &pod.host_aliases);
+        }
+    }
     cmd.arg("--name");
     cmd.arg(&container.name);
     if let Some(workdir) = &container.workdir {
@@ -781,7 +874,7 @@ fn build_container_create_command(pod_name: &str, container: &RuntimeContainer) 
     }
 
     append_env_args(&mut cmd, &container.env);
-    append_mount_args(&mut cmd, pod_name, &container.mounts);
+    append_mount_args(&mut cmd, &pod.name, &container.mounts);
     append_port_args(&mut cmd, &container.ports);
     append_entrypoint_arg(&mut cmd, &container.command);
 
@@ -790,9 +883,50 @@ fn build_container_create_command(pod_name: &str, container: &RuntimeContainer) 
     cmd
 }
 
-fn build_container_start_command(container_name: &str) -> Command {
-    let mut cmd = Command::new("podman");
-    cmd.args(["start", container_name]);
+fn build_task_run_command(use_runsc: bool, pod: &RuntimePod, task: &RuntimeTask) -> Command {
+    let mut cmd =
+        podman_command_with_options(PodmanRuntimeOptions::new(use_runsc).with_network_none(
+            pod.placement == RuntimePlacement::Standalone && pod.network_name == "none",
+        ));
+    cmd.arg("run");
+    cmd.arg("--rm");
+    match pod.placement {
+        RuntimePlacement::Pod => {
+            cmd.arg("--pod");
+            cmd.arg(&pod.name);
+        }
+        RuntimePlacement::Standalone => {
+            append_label_args(&mut cmd, &pod.labels);
+            cmd.arg("--network");
+            cmd.arg(&pod.network_name);
+            if pod.userns_keep_id {
+                cmd.arg("--userns");
+                cmd.arg("keep-id");
+            }
+            cmd.arg("--hostname");
+            cmd.arg(&pod.name);
+            append_host_alias_args(&mut cmd, &pod.host_aliases);
+        }
+    }
+    cmd.arg("--name");
+    cmd.arg(format!("{}-{}", pod.name, task.name));
+
+    if let Some(user) = task.run_as_user {
+        let group = task.run_as_group.unwrap_or(user);
+        cmd.arg("--user");
+        cmd.arg(format!("{user}:{group}"));
+    }
+
+    for capability in &task.added_capabilities {
+        cmd.arg("--cap-add");
+        cmd.arg(capability);
+    }
+
+    append_env_args(&mut cmd, &task.env);
+    append_mount_args(&mut cmd, &pod.name, &task.mounts);
+    append_entrypoint_arg(&mut cmd, &task.command);
+    cmd.arg(&task.image);
+    append_command_args(&mut cmd, &task.command);
     cmd
 }
 
@@ -1079,6 +1213,8 @@ mod tests {
     fn build_pod_create_command_includes_labels_network_and_aliases() {
         let pod = RuntimePod {
             name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
             labels: std::collections::BTreeMap::from([
                 ("app".to_string(), "agent".to_string()),
                 ("cladding".to_string(), "demo".to_string()),
@@ -1098,7 +1234,7 @@ mod tests {
             userns_keep_id: true,
         };
 
-        let cmd = build_pod_create_command(&pod);
+        let cmd = build_pod_create_command(false, &pod);
         assert_eq!(
             command_args(&cmd),
             vec![
@@ -1128,6 +1264,8 @@ mod tests {
     fn build_pod_create_command_supports_network_none_without_ip() {
         let pod = RuntimePod {
             name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             ip: String::new(),
@@ -1137,7 +1275,7 @@ mod tests {
             userns_keep_id: false,
         };
 
-        let cmd = build_pod_create_command(&pod);
+        let cmd = build_pod_create_command(false, &pod);
         assert_eq!(
             command_args(&cmd),
             vec!["pod", "create", "--name", "demo-agent", "--network", "none"]
@@ -1148,6 +1286,8 @@ mod tests {
     fn build_pod_create_command_does_not_include_runtime_flags() {
         let pod = RuntimePod {
             name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             ip: String::new(),
@@ -1157,10 +1297,142 @@ mod tests {
             userns_keep_id: false,
         };
 
-        let cmd = build_pod_create_command(&pod);
+        let cmd = build_pod_create_command(false, &pod);
         let args = command_args(&cmd);
         assert!(!args.iter().any(|arg| arg == "--runtime"));
         assert!(!args.iter().any(|arg| arg == "--runtime-flag"));
+    }
+
+    #[test]
+    fn build_pod_create_command_adds_global_runsc_flags_when_enabled() {
+        let pod = RuntimePod {
+            name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "none".to_string(),
+            ip: String::new(),
+            host_aliases: Vec::new(),
+            init_tasks: Vec::new(),
+            containers: Vec::new(),
+            userns_keep_id: false,
+        };
+
+        let cmd = build_pod_create_command(true, &pod);
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--runtime",
+                "runsc",
+                "--runtime-flag",
+                "ignore-cgroups",
+                "--runtime-flag",
+                "host-uds=all",
+                "--runtime-flag",
+                "network=none",
+                "pod",
+                "create",
+                "--name",
+                "demo-agent",
+                "--network",
+                "none",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_container_run_command_uses_standalone_container_flags() {
+        let pod = RuntimePod {
+            name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Standalone,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::from([
+                ("app".to_string(), "agent".to_string()),
+                ("cladding".to_string(), "demo".to_string()),
+                (
+                    "project_root".to_string(),
+                    "/tmp/demo/.cladding".to_string(),
+                ),
+            ]),
+            network_name: "none".to_string(),
+            ip: String::new(),
+            host_aliases: Vec::new(),
+            init_tasks: Vec::new(),
+            containers: Vec::new(),
+            userns_keep_id: true,
+        };
+        let container = RuntimeContainer {
+            name: "demo-agent-instance".to_string(),
+            image: "demo:image".to_string(),
+            command: vec!["sleep".to_string(), "infinity".to_string()],
+            workdir: None,
+            env: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            stdin: false,
+            tty: false,
+        };
+
+        let cmd = build_container_run_command(true, &pod, &container);
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--runtime",
+                "runsc",
+                "--runtime-flag",
+                "ignore-cgroups",
+                "--runtime-flag",
+                "host-uds=all",
+                "--runtime-flag",
+                "network=none",
+                "run",
+                "-d",
+                "--label",
+                "app=agent",
+                "--label",
+                "cladding=demo",
+                "--label",
+                "project_root=/tmp/demo/.cladding",
+                "--network",
+                "none",
+                "--userns",
+                "keep-id",
+                "--hostname",
+                "demo-agent",
+                "--name",
+                "demo-agent-instance",
+                "--entrypoint",
+                "sleep",
+                "demo:image",
+                "infinity",
+            ]
+        );
+    }
+
+    #[test]
+    fn append_runtime_args_adds_exact_runsc_flags_when_enabled() {
+        let mut cmd = Command::new("podman");
+        append_runtime_args(&mut cmd, true);
+
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--runtime",
+                "runsc",
+                "--runtime-flag",
+                "ignore-cgroups",
+                "--runtime-flag",
+                "host-uds=all",
+            ]
+        );
+    }
+
+    #[test]
+    fn append_runtime_args_omits_flags_when_disabled() {
+        let mut cmd = Command::new("podman");
+        append_runtime_args(&mut cmd, false);
+
+        assert!(command_args(&cmd).is_empty());
     }
 
     #[test]
@@ -1182,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn build_container_create_command_includes_mounts_env_and_io_flags() {
+    fn build_container_run_command_includes_mounts_env_and_io_flags() {
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),
             image: "demo:image".to_string(),
@@ -1225,11 +1497,25 @@ mod tests {
             tty: true,
         };
 
-        let cmd = build_container_create_command("demo-agent", &container);
+        let pod = RuntimePod {
+            name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "default".to_string(),
+            ip: String::new(),
+            host_aliases: Vec::new(),
+            init_tasks: Vec::new(),
+            containers: Vec::new(),
+            userns_keep_id: false,
+        };
+
+        let cmd = build_container_run_command(false, &pod, &container);
         assert_eq!(
             command_args(&cmd),
             vec![
-                "create",
+                "run",
+                "-d",
                 "--pod",
                 "demo-agent",
                 "--name",
@@ -1259,9 +1545,118 @@ mod tests {
     }
 
     #[test]
+    fn build_container_run_command_adds_runsc_flags_when_enabled() {
+        let container = RuntimeContainer {
+            name: "demo-agent-instance".to_string(),
+            image: "demo:image".to_string(),
+            command: vec!["sleep".to_string(), "infinity".to_string()],
+            workdir: None,
+            env: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            stdin: false,
+            tty: false,
+        };
+
+        let pod = RuntimePod {
+            name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "default".to_string(),
+            ip: String::new(),
+            host_aliases: Vec::new(),
+            init_tasks: Vec::new(),
+            containers: Vec::new(),
+            userns_keep_id: false,
+        };
+
+        let cmd = build_container_run_command(true, &pod, &container);
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--runtime",
+                "runsc",
+                "--runtime-flag",
+                "ignore-cgroups",
+                "--runtime-flag",
+                "host-uds=all",
+                "run",
+                "-d",
+                "--pod",
+                "demo-agent",
+                "--name",
+                "demo-agent-instance",
+                "--entrypoint",
+                "sleep",
+                "demo:image",
+                "infinity",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_container_run_command_adds_network_for_standalone_containers() {
+        let pod = RuntimePod {
+            name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Standalone,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "none".to_string(),
+            ip: String::new(),
+            host_aliases: Vec::new(),
+            init_tasks: Vec::new(),
+            containers: Vec::new(),
+            userns_keep_id: true,
+        };
+        let container = RuntimeContainer {
+            name: "demo-agent-instance".to_string(),
+            image: "demo:image".to_string(),
+            command: vec!["sleep".to_string(), "infinity".to_string()],
+            workdir: None,
+            env: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            stdin: false,
+            tty: false,
+        };
+
+        let cmd = build_container_run_command(true, &pod, &container);
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--runtime",
+                "runsc",
+                "--runtime-flag",
+                "ignore-cgroups",
+                "--runtime-flag",
+                "host-uds=all",
+                "--runtime-flag",
+                "network=none",
+                "run",
+                "-d",
+                "--network",
+                "none",
+                "--userns",
+                "keep-id",
+                "--hostname",
+                "demo-agent",
+                "--name",
+                "demo-agent-instance",
+                "--entrypoint",
+                "sleep",
+                "demo:image",
+                "infinity",
+            ]
+        );
+    }
+
+    #[test]
     fn build_task_run_command_sets_root_user_and_capabilities() {
         let pod = RuntimePod {
             name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "cladding-1".to_string(),
             ip: "10.90.1.5".to_string(),
@@ -1293,22 +1688,7 @@ mod tests {
             added_capabilities: vec!["NET_ADMIN".to_string()],
         };
 
-        let mut cmd = Command::new("podman");
-        cmd.arg("run");
-        cmd.arg("--rm");
-        cmd.arg("--pod");
-        cmd.arg(&pod.name);
-        cmd.arg("--name");
-        cmd.arg(format!("{}-{}", pod.name, task.name));
-        cmd.arg("--user");
-        cmd.arg("0:0");
-        cmd.arg("--cap-add");
-        cmd.arg("NET_ADMIN");
-        append_env_args(&mut cmd, &task.env);
-        append_mount_args(&mut cmd, &pod.name, &task.mounts);
-        append_entrypoint_arg(&mut cmd, &task.command);
-        cmd.arg(&task.image);
-        append_command_args(&mut cmd, &task.command);
+        let cmd = build_task_run_command(false, &pod, &task);
 
         assert_eq!(
             command_args(&cmd),
@@ -1333,6 +1713,94 @@ mod tests {
                 "/opt/scripts/proxy_startup.sh",
             ]
         );
+    }
+
+    #[test]
+    fn build_task_run_command_adds_runsc_flags_when_enabled() {
+        let pod = RuntimePod {
+            name: "demo-agent".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "cladding-1".to_string(),
+            ip: "10.90.1.5".to_string(),
+            host_aliases: Vec::new(),
+            init_tasks: Vec::new(),
+            containers: Vec::new(),
+            userns_keep_id: false,
+        };
+        let task = RuntimeTask {
+            name: "agent-node".to_string(),
+            image: "alpine:latest".to_string(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "/opt/scripts/proxy_startup.sh".to_string(),
+            ],
+            env: Vec::new(),
+            mounts: Vec::new(),
+            run_as_user: None,
+            run_as_group: None,
+            added_capabilities: Vec::new(),
+        };
+
+        let cmd = build_task_run_command(true, &pod, &task);
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--runtime",
+                "runsc",
+                "--runtime-flag",
+                "ignore-cgroups",
+                "--runtime-flag",
+                "host-uds=all",
+                "run",
+                "--rm",
+                "--pod",
+                "demo-agent",
+                "--name",
+                "demo-agent-agent-node",
+                "--entrypoint",
+                "/bin/sh",
+                "alpine:latest",
+                "/opt/scripts/proxy_startup.sh",
+            ]
+        );
+    }
+
+    #[test]
+    fn command_exists_in_path_detects_executable_entries() {
+        let temp =
+            std::env::temp_dir().join(format!("cladding-command-exists-{}", std::process::id()));
+        if temp.exists() {
+            fs::remove_dir_all(&temp).expect("cleanup temp dir");
+        }
+        fs::create_dir_all(&temp).expect("create temp dir");
+
+        let command_path = temp.join("runsc");
+        fs::write(&command_path, b"#!/bin/sh\nexit 0\n").expect("write command");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&command_path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&command_path, permissions).expect("chmod");
+        }
+
+        assert!(command_exists_in_path("runsc", Some(temp.as_os_str())));
+        assert!(!command_exists_in_path("podman", Some(temp.as_os_str())));
+
+        fs::remove_dir_all(&temp).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn podman_info_reports_runtime_named_detects_configured_runtime() {
+        let runtimes = json!({
+            "crun": { "path": "/usr/bin/crun" },
+            "runsc": { "path": "/usr/bin/runsc" }
+        });
+
+        assert!(podman_info_reports_runtime_named(&runtimes, "runsc"));
+        assert!(!podman_info_reports_runtime_named(&runtimes, "runc"));
     }
 
     #[test]
