@@ -3,36 +3,39 @@
 ## Objective
 Add optional support for running Cladding-managed containers with gVisor `runsc`.
 
-The initial support should be configuration-driven and should pass the Podman runtime flags Cladding needs for the supported environment:
+The initial support should be configuration-driven and should pass the Podman runtime flags Cladding needs for the supported rootless environment:
 
 ```text
---runtime=<runsc>
---runtime-flag=ignore-cgroups
+--runtime runsc
+--runtime-flag ignore-cgroups
+--runtime-flag host-uds=all
 ```
 
-This proposal assumes the direct Podman runtime and UDS-based network isolation work have landed first.
-
 ## Motivation
-gVisor provides an additional userspace kernel isolation boundary around containers. For Cladding, that is attractive because the project already separates work across agent, network sandbox, filesystem sandbox, and proxy components.
+gVisor provides an additional userspace kernel isolation boundary around containers. For Cladding, that is useful because the runtime already separates work across the agent, optional network sandbox, optional filesystem sandbox, proxy, and bridge components.
 
-Experiments showed several important constraints:
+Cladding now manages pods and containers directly with Podman. Non-proxy execution pods run with `--network none` and communicate through scoped Unix-domain sockets. This gives Cladding a practical place to apply OCI runtime flags consistently without changing the user-facing runtime model.
 
-- `podman run --runtime=<newer-runsc> --runtime-flag=ignore-cgroups alpine sh` can work
-- older/default `runsc` may fail in rootless environments while trying to use systemd cgroups
-- `podman play kube` plus `io.podman.annotations.userns: keep-id` can fail even when direct `podman run --userns=keep-id` works
-- gVisor does not expose the netfilter API needed by the current nftables jailers
+The initial gVisor support should stay narrow:
 
-Therefore gVisor support should not be bolted onto the current `play kube` + nftables model. It should build on direct Podman control and the UDS network isolation model.
+- use a single project-level opt-in
+- use Podman's configured `runsc` runtime name
+- always pass `ignore-cgroups`
+- always pass `host-uds=all`
+- preserve the existing direct-Podman and UDS topology
+- fail explicitly when the host `runsc` setup is not usable
 
 ## Problem statement
-The current Cladding runtime cannot reliably run under `runsc`:
+The current runtime has no way to select an alternate OCI runtime for Cladding-managed containers.
 
-- `podman play kube` hides or globalizes runtime options
-- rootless cgroup integration may require `--runtime-flag=ignore-cgroups`
-- nftables jailers fail under gVisor with netlink/netfilter errors
-- the current proxy identity model depends on network source IPs
+Users who want to test or use gVisor need Cladding to apply the runtime selection consistently across the containers it creates. Passing `--runtime` manually is not enough because Cladding creates multiple pods, instance containers, persistent bridge containers, and transient expose helpers.
 
-Even if a single `podman run` command works, that does not prove the Cladding runtime works. Cladding needs a supported way to apply OCI runtime flags consistently to pods, app containers, and sidecars.
+The implementation needs to add runtime selection without weakening existing behavior:
+
+- agent, nw-sandbox, and fs-sandbox should keep current file ownership behavior where possible
+- UDS communication should continue to work
+- proxy access should continue to use the existing UDS bridge model
+- startup failures should expose the underlying Podman/runsc error
 
 ## Proposal
 Add an optional boolean config that selects gVisor for managed containers.
@@ -59,43 +62,42 @@ Semantics:
 - `use_runsc: false` means use Podman's default OCI runtime
 - `use_runsc: true` means use `runsc` for Cladding-managed containers
 
-The config should not expose `runsc` path or `ignore_cgroups` knobs in the first implementation. Cladding should call `runsc` through Podman using the supported default command shape. If a host needs a specific `runsc` binary, it should configure Podman's runtime path outside the project config.
+The config should not expose `runsc` path or runtime flag knobs in the first implementation. Cladding should call `runsc` through Podman using the supported default command shape. If a host needs a specific `runsc` binary, it should configure Podman's runtime path outside the project config.
 
 ### Podman flags
-When `use_runsc` is true, pass the runtime options to managed `podman create`/`podman run` calls:
+When `use_runsc` is true, pass the runtime options to managed `podman create` and `podman run` calls:
 
 ```text
 --runtime runsc
 --runtime-flag ignore-cgroups
+--runtime-flag host-uds=all
 ```
 
-Apply the runtime consistently to:
+`host-uds=all` is required because the current runtime uses host-mounted Unix socket directories in both directions:
 
-- app containers
-- sidecar containers
-- one-shot setup containers that remain after the UDS migration
+- proxy bridge and sandbox `mcp-run` containers create/bind Unix sockets in mounted directories
+- agent, nw-sandbox proxy clients, `run-remote`, and expose helpers connect to existing Unix sockets in mounted directories
 
-The direct Podman runtime proposal should provide the command construction point for this. Do not route gVisor support through `podman play kube`.
+`host-uds=create` alone is not enough because client containers need to open existing sockets. `host-uds=open` alone is not enough because server containers need to create socket endpoints. Since the first implementation uses one global runtime switch for all managed containers, Cladding should pass `host-uds=all` consistently instead of trying to compute a per-container minimum.
 
-### Dependency on UDS network isolation
-The supported gVisor mode requires the UDS-based network isolation runtime.
+Apply the runtime consistently to Cladding-created containers:
 
-Do not support gVisor with nftables jailers. gVisor does not expose the required netfilter APIs, so a gVisor runtime path using the current jail scripts would fail during startup or silently weaken isolation if jailers were skipped.
+- agent instance container
+- nw-sandbox instance container, when enabled
+- fs-sandbox instance container, when enabled
+- proxy instance container
+- persistent proxy bridge sidecar
+- transient `cladding expose` pod-sidecar and host-helper containers
+- any future one-shot setup containers created through the runtime helper layer
 
-If the implementation still has multiple runtime modes during migration, `cladding check` should reject:
-
-```text
-use_runsc = true
-```
-
-unless the project/runtime is using the no-nftables UDS isolation path.
+Do not add runtime flags to `podman pod create`. Runtime selection is a container-level setting in the direct Podman model.
 
 ### User namespace behavior
-Do not reintroduce `io.podman.annotations.userns: keep-id` through a kube annotation.
+The current direct runtime uses `--userns keep-id` for the agent, nw-sandbox, and fs-sandbox pods, and does not use it for the proxy pod.
 
-Under direct Podman management, test whether direct `--userns=keep-id` is compatible with the selected `runsc` build. If it is compatible, keep existing file ownership behavior. If it is not compatible, fail with an explicit error rather than silently changing ownership semantics.
+The first implementation should preserve that behavior. If the selected `runsc` build cannot start a `--userns keep-id` pod/container combination, Cladding should fail with the Podman/runsc error instead of silently changing ownership semantics.
 
-The first implementation should preserve current rootless file ownership behavior when possible. If preserving it is not possible under `runsc`, document that limitation and require an explicit opt-in.
+Do not add a fallback that drops `--userns keep-id` when `use_runsc` is true.
 
 ### Scope of runtime selection
 Initial runtime selection should be global for all Cladding-managed containers.
@@ -105,7 +107,7 @@ Do not add per-component runtime selection in the first implementation. A global
 Future per-component overrides may be useful, for example:
 
 - run execution containers under `runsc`
-- keep proxy under the default runtime
+- keep proxy or expose helpers under the default runtime
 
 That should be deferred until there is a concrete compatibility need.
 
@@ -113,30 +115,32 @@ That should be deferred until there is a concrete compatibility need.
 `cladding check` should validate the runtime configuration before `cladding up`:
 
 - `use_runsc` is a boolean if present
-- `runsc` can be found by Podman or on `PATH`
-- UDS/no-nftables runtime mode is active when `runsc` is requested
+- `runsc` is available through Podman or on `PATH`
 
-`cladding up` should include the failing Podman command context if `runsc` startup fails.
+Validation should not require launching a container. The authoritative compatibility test remains `cladding up`, because `runsc` failures can depend on Podman version, rootless user namespace behavior, image behavior, and host runtime configuration.
+
+`cladding up` and `cladding expose` should include the failing Podman command context if `runsc` startup fails.
 
 ## Non-goals
 1. Do not install or upgrade `runsc`.
-2. Do not support gVisor under `podman play kube`.
-3. Do not support gVisor with nftables jailers.
-4. Do not add per-component runtime overrides in the first implementation.
-5. Do not make gVisor the default runtime.
-6. Do not claim complete gVisor compatibility without integration tests.
-7. Do not preserve legacy fallback behavior if the user explicitly requested `runsc`.
-8. Do not expose `runsc` path or runtime-flag tuning in `cladding.json` in the first implementation.
+2. Do not add per-component runtime overrides in the first implementation.
+3. Do not make gVisor the default runtime.
+4. Do not claim complete gVisor compatibility without integration tests.
+5. Do not preserve legacy fallback behavior if the user explicitly requested `runsc`.
+6. Do not expose `runsc` path or runtime-flag tuning in `cladding.json` in the first implementation.
+7. Do not change Cladding's UDS network isolation model.
+8. Do not change current user namespace behavior as part of this feature.
 
 ## Suggested implementation shape
-1. Land direct Podman runtime management.
-2. Land UDS network isolation and remove nftables jailers from the supported runtime path.
-3. Add `use_runsc: bool` to `cladding/src/config.rs`.
-4. Extend unknown-key validation for `use_runsc`.
-5. Add a Podman command helper that appends runtime flags to create/run commands.
-6. Thread runtime config through app container, sidecar, and setup container creation.
-7. Add `cladding check` validation for runsc availability and incompatible modes.
-8. Document the required host prerequisites.
+1. Add `use_runsc: bool` to `cladding/src/config.rs` with a default of `false`.
+2. Extend top-level unknown-key validation to allow `use_runsc`.
+3. Add tests for default, valid boolean, non-boolean, and unknown-key behavior.
+4. Thread the runtime setting into the runtime spec or Podman execution layer.
+5. Add a Podman command helper that appends `--runtime runsc --runtime-flag ignore-cgroups --runtime-flag host-uds=all` to container create/run commands when enabled.
+6. Apply the helper to managed container creation, runtime task execution, and `cladding expose` helper containers.
+7. Add `cladding check` validation for `runsc` availability when `use_runsc` is true.
+8. Add unit tests for command construction with and without `use_runsc`.
+9. Document the host prerequisite that Podman must be able to resolve `runsc`.
 
 ## Migration plan
 Existing projects do not need to change.
@@ -154,7 +158,7 @@ If gVisor startup fails, users can remove `use_runsc` or set it to `false` and r
 ## Verification
 Verification should include host integration tests where Podman and runsc are available:
 
-- `cladding check` accepts a valid `runsc` config
+- `cladding check` accepts a valid `use_runsc` config
 - `cladding check` rejects non-boolean `use_runsc`
 - `cladding check` reports missing `runsc` when `use_runsc` is true
 - `cladding up` creates all enabled components under `runsc`
@@ -162,7 +166,7 @@ Verification should include host integration tests where Podman and runsc are av
 - `run-in-nw-sandbox --check -- true` works from the agent
 - `run-in-fs-sandbox --check -- true` works from the agent
 - proxy access still works through the UDS bridge
-- no startup container attempts to run `nft`
+- `cladding expose` works when `use_runsc` is true
 - removing `use_runsc` returns the project to the default Podman runtime
 
 Manual diagnostics should include:
@@ -175,7 +179,7 @@ or the equivalent Podman inspect field for confirming the selected runtime in th
 
 ## Success criteria
 1. gVisor support is opt-in through `use_runsc` in `cladding.json`.
-2. Cladding passes `--runtime=<runsc>` and `--runtime-flag=ignore-cgroups` through direct Podman commands.
-3. gVisor mode does not use nftables jailers.
-4. Existing projects keep using the default Podman runtime when the config is absent.
-5. Runtime failures produce actionable Podman/runsc error output.
+2. Cladding passes `--runtime runsc`, `--runtime-flag ignore-cgroups`, and `--runtime-flag host-uds=all` through direct Podman container commands.
+3. Existing projects keep using the default Podman runtime when the config is absent.
+4. Runtime failures produce actionable Podman/runsc error output.
+5. Current UDS communication, proxy access, and user namespace behavior are preserved.
