@@ -832,10 +832,10 @@ fn collect_required_host_paths(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) 
 fn collect_generated_runtime_socket_dirs(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) {
     for container in &pod.containers {
         for mount in &container.mounts {
-            if let RuntimeMountSource::HostPath { path } = &mount.source {
-                if is_generated_runtime_path(path) {
-                    paths.insert(path.clone());
-                }
+            if let RuntimeMountSource::HostPath { path } = &mount.source
+                && is_generated_runtime_path(path)
+            {
+                paths.insert(path.clone());
             }
         }
     }

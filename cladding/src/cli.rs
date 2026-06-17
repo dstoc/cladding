@@ -1168,10 +1168,10 @@ fn cmd_reload_proxy(context: &Context) -> Result<()> {
 }
 
 fn record_cleanup_result(target: &mut Option<Error>, result: Result<()>) {
-    if let Err(err) = result {
-        if target.is_none() {
-            *target = Some(err);
-        }
+    if let Err(err) = result
+        && target.is_none()
+    {
+        *target = Some(err);
     }
 }
 
