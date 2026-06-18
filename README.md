@@ -97,7 +97,7 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 * `ignore` (optional, default `false`; when true, removes an existing default mount at the same `mount` path instead of replacing it)
 
 If neither `hostPath` nor `volume` is set, a managed empty runtime volume is mounted read-only - this is intended for masking or hiding underlying files.
-Mounts apply to the components named in `targets`. When `targets` is omitted, the mount applies to all enabled execution containers.
+Mounts apply to the components named in `targets`. When `targets` is omitted, the mount applies to the agent and to `nw-sandbox` when it is enabled. `fs-sandbox` only receives custom mounts that explicitly target `fs-sandbox`.
 
 Example:
 
@@ -120,7 +120,7 @@ Example:
 }
 ```
 
-Default mounts (as if expressed via `mounts`):
+Default mounts for the agent and `nw-sandbox` (as if expressed via `mounts`):
 
 ```json
 {
@@ -133,6 +133,8 @@ Default mounts (as if expressed via `mounts`):
   ]
 }
 ```
+
+The `fs-sandbox` default mount set is narrower: `/opt/config` and `/opt/tools` are mounted read-only, plus an internal run socket under `/run/cladding/run/fs-sandbox`. It does not receive `/home/user`, `/home/user/workspace`, or the `.cladding` workspace mask unless custom mounts explicitly target `fs-sandbox`.
 
 Default mounts may be overridden by adding an entry with the same `mount` value, or removed by adding an entry with the same `mount` and `"ignore": true`.
 

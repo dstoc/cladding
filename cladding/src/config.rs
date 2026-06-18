@@ -421,7 +421,7 @@ fn parse_mount_targets(
     execution_config: &ExecutionConfig,
 ) -> Result<Vec<MountTarget>> {
     let Some(raw_targets) = object.get("targets") else {
-        return Ok(execution_config.enabled_mount_targets());
+        return Ok(execution_config.default_mount_targets());
     };
 
     let array = raw_targets.as_array().ok_or_else(|| {
@@ -582,13 +582,10 @@ impl ExecutionConfig {
             .unwrap_or(false)
     }
 
-    pub fn enabled_mount_targets(&self) -> Vec<MountTarget> {
+    pub fn default_mount_targets(&self) -> Vec<MountTarget> {
         let mut targets = vec![MountTarget::Agent];
         if self.nw_sandbox_enabled() {
             targets.push(MountTarget::NwSandbox);
-        }
-        if self.fs_sandbox_enabled() {
-            targets.push(MountTarget::FsSandbox);
         }
         targets
     }
@@ -693,6 +690,10 @@ mod tests {
       "mount": "/workspace",
       "hostPath": "./workspace-fs",
       "targets": ["fs-sandbox"]
+    },
+    {
+      "mount": "/shared",
+      "hostPath": "./shared"
     }
   ]
 }"#,
@@ -706,19 +707,19 @@ mod tests {
         assert!(config.nw_sandbox_enabled());
         assert!(config.fs_sandbox_enabled());
         assert_eq!(
-            config.enabled_mount_targets(),
-            vec![
-                MountTarget::Agent,
-                MountTarget::NwSandbox,
-                MountTarget::FsSandbox
-            ]
+            config.default_mount_targets(),
+            vec![MountTarget::Agent, MountTarget::NwSandbox]
         );
-        assert_eq!(config.mounts.len(), 2);
+        assert_eq!(config.mounts.len(), 3);
         assert_eq!(
             config.mounts[0].targets,
             vec![MountTarget::Agent, MountTarget::NwSandbox]
         );
         assert_eq!(config.mounts[1].targets, vec![MountTarget::FsSandbox]);
+        assert_eq!(
+            config.mounts[2].targets,
+            vec![MountTarget::Agent, MountTarget::NwSandbox]
+        );
     }
 
     #[test]

@@ -243,11 +243,12 @@ Valid target names are the app container names:
 
 The config parser should reject unknown target names. It should also reject targets that are known but disabled for the project, because accepting a mount for a disabled component hides a likely config mistake.
 
-When `targets` is omitted, the mount should apply to all enabled execution containers:
+When `targets` is omitted, the mount should apply to the default execution containers:
 
 - `agent`
 - `nw-sandbox`, if `nw_sandbox` is enabled
-- `fs-sandbox`, if `fs_sandbox` is enabled
+
+`fs-sandbox` should only receive custom mounts that explicitly target `fs-sandbox`.
 
 `mounts[].nwSandboxOnly` should be rejected with a hint:
 
@@ -458,7 +459,7 @@ To add a filesystem sandbox:
 8. The fs-sandbox pod has no proxy env vars, no proxy host alias, and no jail rule allowing outbound traffic to the proxy.
 9. `RUN_REMOTE_SERVER` is not set for any runtime component.
 10. `mounts[].targets` applies mounts only to the named enabled containers.
-11. Omitted `mounts[].targets` applies to all enabled execution containers, including `fs-sandbox` when enabled.
+11. Omitted `mounts[].targets` applies to the agent and enabled `nw-sandbox`, but not to `fs-sandbox`.
 12. Duplicate mount paths are allowed across different targets and rejected within the same target.
 13. `mounts[].nwSandboxOnly` and `mounts[].sandboxOnly` fail validation with migration hints.
 14. Old top-level image keys fail validation with migration hints.

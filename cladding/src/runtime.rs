@@ -449,7 +449,7 @@ fn build_fs_sandbox_pod(
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mut mounts = apply_custom_mounts(
-        build_sandbox_mounts(project_root, custom_mounts),
+        build_fs_sandbox_mounts(project_root, custom_mounts),
         custom_mounts,
         MountTarget::FsSandbox,
     );
@@ -680,6 +680,28 @@ fn build_sandbox_mounts(
             read_only: true,
             source: RuntimeMountSource::GeneratedEmptyMask {
                 path: project_root.join("runtime/empty-mask"),
+            },
+        },
+    ]
+}
+
+fn build_fs_sandbox_mounts(
+    project_root: &Path,
+    _custom_mounts: &[RuntimeCustomMount],
+) -> Vec<RuntimeMount> {
+    vec![
+        RuntimeMount {
+            mount_path: "/opt/config".to_string(),
+            read_only: true,
+            source: RuntimeMountSource::HostPath {
+                path: project_root.join("config"),
+            },
+        },
+        RuntimeMount {
+            mount_path: "/opt/tools".to_string(),
+            read_only: true,
+            source: RuntimeMountSource::HostPath {
+                path: project_root.join("tools"),
             },
         },
     ]
@@ -1020,6 +1042,12 @@ mod tests {
         assert!(mount_paths(fs).contains("/run/cladding/run/fs-sandbox"));
         assert!(mount_paths(proxy_bridge).contains("/run/cladding/proxy/agent"));
         assert!(mount_paths(proxy_bridge).contains("/run/cladding/proxy/nw-sandbox"));
+        let fs_mounts = mount_paths(fs);
+        assert!(fs_mounts.contains("/opt/config"));
+        assert!(fs_mounts.contains("/opt/tools"));
+        assert!(!fs_mounts.contains("/home/user"));
+        assert!(!fs_mounts.contains("/home/user/workspace"));
+        assert!(!fs_mounts.contains("/home/user/workspace/.cladding"));
 
         for container in [&spec.proxy.containers[1], agent, nw, fs] {
             assert!(

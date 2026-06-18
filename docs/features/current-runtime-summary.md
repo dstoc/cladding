@@ -52,7 +52,8 @@ The proxy bridge sidecar uses the proxy socket directories. The agent uses the p
 The embedded config templates are copied into `config/`, the embedded scripts into `scripts/`, and the embedded binaries into `tools/bin/`.
 
 ## Mounts
-The current runtime mounts the following built-in paths where applicable:
+The current runtime mounts the following built-in paths for the agent and
+`nw-sandbox` where applicable:
 
 - `/opt/config`
 - `/opt/scripts` on the proxy pod
@@ -60,5 +61,8 @@ The current runtime mounts the following built-in paths where applicable:
 - `/home/user`
 - `/home/user/workspace`
 - `/home/user/workspace/.cladding` as a generated empty mask
+
+The `fs-sandbox` default mount set is limited to read-only `/opt/config`,
+read-only `/opt/tools`, and its internal run socket.
 
 Custom mounts are applied through the direct runtime builder rather than through kube YAML.

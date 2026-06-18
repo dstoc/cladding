@@ -132,8 +132,9 @@ Valid targets are:
 - `nw-sandbox`
 - `fs-sandbox`
 
-When `targets` is omitted, the mount applies to all enabled execution
-components. This includes `fs-sandbox` when it is enabled.
+When `targets` is omitted, the mount applies to the agent and to `nw-sandbox`
+when it is enabled. `fs-sandbox` only receives mounts that explicitly target
+`fs-sandbox`.
 
 Duplicate `mount` paths are now checked per target, so the same container path
 can be backed by different host paths in different components:
