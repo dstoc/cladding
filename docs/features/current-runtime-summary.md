@@ -20,12 +20,14 @@ This file is the quick reference for the current Cladding runtime.
 Cladding creates one root runtime socket directory and per-component subdirectories:
 
 - `.cladding/runtime/sockets`
+- `.cladding/runtime/sockets/agent/inject`
 - `.cladding/runtime/sockets/proxy/agent`
 - `.cladding/runtime/sockets/proxy/nw-sandbox`
 - `.cladding/runtime/sockets/run/nw-sandbox`
 - `.cladding/runtime/sockets/run/fs-sandbox`
 
 The proxy bridge sidecar uses the proxy socket directories. The agent uses the proxy socket for outbound HTTP proxying and the sandbox run sockets when the corresponding sandboxes are enabled. The nw-sandbox and fs-sandbox containers bind their own run sockets via `MCP_BIND_UDS`.
+`cladding inject` binds the agent inject socket under `/run/cladding/agent/inject` so a foreground command can reach one host endpoint for its duration.
 
 ## `use_runsc`
 - `use_runsc` applies only to the standalone execution containers.
@@ -38,6 +40,11 @@ The proxy bridge sidecar uses the proxy socket directories. The agent uses the p
 - `cladding expose <container-port> [host-port]` runs in the foreground on the host.
 - It binds `127.0.0.1:<host-port>` and forwards through `cladding run socat ...` to `127.0.0.1:<container-port>` inside the agent container.
 - No persistent expose containers are created.
+
+## Blocking `cladding inject`
+- `cladding inject <host-endpoint> [container-port]` runs in the foreground on the host.
+- It mounts `/run/cladding/agent/inject` into the agent side and forwards the requested agent-local port to a host-reachable endpoint for the lifetime of that command.
+- Bare ports resolve to host `localhost`; explicit `host:port` targets are temporary exceptions for that command.
 
 ## Config and scripts materialization
 `cladding init` materializes the project layout under `.cladding`:

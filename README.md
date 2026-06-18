@@ -86,6 +86,16 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 
   `cladding expose` runs in the foreground. Stop it with Ctrl-C.
 
+* Temporarily make one host-reachable TCP endpoint available on agent localhost while the project is running:
+
+  ```bash
+  cladding inject 11434
+  cladding inject 5432 15432
+  cladding inject db.internal:5432 15432
+  ```
+
+  `cladding inject <host-endpoint> [containerport]` runs in the foreground and stops with Ctrl-C. A bare port such as `11434` maps agent `127.0.0.1:11434` to host `127.0.0.1:11434`. A second port changes only the agent-side listener, so `cladding inject 5432 15432` maps agent `127.0.0.1:15432` to host `127.0.0.1:5432`. An explicit `host:port` is resolved from the host and should be treated as a deliberate temporary exception for that one endpoint, not general host networking.
+
 ### Configuring mounts
 
 `cladding.json` supports a `mounts` list. Each entry has:
@@ -206,6 +216,7 @@ cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the agent container
 cladding run-with-scissors [--target nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] [cmd] # run a command in an enabled sandbox container
 cladding expose <containerport> [hostport] # block while forwarding localhost hostport to agent containerport
+cladding inject <host-endpoint> [containerport] # block while forwarding agent localhost containerport to a host-reachable endpoint
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding logs [agent|proxy|nw-sandbox|fs-sandbox] [podman logs args...] # view container logs
 cladding down         # stop managed containers and the proxy pod

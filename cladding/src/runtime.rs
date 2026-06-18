@@ -6,10 +6,12 @@ const LOOPBACK: &str = "127.0.0.1";
 const NETWORK_DEFAULT: &str = "default";
 const NETWORK_NONE: &str = "none";
 const RUNTIME_SOCKET_DIR: &str = "runtime/sockets";
+const RUNTIME_AGENT_INJECT_SOCKET_DIR: &str = "agent/inject";
 const RUNTIME_PROXY_AGENT_SOCKET_DIR: &str = "proxy/agent";
 const RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR: &str = "proxy/nw-sandbox";
 const RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR: &str = "run/nw-sandbox";
 const RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR: &str = "run/fs-sandbox";
+const RUNTIME_AGENT_INJECT_MOUNT_PATH: &str = "/run/cladding/agent/inject";
 const RUNTIME_PROXY_AGENT_MOUNT_PATH: &str = "/run/cladding/proxy/agent";
 const RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/proxy/nw-sandbox";
 const RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/nw-sandbox";
@@ -238,6 +240,11 @@ fn build_agent_pod(
         custom_mounts,
         MountTarget::Agent,
     );
+    mounts.extend(build_scoped_socket_mount(
+        project_root,
+        RUNTIME_AGENT_INJECT_SOCKET_DIR,
+        RUNTIME_AGENT_INJECT_MOUNT_PATH,
+    ));
     mounts.extend(build_scoped_socket_mount(
         project_root,
         RUNTIME_PROXY_AGENT_SOCKET_DIR,
@@ -1043,6 +1050,7 @@ mod tests {
         assert_eq!(env_value(fs, "MCP_BIND_ADDR"), None);
 
         assert!(mount_paths(agent).contains("/run/cladding/proxy/agent"));
+        assert!(mount_paths(agent).contains("/run/cladding/agent/inject"));
         assert!(mount_paths(agent).contains("/run/cladding/run/nw-sandbox"));
         assert!(mount_paths(agent).contains("/run/cladding/run/fs-sandbox"));
         assert!(mount_paths(nw).contains("/run/cladding/proxy/nw-sandbox"));
@@ -1214,6 +1222,7 @@ mod tests {
             generated.into_iter().collect::<BTreeSet<_>>(),
             [
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets"),
+                PathBuf::from("/tmp/project/.cladding/runtime/sockets/agent/inject"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/agent"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/run/nw-sandbox"),
