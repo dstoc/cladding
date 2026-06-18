@@ -521,7 +521,7 @@ fn build_proxy_mounts(
             mount_path: "/opt/scripts".to_string(),
             read_only: true,
             source: RuntimeMountSource::HostPath {
-                path: project_root.join("scripts"),
+                path: project_root.join("runtime/scripts"),
             },
         },
     ]
@@ -842,7 +842,7 @@ fn collect_required_host_paths(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) 
     for container in &pod.containers {
         for mount in &container.mounts {
             if let RuntimeMountSource::HostPath { path } = &mount.source {
-                if is_generated_runtime_path(path) {
+                if is_generated_runtime_mount_path(path) {
                     continue;
                 }
                 paths.insert(path.clone());
@@ -855,7 +855,7 @@ fn collect_generated_runtime_socket_dirs(pod: &RuntimePod, paths: &mut BTreeSet<
     for container in &pod.containers {
         for mount in &container.mounts {
             if let RuntimeMountSource::HostPath { path } = &mount.source
-                && is_generated_runtime_path(path)
+                && is_generated_runtime_socket_path(path)
             {
                 paths.insert(path.clone());
             }
@@ -863,11 +863,19 @@ fn collect_generated_runtime_socket_dirs(pod: &RuntimePod, paths: &mut BTreeSet<
     }
 }
 
-fn is_generated_runtime_path(path: &Path) -> bool {
+fn is_generated_runtime_mount_path(path: &Path) -> bool {
+    is_runtime_child_path(path, "sockets") || is_runtime_child_path(path, "scripts")
+}
+
+fn is_generated_runtime_socket_path(path: &Path) -> bool {
+    is_runtime_child_path(path, "sockets")
+}
+
+fn is_runtime_child_path(path: &Path, child_name: &str) -> bool {
     let mut saw_runtime = false;
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
-            if saw_runtime && name == "sockets" {
+            if saw_runtime && name == child_name {
                 return true;
             }
             saw_runtime = name == "runtime";
@@ -1077,7 +1085,6 @@ mod tests {
                 PathBuf::from("/tmp/project/.cladding/.."),
                 PathBuf::from("/tmp/project/.cladding/config"),
                 PathBuf::from("/tmp/project/.cladding/home"),
-                PathBuf::from("/tmp/project/.cladding/scripts"),
                 PathBuf::from("/tmp/project/.cladding/tools"),
             ]
             .into_iter()
@@ -1157,7 +1164,7 @@ mod tests {
         let required = spec.required_host_paths();
 
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/config")));
-        assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/scripts")));
+        assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/scripts")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/tools")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/home")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/..")));

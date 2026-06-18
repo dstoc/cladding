@@ -6,8 +6,8 @@
 
 ## Current Implementation
 1. Proxy engine: Squid (`docker.io/ubuntu/squid:latest`) in `<name>-proxy`.
-2. Startup entrypoint: `scripts/proxy_startup.sh`.
-3. Runtime config template: `config-template/proxy/squid.conf`.
+2. Startup entrypoint: `.cladding/runtime/scripts/proxy_startup.sh`, generated from `scripts/proxy_startup.sh`.
+3. Runtime config template: `.cladding/runtime/scripts/proxy/squid.conf`, generated from `scripts/proxy/squid.conf`.
 4. Domain allow-lists:
 - `config/agent/domains.lst`
 - `config/nw_sandbox/domains.lst`
@@ -16,7 +16,7 @@
 
 ## Runtime Flow
 1. `./up` starts pods on `secure_net`.
-2. `<name>-proxy` startup script copies `/opt/config/proxy/squid.conf` to `/tmp/squid_generated.conf`.
+2. `<name>-proxy` startup script copies `/opt/scripts/proxy/squid.conf` to `/tmp/squid_generated.conf`.
 3. Startup reads container DNS nameserver and injects it into generated Squid config.
 4. Startup points Squid at the network-sandbox domain list when network sandboxing is enabled, otherwise it uses an empty temp file.
 5. Startup launches Squid in foreground with `/tmp/squid_generated.conf`.

@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 use cladding::assets::{
-    materialize_config, materialize_scripts, materialize_scripts_force, scripts_files,
-    scripts_top_level_entries, write_embedded_tools,
+    materialize_config, materialize_runtime_scripts, scripts_files, tool_files,
+    write_embedded_tools,
 };
 use cladding::config::{
     ExecutionConfig, MountTarget, load_cladding_config_v2, write_default_cladding_config,
@@ -48,12 +48,7 @@ enum CommandSpec {
     /// Build local container images
     Build,
     /// Create config and default mount directories
-    Init {
-        name: Option<String>,
-        /// Overwrite scripts with embedded defaults
-        #[arg(long)]
-        update_scripts: bool,
-    },
+    Init { name: Option<String> },
     /// Check requirements
     Check,
     /// Start the system
@@ -186,10 +181,7 @@ pub fn run() -> Result<()> {
 
     match command {
         CommandSpec::Build => cmd_build(&context),
-        CommandSpec::Init {
-            name,
-            update_scripts,
-        } => cmd_init(&context, name.as_deref(), update_scripts),
+        CommandSpec::Init { name } => cmd_init(&context, name.as_deref()),
         CommandSpec::Check => cmd_check(&context),
         CommandSpec::Up { verbose } => cmd_up(&context, verbose),
         CommandSpec::Down { verbose } => cmd_down(&context, verbose),
@@ -321,10 +313,9 @@ fn build_default_image(
     podman_build_image(image, host_uid, host_gid)
 }
 
-fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool) -> Result<()> {
+fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
     let project_root = &context.project_root;
     let config_dir = project_root.join("config");
-    let scripts_dir = project_root.join("scripts");
     let home_dir = project_root.join("home");
     let tools_dir = project_root.join("tools");
     let runtime_dir = project_root.join("runtime");
@@ -360,14 +351,6 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
 
     materialize_config(&config_dir)?;
 
-    if scripts_dir.exists() || path_is_symlink(&scripts_dir) {
-        println!("scripts already exists: {}", scripts_dir.display());
-    } else {
-        fs::create_dir_all(&scripts_dir)
-            .with_context(|| format!("failed to create {}", scripts_dir.display()))?;
-        println!("initialized: {}", scripts_dir.display());
-    }
-
     if home_dir.exists() || path_is_symlink(&home_dir) {
         println!("home already exists: {}", home_dir.display());
     } else {
@@ -400,12 +383,6 @@ fn cmd_init(context: &Context, name_override: Option<&str>, update_scripts: bool
         println!("initialized: {}", empty_mask_dir.display());
     }
 
-    if update_scripts {
-        materialize_scripts_force(&scripts_dir)?;
-    } else {
-        materialize_scripts(&scripts_dir)?;
-    }
-
     if cladding_config_preexisting {
         println!(
             "cladding config already exists: {}",
@@ -429,19 +406,15 @@ fn cmd_check(context: &Context) -> Result<()> {
     let legacy_config_entries_present = check_legacy_config_entries(context);
     let config = load_cladding_config_v2(&context.project_root)?;
 
+    warn_obsolete_generated_paths(context);
     check_required_binaries(context, &config)?;
     check_runsc_runtime(&config, false)?;
     check_required_config_files(context, &config)?;
-    check_required_scripts_files(context)?;
-    let script_mismatch = report_script_mismatch(context, "error")?;
     check_required_images(&config, false)?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     check_required_host_paths(&spec)?;
     if legacy_config_entries_present {
         return Err(Error::message("legacy config entries"));
-    }
-    if script_mismatch {
-        return Err(Error::message("script files differ from embedded version"));
     }
     println!("check: ok");
     Ok(())
@@ -465,6 +438,28 @@ fn check_required_binaries(context: &Context, config: &ExecutionConfig) -> Resul
             eprintln!("missing: tools/bin/{name} ({})", path.display());
             eprintln!("hint: run cladding build");
             missing = true;
+            continue;
+        }
+
+        let Some((_, embedded)) = tool_files()
+            .into_iter()
+            .find(|(embedded_name, _)| *embedded_name == name)
+        else {
+            continue;
+        };
+
+        match fs::read(&path) {
+            Ok(existing) if existing == embedded => {}
+            Ok(_) => {
+                eprintln!("outdated: tools/bin/{name} ({})", path.display());
+                eprintln!("hint: run cladding build");
+                missing = true;
+            }
+            Err(err) => {
+                eprintln!("error: failed to read tools/bin/{name} ({err})");
+                eprintln!("hint: run cladding build");
+                missing = true;
+            }
         }
     }
 
@@ -478,7 +473,6 @@ fn check_required_binaries(context: &Context, config: &ExecutionConfig) -> Resul
 fn check_required_config_files(context: &Context, config: &ExecutionConfig) -> Result<()> {
     let dst = context.project_root.join("config");
     let mut missing = false;
-    let mut invalid = false;
 
     for name in required_config_entries(config) {
         let path = dst.join(name);
@@ -496,29 +490,7 @@ fn check_required_config_files(context: &Context, config: &ExecutionConfig) -> R
         return Err(Error::message("missing config files"));
     }
 
-    if proxy_squid_config_uses_legacy_network_identity(&dst.join("proxy/squid.conf"))? {
-        eprintln!("error: config/proxy/squid.conf uses the old source-IP proxy identity model");
-        eprintln!(
-            "hint: remove config/proxy/squid.conf and run 'cladding init' to regenerate it from the current template"
-        );
-        invalid = true;
-    }
-
-    if invalid {
-        return Err(Error::message("invalid config files"));
-    }
-
     Ok(())
-}
-
-fn proxy_squid_config_uses_legacy_network_identity(path: &Path) -> Result<bool> {
-    let contents =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(contents.contains("/tmp/agent_ips.lst")
-        || contents.contains("/tmp/nw_sandbox_ips.lst")
-        || contents.contains("acl agent_src src")
-        || contents.contains("acl nw_sandbox_src src")
-        || contents.contains("http_port 8080"))
 }
 
 fn check_legacy_config_entries(context: &Context) -> bool {
@@ -541,11 +513,7 @@ fn check_legacy_config_entries(context: &Context) -> bool {
 }
 
 fn required_config_entries(config: &ExecutionConfig) -> Vec<&'static str> {
-    let mut entries = vec![
-        "agent/domains.lst",
-        "agent/host_ports.lst",
-        "proxy/squid.conf",
-    ];
+    let mut entries = vec!["agent/domains.lst", "agent/host_ports.lst"];
     if config.nw_sandbox_enabled() {
         entries.push("nw_sandbox");
         entries.push("nw_sandbox/domains.lst");
@@ -566,39 +534,23 @@ fn legacy_config_entries() -> &'static [(&'static str, &'static str)] {
         ("agent_domains.lst", "agent/domains.lst"),
         ("agent_host_ports.lst", "agent/host_ports.lst"),
         ("nw_sandbox_domains.lst", "nw_sandbox/domains.lst"),
-        ("squid.conf", "proxy/squid.conf"),
     ]
 }
 
-fn check_required_scripts_files(context: &Context) -> Result<()> {
-    let dst = context.project_root.join("scripts");
-    let mut missing = false;
-
-    for name in scripts_top_level_entries() {
-        let path = dst.join(&name);
-        if !path.exists() {
-            eprintln!("missing: scripts/{name} ({})", path.display());
-            missing = true;
+fn warn_obsolete_generated_paths(context: &Context) {
+    for rel_path in ["scripts", "config/proxy/squid.conf", "config/squid.conf"] {
+        let path = context.project_root.join(rel_path);
+        if path.exists() || path_is_symlink(&path) {
+            eprintln!(
+                "warning: {rel_path} is no longer used and can be removed ({})",
+                path.display()
+            );
         }
     }
-
-    if missing {
-        eprintln!(
-            "hint: run cladding init, or add missing top-level entries into {}",
-            dst.display()
-        );
-        return Err(Error::message("missing scripts files"));
-    }
-
-    Ok(())
 }
 
-fn warn_on_script_mismatch(context: &Context) -> Result<()> {
-    report_script_mismatch(context, "warning").map(|_| ())
-}
-
-fn report_script_mismatch(context: &Context, level: &str) -> Result<bool> {
-    let dst = context.project_root.join("scripts");
+fn report_runtime_script_mismatch(context: &Context, level: &str) -> Result<bool> {
+    let dst = context.project_root.join("runtime/scripts");
     let mut mismatched = false;
 
     for (rel_path, contents) in scripts_files() {
@@ -607,21 +559,21 @@ fn report_script_mismatch(context: &Context, level: &str) -> Result<bool> {
             Ok(existing) => {
                 if existing != contents {
                     eprintln!(
-                        "{level}: scripts/{} differs from embedded version",
+                        "{level}: runtime/scripts/{} differs from embedded version",
                         rel_path.display()
                     );
                     mismatched = true;
                 }
             }
             Err(_) => {
-                eprintln!("{level}: scripts/{} is missing", rel_path.display());
+                eprintln!("{level}: runtime/scripts/{} is missing", rel_path.display());
                 mismatched = true;
             }
         }
     }
 
     if mismatched {
-        eprintln!("hint: run cladding init --update-scripts to re-materialize scripts");
+        eprintln!("hint: run cladding up to regenerate runtime scripts");
     }
 
     Ok(mismatched)
@@ -778,6 +730,7 @@ fn project_runtime_status(
 
 fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
+    materialize_runtime_scripts(&context.project_root)?;
     let status = project_runtime_status(context, &config, verbose)?;
 
     if status.already_running {
@@ -792,8 +745,8 @@ fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     check_runsc_runtime(&config, verbose)?;
     check_required_images(&config, verbose)?;
     check_required_config_files(context, &config)?;
-    check_required_scripts_files(context)?;
-    warn_on_script_mismatch(context)?;
+    warn_obsolete_generated_paths(context);
+    let _ = report_runtime_script_mismatch(context, "warning")?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
@@ -1326,6 +1279,11 @@ mod tests {
     }
 
     #[test]
+    fn init_update_scripts_fails_to_parse() {
+        assert!(Cli::try_parse_from(["cladding", "init", "--update-scripts"]).is_err());
+    }
+
+    #[test]
     fn build_blocking_expose_command_places_ports_and_bind() {
         let cmd = build_blocking_expose_command(
             Path::new("/tmp/cladding test/bin's/cladding"),
@@ -1376,11 +1334,7 @@ mod tests {
         let config = execution_config(false, false, Vec::new());
         assert_eq!(
             required_config_entries(&config),
-            vec![
-                "agent/domains.lst",
-                "agent/host_ports.lst",
-                "proxy/squid.conf"
-            ]
+            vec!["agent/domains.lst", "agent/host_ports.lst"]
         );
     }
 
@@ -1392,7 +1346,6 @@ mod tests {
             vec![
                 "agent/domains.lst",
                 "agent/host_ports.lst",
-                "proxy/squid.conf",
                 "fs_sandbox",
                 "fs_sandbox/main.rego",
             ]
@@ -1428,7 +1381,6 @@ mod tests {
                 ("agent_domains.lst", "agent/domains.lst"),
                 ("agent_host_ports.lst", "agent/host_ports.lst"),
                 ("nw_sandbox_domains.lst", "nw_sandbox/domains.lst"),
-                ("squid.conf", "proxy/squid.conf"),
             ]
         );
     }
@@ -1438,7 +1390,7 @@ mod tests {
         let temp = create_temp_dir("legacy-config-paths");
         let config_dir = temp.join("config");
         fs::create_dir_all(&config_dir).expect("create config dir");
-        fs::write(config_dir.join("squid.conf"), "legacy").expect("write legacy config");
+        fs::write(config_dir.join("cli_domains.lst"), "legacy").expect("write legacy config");
 
         let context = Context { project_root: temp };
 
@@ -1446,34 +1398,9 @@ mod tests {
     }
 
     #[test]
-    fn proxy_squid_config_detects_legacy_network_identity() {
-        let temp = create_temp_dir("legacy-proxy-config");
-        let config = temp.join("squid.conf");
-        fs::write(
-            &config,
-            r#"http_port 8080
-acl agent_src src "/tmp/agent_ips.lst"
-"#,
-        )
-        .expect("write config");
-
-        assert!(proxy_squid_config_uses_legacy_network_identity(&config).expect("check config"));
-
-        fs::write(
-            &config,
-            r#"http_port 127.0.0.1:3128 name=agent
-acl from_agent myportname agent
-"#,
-        )
-        .expect("write config");
-
-        assert!(!proxy_squid_config_uses_legacy_network_identity(&config).expect("check config"));
-    }
-
-    #[test]
-    fn report_script_mismatch_detects_drift() {
-        let temp = create_temp_dir("script-mismatch");
-        let scripts_dir = temp.join("scripts");
+    fn report_runtime_script_mismatch_detects_drift() {
+        let temp = create_temp_dir("runtime-script-mismatch");
+        let scripts_dir = temp.join("runtime/scripts");
         fs::create_dir_all(&scripts_dir).expect("create scripts dir");
         for (rel_path, contents) in scripts_files() {
             let path = scripts_dir.join(rel_path);
@@ -1484,15 +1411,35 @@ acl from_agent myportname agent
         }
 
         let context = Context { project_root: temp };
-        assert!(!report_script_mismatch(&context, "error").expect("check scripts"));
+        assert!(!report_runtime_script_mismatch(&context, "error").expect("check scripts"));
 
         fs::write(
-            context.project_root.join("scripts/proxy_startup.sh"),
+            context
+                .project_root
+                .join("runtime/scripts/proxy_startup.sh"),
             b"#!/bin/sh\nexit 0\n",
         )
         .expect("modify script");
 
-        assert!(report_script_mismatch(&context, "error").expect("check scripts"));
+        assert!(report_runtime_script_mismatch(&context, "error").expect("check scripts"));
+    }
+
+    #[test]
+    fn check_required_binaries_detects_outdated_tools() {
+        let temp = create_temp_dir("outdated-tools");
+        let bin_dir = temp.join("tools/bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        write_embedded_tools(&bin_dir).expect("write tools");
+
+        let context = Context {
+            project_root: temp.clone(),
+        };
+        let config = execution_config(true, true, Vec::new());
+
+        assert!(check_required_binaries(&context, &config).is_ok());
+
+        fs::write(bin_dir.join("mcp-run"), b"stale").expect("stale tool");
+        assert!(check_required_binaries(&context, &config).is_err());
     }
 
     #[test]

@@ -55,7 +55,8 @@ In short: the agent cannot freely access the network; users can run sandbox comm
   - `.cladding/config/agent/host_ports.lst` (template: [`config-template/agent/host_ports.lst`](config-template/agent/host_ports.lst))
   - `.cladding/config/nw_sandbox/domains.lst` and Rego policies when `nw_sandbox` is enabled (template dir: [`config-template/nw_sandbox/`](config-template/nw_sandbox/))
   - `.cladding/config/fs_sandbox/` Rego policies when `fs_sandbox` is enabled (template dir: [`config-template/fs_sandbox/`](config-template/fs_sandbox/))
-  - `.cladding/config/proxy/squid.conf` (template: [`config-template/proxy/squid.conf`](config-template/proxy/squid.conf))
+
+  Generated proxy scripts and Squid runtime config are refreshed under `.cladding/runtime/scripts/` by `cladding up`; they are not user-editable config.
 
 * Build images and refresh host-mounted binaries (`mcp-run`, `run-remote`, and sandbox helper wrappers) in `.cladding/tools/bin`:
 
@@ -199,7 +200,7 @@ The filesystem sandbox has no proxy socket mount and no proxy environment by def
 ## Useful Commands
 
 ```bash
-cladding init [name] [--update-scripts]  # initialize or update .cladding and config
+cladding init [name]  # initialize .cladding and config
 cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the agent container

@@ -43,20 +43,21 @@ The proxy bridge sidecar uses the proxy socket directories. The agent uses the p
 `cladding init` materializes the project layout under `.cladding`:
 
 - `config/`
-- `scripts/`
 - `home/`
 - `tools/`
 - `runtime/`
 - `runtime/empty-mask/`
 
-The embedded config templates are copied into `config/`, the embedded scripts into `scripts/`, and the embedded binaries into `tools/bin/`.
+The embedded config templates are copied into `config/`. Generated runtime
+scripts are refreshed under `runtime/scripts/` by `cladding up`, and embedded
+binaries are written into `tools/bin/` by `cladding build`.
 
 ## Mounts
 The current runtime mounts the following built-in paths for the agent and
 `nw-sandbox` where applicable:
 
 - `/opt/config`
-- `/opt/scripts` on the proxy pod
+- `/opt/scripts` on the proxy pod, sourced from `.cladding/runtime/scripts`
 - `/opt/tools`
 - `/home/user`
 - `/home/user/workspace`

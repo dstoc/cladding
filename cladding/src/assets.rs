@@ -36,27 +36,6 @@ pub fn config_top_level_entries() -> Vec<String> {
     names.into_iter().collect()
 }
 
-pub fn scripts_top_level_entries() -> Vec<String> {
-    let mut names = std::collections::BTreeSet::new();
-    for entry in SCRIPTS_DIR.dirs() {
-        if let Some(component) = entry.path().components().next()
-            && let std::path::Component::Normal(name) = component
-            && let Some(name) = name.to_str()
-        {
-            names.insert(name.to_string());
-        }
-    }
-    for entry in SCRIPTS_DIR.files() {
-        if let Some(component) = entry.path().components().next()
-            && let std::path::Component::Normal(name) = component
-            && let Some(name) = name.to_str()
-        {
-            names.insert(name.to_string());
-        }
-    }
-    names.into_iter().collect()
-}
-
 pub fn materialize_config(base_dir: &Path) -> Result<()> {
     materialize_dir(base_dir, &CONFIG_DIR, false)
 }
@@ -69,32 +48,32 @@ pub fn materialize_scripts_force(base_dir: &Path) -> Result<()> {
     materialize_dir(base_dir, &SCRIPTS_DIR, true)
 }
 
+pub fn materialize_runtime_scripts(base_dir: &Path) -> Result<()> {
+    materialize_scripts_force(&base_dir.join("runtime/scripts"))
+}
+
 pub fn scripts_files() -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     collect_dir_files(&SCRIPTS_DIR, &mut files);
     files
 }
 
+pub fn tool_files() -> Vec<(&'static str, &'static [u8])> {
+    vec![
+        ("mcp-run", MCP_RUN_BIN),
+        ("run-remote", RUN_REMOTE_BIN),
+        ("run-in-nw-sandbox", RUN_IN_NW_SANDBOX),
+        ("run-in-fs-sandbox", RUN_IN_FS_SANDBOX),
+    ]
+}
+
 pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
-    let mcp_run_path = bin_dir.join("mcp-run");
-    fs::write(&mcp_run_path, MCP_RUN_BIN)
-        .with_context(|| format!("failed to write {}", mcp_run_path.display()))?;
-    set_permissions(&mcp_run_path, 0o755)?;
-
-    let run_remote_path = bin_dir.join("run-remote");
-    fs::write(&run_remote_path, RUN_REMOTE_BIN)
-        .with_context(|| format!("failed to write {}", run_remote_path.display()))?;
-    set_permissions(&run_remote_path, 0o755)?;
-
-    let run_in_nw_sandbox_path = bin_dir.join("run-in-nw-sandbox");
-    fs::write(&run_in_nw_sandbox_path, RUN_IN_NW_SANDBOX)
-        .with_context(|| format!("failed to write {}", run_in_nw_sandbox_path.display()))?;
-    set_permissions(&run_in_nw_sandbox_path, 0o755)?;
-
-    let run_in_fs_sandbox_path = bin_dir.join("run-in-fs-sandbox");
-    fs::write(&run_in_fs_sandbox_path, RUN_IN_FS_SANDBOX)
-        .with_context(|| format!("failed to write {}", run_in_fs_sandbox_path.display()))?;
-    set_permissions(&run_in_fs_sandbox_path, 0o755)?;
+    for (name, contents) in tool_files() {
+        let path = bin_dir.join(name);
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        set_permissions(&path, 0o755)?;
+    }
 
     Ok(())
 }
