@@ -47,7 +47,13 @@ The current policy allows only these mutations:
   `/home/user/workspace/code/<repo>`
 - `jj workspace update-stale`, from an agent workspace under
   `/home/user/workspace/code-agent`
-- `jj commit -m <message>`, from an agent workspace under
+- `jj commit -m <message> [<fileset>...]`, from an agent workspace under
+  `/home/user/workspace/code-agent`
+- `jj squash [--from <revset>] [--to <revset>] [<fileset>...]`, from an
+  agent workspace under `/home/user/workspace/code-agent`
+- `jj edit <revset>`, from an agent workspace under
+  `/home/user/workspace/code-agent`
+- `jj abandon [<revset>...]`, from an agent workspace under
   `/home/user/workspace/code-agent`
 - `jj util snapshot`, from an agent workspace under
   `/home/user/workspace/code-agent`
@@ -156,6 +162,11 @@ cannot rewrite the user's default workspace ancestry or any bookmarked change.
 That boundary is part of the review model. Agent-produced changes remain local
 until the user decides to accept them, for example by reviewing the diff,
 building or running the code locally, moving bookmarks, or pushing to a remote.
+Within that boundary, non-immutable revisions are considered mutable working
+area. Commands that accept revsets, such as `jj squash`, `jj edit`, and
+`jj abandon`, can target unbookmarked mutable revisions selected by those
+revsets. Users should bookmark or otherwise make important local work immutable
+before exposing it to this model.
 
 Configure cladding to enable `fs-sandbox` and bind the workspace mounts and jj-config in `.cladding/cladding.json`:
 

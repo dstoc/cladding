@@ -42,10 +42,36 @@ shape.
 
   ```sh
   cd /home/user/workspace/code-agent/<workspace>
-  jj commit -m "message"
+  jj commit -m "message" [<fileset>...]
+  ```
+
+- Squash changes within the agent workspace:
+
+  ```sh
+  cd /home/user/workspace/code-agent/<workspace>
+  jj squash [--from <revset>] [--to <revset>] [<fileset>...]
+  ```
+
+- Edit a specific revision from the agent workspace:
+
+  ```sh
+  cd /home/user/workspace/code-agent/<workspace>
+  jj edit <revset>
+  ```
+
+- Abandon one or more revisions from the agent workspace:
+
+  ```sh
+  cd /home/user/workspace/code-agent/<workspace>
+  jj abandon [<revset>...]
   ```
 
 Do not use other mutating `jj` commands.
+
+The immutable-heads configuration is the protection boundary. An agent cannot
+rewrite ancestry of `default@`, bookmarked changes, or remote-bookmarked
+changes, but non-immutable unbookmarked revisions are considered mutable
+working area and may be changed by allowed revset-based commands.
 
 ## Read-Only jj Operations
 
