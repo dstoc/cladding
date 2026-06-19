@@ -35,6 +35,7 @@ jj workspace update-stale
 jj commit -m "message" [<fileset>...]
 jj desc [<revset>] -m "description"
 jj describe [<revset>] -m "description"
+jj new [<revset>]
 jj squash [--from <revset>] [--to <revset>] [<fileset>...]
 jj edit <revset>
 jj abandon [<revset>...]
