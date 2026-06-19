@@ -279,7 +279,6 @@ pub async fn serve(config: AppConfig) -> Result<(), AppError> {
     validate_default_cwd(&config.default_cwd)?;
 
     let policy_engine = Arc::new(PolicyEngine::from_sources(config.policy_dir.clone()));
-    policy_engine.start_watcher();
 
     tracing::info!(
         bind_addr = ?config.bind_addr,

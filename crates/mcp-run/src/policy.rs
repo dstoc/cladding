@@ -1,15 +1,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::RwLock;
+use std::time::SystemTime;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use regorus::Engine as RegoEngine;
 use thiserror::Error;
 
 const REGO_ALLOW_QUERY: &str = "data.sandbox.main.allow";
-const WATCHER_DEBOUNCE_MS: u64 = 250;
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
@@ -62,6 +59,7 @@ struct PolicySnapshot {
     mode: PolicyMode,
     rego: Option<RegoPolicy>,
     deny_reason: Option<String>,
+    fingerprint: Option<PolicyFingerprint>,
 }
 
 impl PolicySnapshot {
@@ -70,14 +68,16 @@ impl PolicySnapshot {
             mode: PolicyMode::DenyAll,
             rego: None,
             deny_reason: Some(details.into()),
+            fingerprint: None,
         }
     }
 
-    fn from_rego(policy: RegoPolicy) -> Self {
+    fn from_rego(policy: RegoPolicy, fingerprint: Option<PolicyFingerprint>) -> Self {
         Self {
             mode: PolicyMode::Rego,
             rego: Some(policy),
             deny_reason: None,
+            fingerprint,
         }
     }
 }
@@ -87,11 +87,22 @@ struct PolicySources {
     policy_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PolicyFingerprint {
+    files: Vec<PolicyFileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PolicyFileFingerprint {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
 #[derive(Debug)]
 pub struct PolicyEngine {
-    state: Arc<RwLock<PolicySnapshot>>,
+    state: RwLock<PolicySnapshot>,
     sources: PolicySources,
-    watcher_started: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -127,9 +138,8 @@ impl PolicyEngine {
         };
 
         Self {
-            state: Arc::new(RwLock::new(snapshot)),
+            state: RwLock::new(snapshot),
             sources,
-            watcher_started: AtomicBool::new(false),
         }
     }
 
@@ -137,9 +147,8 @@ impl PolicyEngine {
     pub fn from_rego_for_tests(modules: &[(&str, &str)]) -> Self {
         let rego = load_rego_modules(modules).expect("failed to load Rego test modules");
         Self {
-            state: Arc::new(RwLock::new(PolicySnapshot::from_rego(rego))),
+            state: RwLock::new(PolicySnapshot::from_rego(rego, None)),
             sources: PolicySources { policy_dir: None },
-            watcher_started: AtomicBool::new(false),
         }
     }
 
@@ -160,6 +169,8 @@ impl PolicyEngine {
         env: &BTreeMap<String, String>,
         cwd: &str,
     ) -> Result<(), ValidationError> {
+        self.reload_if_changed();
+
         let snapshot = self
             .state
             .read()
@@ -227,73 +238,36 @@ impl PolicyEngine {
         }
     }
 
-    pub fn start_watcher(self: &Arc<Self>) {
-        let policy_dir = match self.sources.policy_dir.clone() {
-            Some(dir) => dir,
-            None => return,
+    fn reload_if_changed(&self) {
+        let Some(policy_dir) = self.sources.policy_dir.as_ref() else {
+            return;
         };
 
-        if self
-            .watcher_started
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
+        let current = match fingerprint_policy_dir(policy_dir) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                tracing::error!(error = %error, "policy fingerprint failed; deny-all activated");
+                *self
+                    .state
+                    .write()
+                    .expect("policy state write lock poisoned") =
+                    PolicySnapshot::deny_all(error.to_string());
+                return;
+            }
+        };
+
+        let previous = self
+            .state
+            .read()
+            .expect("policy state read lock poisoned")
+            .fingerprint
+            .clone();
+
+        if previous.as_ref() == Some(&current) {
             return;
         }
 
-        let (reload_signal_tx, mut reload_signal_rx) = tokio::sync::mpsc::unbounded_channel();
-        let engine_for_reload = Arc::clone(self);
-        tokio::spawn(async move {
-            while reload_signal_rx.recv().await.is_some() {
-                tokio::time::sleep(Duration::from_millis(WATCHER_DEBOUNCE_MS)).await;
-                while reload_signal_rx.try_recv().is_ok() {}
-                engine_for_reload.reload();
-            }
-        });
-
-        std::thread::spawn(move || {
-            let (event_tx, event_rx) =
-                std::sync::mpsc::channel::<Result<notify::Event, notify::Error>>();
-            let mut watcher = match RecommendedWatcher::new(event_tx, notify::Config::default()) {
-                Ok(watcher) => watcher,
-                Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        policy_dir = %policy_dir.display(),
-                        "failed to initialize policy watcher; deny-all activated",
-                    );
-                    let _ = reload_signal_tx.send(());
-                    return;
-                }
-            };
-
-            if let Err(error) = watcher.watch(&policy_dir, RecursiveMode::Recursive) {
-                tracing::error!(
-                    error = %error,
-                    policy_dir = %policy_dir.display(),
-                    "failed to watch policy directory; deny-all activated",
-                );
-                let _ = reload_signal_tx.send(());
-                return;
-            }
-
-            tracing::info!(policy_dir = %policy_dir.display(), "policy watcher started");
-
-            while let Ok(event_result) = event_rx.recv() {
-                match event_result {
-                    Ok(event) => {
-                        tracing::info!(kind = ?event.kind, paths = ?event.paths, "policy change detected");
-                        let _ = reload_signal_tx.send(());
-                    }
-                    Err(error) => {
-                        tracing::error!(error = %error, "policy watcher event error; deny-all activated");
-                        let _ = reload_signal_tx.send(());
-                    }
-                }
-            }
-
-            tracing::warn!("policy watcher channel closed");
-        });
+        self.reload();
     }
 }
 
@@ -303,9 +277,9 @@ fn load_policy_snapshot(sources: &PolicySources) -> Result<PolicySnapshot, Strin
         .as_ref()
         .ok_or_else(|| "POLICY_DIR is not configured".to_string())?;
 
-    let rego = load_rego_policy_dir(policy_dir)
+    let (rego, fingerprint) = load_rego_policy_dir(policy_dir)
         .map_err(|error| format!("rego policy load failed: {error}"))?;
-    Ok(PolicySnapshot::from_rego(rego))
+    Ok(PolicySnapshot::from_rego(rego, Some(fingerprint)))
 }
 
 #[cfg(test)]
@@ -323,7 +297,7 @@ fn load_rego_modules(modules: &[(&str, &str)]) -> Result<RegoPolicy, String> {
     })
 }
 
-fn load_rego_policy_dir(policy_dir: &Path) -> Result<RegoPolicy, String> {
+fn load_rego_policy_dir(policy_dir: &Path) -> Result<(RegoPolicy, PolicyFingerprint), String> {
     let mut files = Vec::new();
     collect_rego_files(policy_dir, &mut files).map_err(|error| {
         format!(
@@ -340,6 +314,8 @@ fn load_rego_policy_dir(policy_dir: &Path) -> Result<RegoPolicy, String> {
     }
 
     files.sort();
+    let fingerprint = fingerprint_rego_files(&files)
+        .map_err(|error| format!("failed fingerprinting policy files: {error}"))?;
 
     let mut engine = RegoEngine::new();
     for file in &files {
@@ -351,10 +327,13 @@ fn load_rego_policy_dir(policy_dir: &Path) -> Result<RegoPolicy, String> {
             .map_err(|error| format!("failed compiling '{}': {error}", file.display()))?;
     }
 
-    Ok(RegoPolicy {
-        engine,
-        module_count: files.len(),
-    })
+    Ok((
+        RegoPolicy {
+            engine,
+            module_count: files.len(),
+        },
+        fingerprint,
+    ))
 }
 
 fn collect_rego_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
@@ -373,6 +352,47 @@ fn collect_rego_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), std::io:
     }
 
     Ok(())
+}
+
+fn fingerprint_policy_dir(policy_dir: &Path) -> Result<PolicyFingerprint, String> {
+    let mut files = Vec::new();
+    collect_rego_files(policy_dir, &mut files).map_err(|error| {
+        format!(
+            "failed reading policy directory '{}': {error}",
+            policy_dir.display()
+        )
+    })?;
+
+    if files.is_empty() {
+        return Err(format!(
+            "no .rego files found under policy directory '{}'",
+            policy_dir.display()
+        ));
+    }
+
+    files.sort();
+    fingerprint_rego_files(&files).map_err(|error| {
+        format!(
+            "failed fingerprinting policy directory '{}': {error}",
+            policy_dir.display()
+        )
+    })
+}
+
+fn fingerprint_rego_files(files: &[PathBuf]) -> Result<PolicyFingerprint, std::io::Error> {
+    let mut fingerprint_files = Vec::with_capacity(files.len());
+    for file in files {
+        let metadata = std::fs::metadata(file)?;
+        fingerprint_files.push(PolicyFileFingerprint {
+            path: file.clone(),
+            len: metadata.len(),
+            modified: metadata.modified()?,
+        });
+    }
+
+    Ok(PolicyFingerprint {
+        files: fingerprint_files,
+    })
 }
 
 #[cfg(test)]
@@ -431,8 +451,7 @@ allow if {
 
     #[test]
     fn jj_example_policy_bundle_preserves_allowed_command_shapes() {
-        let policy_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/jj/policy");
+        let policy_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/jj/policy");
         assert!(policy_dir.exists(), "missing jj example policy bundle");
 
         let engine = PolicyEngine::from_sources(Some(policy_dir));
@@ -480,7 +499,11 @@ allow if {
                 .is_err()
         );
 
-        let commit = vec!["commit".to_string(), "-m".to_string(), "message".to_string()];
+        let commit = vec![
+            "commit".to_string(),
+            "-m".to_string(),
+            "message".to_string(),
+        ];
         assert!(
             engine
                 .validate_invocation(
@@ -664,6 +687,54 @@ allow if {
                     "/",
                 )
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn validation_reloads_policy_when_files_change() {
+        let dir = tempdir().expect("temp rego dir");
+        write_rego_bundle(dir.path(), "echo");
+
+        let engine = PolicyEngine::from_sources(Some(dir.path().to_path_buf()));
+        assert_eq!(engine.mode(), PolicyMode::Rego);
+        assert!(
+            engine
+                .validate_invocation(
+                    "echo",
+                    "/usr/bin/echo",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    &[],
+                    &BTreeMap::new(),
+                    "/",
+                )
+                .is_ok()
+        );
+
+        write_rego_bundle(dir.path(), "printf");
+
+        assert!(
+            engine
+                .validate_invocation(
+                    "printf",
+                    "/usr/bin/printf",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    &[],
+                    &BTreeMap::new(),
+                    "/",
+                )
+                .is_ok()
+        );
+        assert!(
+            engine
+                .validate_invocation(
+                    "echo",
+                    "/usr/bin/echo",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    &[],
+                    &BTreeMap::new(),
+                    "/",
+                )
+                .is_err()
         );
     }
 
