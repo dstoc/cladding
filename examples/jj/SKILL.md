@@ -19,60 +19,26 @@ or switch to the corresponding `code-agent/` workspace.
 
 ## Allowed jj Mutations
 
-Only a narrow set of `jj` mutations is currently allowed:
+Only a narrow set of `jj` mutations is currently allowed. Use these exact
+argument forms; the allowlist is strict about argument order and shape.
 
-Use these exact argument forms. The allowlist is strict about argument order and
-shape.
+From `/home/user/workspace/code/<repo>`:
 
-- Create an agent workspace from a canonical project:
+```sh
+jj workspace add ../../code-agent/<workspace> --name agent-<workspace>
+```
 
-  ```sh
-  cd /home/user/workspace/code/<repo>
-  jj workspace add ../../code-agent/<workspace> --name agent-<workspace>
-  ```
+From `/home/user/workspace/code-agent/<workspace>`:
 
-- Update stale workspace metadata from an agent workspace:
-
-  ```sh
-  cd /home/user/workspace/code-agent/<workspace>
-  jj workspace update-stale
-  ```
-
-- Commit the current agent workspace change:
-
-  ```sh
-  cd /home/user/workspace/code-agent/<workspace>
-  jj commit -m "message" [<fileset>...]
-  ```
-
-- Update a change description:
-
-  ```sh
-  cd /home/user/workspace/code-agent/<workspace>
-  jj desc [<revset>] -m "description"
-  jj describe [<revset>] -m "description"
-  ```
-
-- Squash changes within the agent workspace:
-
-  ```sh
-  cd /home/user/workspace/code-agent/<workspace>
-  jj squash [--from <revset>] [--to <revset>] [<fileset>...]
-  ```
-
-- Edit a specific revision from the agent workspace:
-
-  ```sh
-  cd /home/user/workspace/code-agent/<workspace>
-  jj edit <revset>
-  ```
-
-- Abandon one or more revisions from the agent workspace:
-
-  ```sh
-  cd /home/user/workspace/code-agent/<workspace>
-  jj abandon [<revset>...]
-  ```
+```sh
+jj workspace update-stale
+jj commit -m "message" [<fileset>...]
+jj desc [<revset>] -m "description"
+jj describe [<revset>] -m "description"
+jj squash [--from <revset>] [--to <revset>] [<fileset>...]
+jj edit <revset>
+jj abandon [<revset>...]
+```
 
 Do not use other mutating `jj` commands.
 
