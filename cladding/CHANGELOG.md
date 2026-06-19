@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/dstoc/cladding/compare/v0.2.2...v0.3.0) (2026-06-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* replace expose with a blocking version that uses socat
+* switch to UDS-based network isolation
+
+### Features
+
+* add `cladding inject` ([9556019](https://github.com/dstoc/cladding/commit/9556019c311e7a9c8f57e700d9819fa2f9468b84))
+* add option to use the gvisor runtime ([26ab196](https://github.com/dstoc/cladding/commit/26ab19689b21cf547f8ab01fb6a2cae4b61d457a))
+* add verbose mode to cladding up/down ([edee308](https://github.com/dstoc/cladding/commit/edee3087f527120a7fd3c7e06f280077fd224783))
+* Implement inline UDS bridges for cladding runtime ([f08f5fb](https://github.com/dstoc/cladding/commit/f08f5fb5d4bf27dabfd9b3b97a9a261754952044))
+* Move generated scripts into runtime state ([90596bd](https://github.com/dstoc/cladding/commit/90596bd1a0856db5c96ef2638f5b10fbe12c07c0))
+* replace expose with a blocking version that uses socat ([2d2171d](https://github.com/dstoc/cladding/commit/2d2171dd57f702c7bbca6c0520139084c036a2b8))
+* Restrict fs-sandbox default filesystem access ([e2434a6](https://github.com/dstoc/cladding/commit/e2434a6bd30ec4bfc1725a94c0393bb5e12abc32))
+* switch from kube play to direct podman runtime ([d88f2bc](https://github.com/dstoc/cladding/commit/d88f2bc9559a04d1c9f9752315b391d22fb6b31d))
+* switch to UDS-based network isolation ([f83bd75](https://github.com/dstoc/cladding/commit/f83bd75fd4aa99da7b350c931279aea4390f824e))
+
 ## [0.2.2](https://github.com/dstoc/cladding/compare/v0.2.1...v0.2.2) (2026-06-15)
 
 
