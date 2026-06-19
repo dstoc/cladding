@@ -115,7 +115,17 @@ mode = "rw"
 Place the [`jj` wrapper](./jj) in `.cladding/tools/bin` and the real `jj` as
 `/opt/tools/bin/real_jj`.
 
-Place the [`real_jj` rego policy](./jj.rego) in `.cladding/config/fs_sandbox/`.
+Copy the Rego policy bundle in [`policy/`](./policy) into
+`.cladding/config/fs_sandbox/`:
+
+```sh
+cp -R examples/jj/policy/. .cladding/config/fs_sandbox/
+```
+
+The bundle follows the same router pattern as the default sandbox policies.
+`main.rego` routes by executable, `real_jj.rego` routes by `jj` subcommand, and
+each file under `policy/jj/` allows one `jj` command shape. To add another
+mutation later, add or copy in another command file under `policy/jj/`.
 
 Define a `jj` config in `jj-config/config.toml`:
 

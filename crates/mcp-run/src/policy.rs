@@ -430,6 +430,100 @@ allow if {
     }
 
     #[test]
+    fn jj_example_policy_bundle_preserves_allowed_command_shapes() {
+        let policy_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/jj/policy");
+        assert!(policy_dir.exists(), "missing jj example policy bundle");
+
+        let engine = PolicyEngine::from_sources(Some(policy_dir));
+        assert_eq!(engine.mode(), PolicyMode::Rego);
+
+        let hash = "0000000000000000000000000000000000000000000000000000000000000000";
+        let empty_env = BTreeMap::new();
+        let workspace_add = vec![
+            "workspace".to_string(),
+            "add".to_string(),
+            "../../code-agent/foo".to_string(),
+            "--name".to_string(),
+            "agent-foo".to_string(),
+        ];
+        assert!(
+            engine
+                .validate_invocation(
+                    "real_jj",
+                    "/opt/tools/bin/real_jj",
+                    hash,
+                    &workspace_add,
+                    &empty_env,
+                    "/home/user/workspace/code/cladding",
+                )
+                .is_ok()
+        );
+
+        let mismatched_workspace_name = vec![
+            "workspace".to_string(),
+            "add".to_string(),
+            "../../code-agent/foo".to_string(),
+            "--name".to_string(),
+            "agent-bar".to_string(),
+        ];
+        assert!(
+            engine
+                .validate_invocation(
+                    "real_jj",
+                    "/opt/tools/bin/real_jj",
+                    hash,
+                    &mismatched_workspace_name,
+                    &empty_env,
+                    "/home/user/workspace/code/cladding",
+                )
+                .is_err()
+        );
+
+        let commit = vec!["commit".to_string(), "-m".to_string(), "message".to_string()];
+        assert!(
+            engine
+                .validate_invocation(
+                    "real_jj",
+                    "/opt/tools/bin/real_jj",
+                    hash,
+                    &commit,
+                    &empty_env,
+                    "/home/user/workspace/code-agent/foo",
+                )
+                .is_ok()
+        );
+
+        let snapshot = vec!["util".to_string(), "snapshot".to_string()];
+        assert!(
+            engine
+                .validate_invocation(
+                    "real_jj",
+                    "/opt/tools/bin/real_jj",
+                    hash,
+                    &snapshot,
+                    &empty_env,
+                    "/home/user/workspace/code-agent/foo",
+                )
+                .is_ok()
+        );
+
+        let status = vec!["status".to_string()];
+        assert!(
+            engine
+                .validate_invocation(
+                    "real_jj",
+                    "/opt/tools/bin/real_jj",
+                    hash,
+                    &status,
+                    &empty_env,
+                    "/home/user/workspace/code-agent/foo",
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
     fn invalid_startup_policy_is_deny_all() {
         let dir = tempdir().expect("temp rego dir");
         std::fs::write(
