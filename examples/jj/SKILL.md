@@ -45,6 +45,14 @@ shape.
   jj commit -m "message" [<fileset>...]
   ```
 
+- Update a change description:
+
+  ```sh
+  cd /home/user/workspace/code-agent/<workspace>
+  jj desc [<revset>] -m "description"
+  jj describe [<revset>] -m "description"
+  ```
+
 - Squash changes within the agent workspace:
 
   ```sh

@@ -49,6 +49,9 @@ The current policy allows only these mutations:
   `/home/user/workspace/code-agent`
 - `jj commit -m <message> [<fileset>...]`, from an agent workspace under
   `/home/user/workspace/code-agent`
+- `jj desc [<revset>] -m <description>` or
+  `jj describe [<revset>] -m <description>`, from an agent workspace under
+  `/home/user/workspace/code-agent`
 - `jj squash [--from <revset>] [--to <revset>] [<fileset>...]`, from an
   agent workspace under `/home/user/workspace/code-agent`
 - `jj edit <revset>`, from an agent workspace under

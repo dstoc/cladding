@@ -18,3 +18,8 @@ valid_jj_operands(operands) if {
         valid_jj_operand(operand)
     }
 }
+
+valid_jj_message(message) if {
+    count(message) > 0
+    count(message) <= 4096
+}
