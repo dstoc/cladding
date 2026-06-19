@@ -23,7 +23,9 @@ views mounted at the same path inside different cladding components:
 The `jj` executable visible to the agent is a wrapper. It first asks the
 `fs-sandbox` whether the requested `real_jj` invocation is allowed. Allowlisted
 mutation commands run inside the `fs-sandbox`. Other commands fall back to local
-`real_jj` in the agent environment after a best-effort sandbox snapshot.
+`real_jj --ignore-working-copy` in the agent environment after a required
+sandbox snapshot. If the sandbox snapshot fails, the fallback command fails
+instead of showing stale working-copy state.
 
 The wrapper is not a complete read-only command classifier by itself. The
 boundary comes from the combination of the wrapper policy, the portal mounts,
@@ -33,12 +35,11 @@ repository store still points back to the protected project under `code`.
 Denied `jj` mutations therefore do not get the `fs-sandbox`'s writable view of
 the canonical repository state.
 
-Agent workspaces have mutable local `.jj` working-copy metadata so `jj` can
-write checkout state and lock files. Their shared repository storage remains
-under the protected project in `code` and is only writable to allowlisted
-sandboxed commands. This is still an area worth further investigation,
-especially around how `.jj/repo` pointers behave if an agent deliberately
-modifies workspace metadata.
+Agent workspaces have immutable local `.jj` metadata in the normal agent view.
+This prevents the agent from rewriting workspace metadata such as `.jj/repo`.
+The wrapper snapshots the working copy through the `fs-sandbox` first, then
+uses `--ignore-working-copy` for local fallback commands so read-only
+inspection does not need to create lock files or update `.jj` locally.
 
 The current policy allows only these mutations:
 
@@ -78,7 +79,7 @@ workspace-portal edit --workspace workspace
 ```toml
 version = 1
 readlink = true
-immutable_segments = []
+immutable_segments = [".jj"]
 
 [entries."code"]
 target = "/home/YOU/dev/code"
