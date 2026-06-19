@@ -15,6 +15,14 @@ allow if {
     input.args[4] == concat("", ["agent-", dir])
 }
 
+allow if {
+    agent_code_workspace_cwd
+
+    count(input.args) == 2
+    input.args[0] == "workspace"
+    input.args[1] == "update-stale"
+}
+
 code_repo_cwd if {
     startswith(input.cwd, concat("", [code_root, "/"]))
     parts := split(input.cwd, "/")

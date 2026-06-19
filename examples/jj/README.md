@@ -45,6 +45,8 @@ The current policy allows only these mutations:
 
 - `jj workspace add ../../code-agent/<repo> --name agent-<repo>`, from
   `/home/user/workspace/code/<repo>`
+- `jj workspace update-stale`, from an agent workspace under
+  `/home/user/workspace/code-agent`
 - `jj commit -m <message>`, from an agent workspace under
   `/home/user/workspace/code-agent`
 - `jj util snapshot`, from an agent workspace under

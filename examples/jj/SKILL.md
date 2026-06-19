@@ -31,6 +31,13 @@ shape.
   jj workspace add ../../code-agent/<workspace> --name agent-<workspace>
   ```
 
+- Update stale workspace metadata from an agent workspace:
+
+  ```sh
+  cd /home/user/workspace/code-agent/<workspace>
+  jj workspace update-stale
+  ```
+
 - Commit the current agent workspace change:
 
   ```sh
