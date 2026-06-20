@@ -10,12 +10,6 @@
     ".": {
       "release-type": "rust",
       "package-name": "cladding"
-    },
-    "crates/mcp-run": {
-      "release-type": "rust",
-      "package-name": "mcp-run",
-      "skip-github-release": true,
-      "skip-changelog": true
     }
   }
 }
