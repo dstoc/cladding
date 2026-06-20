@@ -69,6 +69,23 @@ fn build_proxy_pod(
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mounts = build_proxy_mounts(project_root, custom_mounts);
+    let mut env = vec![
+        RuntimeEnvVar {
+            name: "CLADDING_PROXY_NAME".to_string(),
+            value: names.proxy_name.clone(),
+        },
+        RuntimeEnvVar {
+            name: "CLADDING_AGENT_NAME".to_string(),
+            value: names.agent_name.clone(),
+        },
+    ];
+    if let Some(nw_name) = names.nw_sandbox_name.as_ref() {
+        env.push(RuntimeEnvVar {
+            name: "CLADDING_SANDBOX_NAME".to_string(),
+            value: nw_name.clone(),
+        });
+    }
+
     let mut containers = vec![RuntimeContainer {
         name: runtime_container_name(&names.proxy_name),
         image: "docker.io/ubuntu/squid:latest".to_string(),
@@ -77,16 +94,7 @@ fn build_proxy_pod(
             "/opt/scripts/proxy_startup.sh".to_string(),
         ],
         workdir: None,
-        env: vec![
-            RuntimeEnvVar {
-                name: "CLADDING_PROXY_NAME".to_string(),
-                value: names.proxy_name.clone(),
-            },
-            RuntimeEnvVar {
-                name: "CLADDING_AGENT_NAME".to_string(),
-                value: names.agent_name.clone(),
-            },
-        ],
+        env,
         mounts,
         ports: vec![3128, 3129],
         stdin: false,
@@ -558,6 +566,7 @@ mod tests {
         );
 
         let proxy_bridge = container(&spec.proxy, "demo-proxy-bridge");
+        let proxy = container(&spec.proxy, "demo-proxy-instance");
         let agent = container(&spec.agent, "demo-agent-instance");
         let nw = container(
             spec.nw_sandbox.as_ref().expect("nw pod"),
@@ -598,6 +607,10 @@ mod tests {
                 .any(|arg| arg.contains("proxy/nw-sandbox/proxy.sock"))
         );
         assert!(nw.command.iter().any(|arg| arg.contains("mcp-run")));
+        assert_eq!(
+            env_value(proxy, "CLADDING_SANDBOX_NAME"),
+            Some("demo-nw-sandbox")
+        );
         assert_eq!(
             env_value(agent, "RUN_NW_SANDBOX_SOCKET"),
             Some("/run/cladding/run/nw-sandbox/run.sock")
@@ -674,6 +687,7 @@ mod tests {
     fn build_runtime_spec_only_includes_enabled_components() {
         let config = execution_config(true, false, Vec::new(), false);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+        let proxy = container(&spec.proxy, "demo-proxy-instance");
         let agent = container(&spec.agent, "demo-agent-instance");
 
         assert!(spec.nw_sandbox.is_some());
@@ -715,6 +729,10 @@ mod tests {
                 .all(|container| container.name != "demo-proxy-nw-sandbox-proxy-socket")
         );
         assert_eq!(
+            env_value(proxy, "CLADDING_SANDBOX_NAME"),
+            Some("demo-nw-sandbox")
+        );
+        assert_eq!(
             env_value(agent, "RUN_NW_SANDBOX_SOCKET"),
             Some("/run/cladding/run/nw-sandbox/run.sock")
         );
@@ -727,10 +745,12 @@ mod tests {
     fn runtime_spec_threads_use_runsc_flag() {
         let config = execution_config(false, false, Vec::new(), true);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+        let proxy = container(&spec.proxy, "demo-proxy-instance");
 
         assert!(spec.use_runsc);
         assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
         assert!(!spec.proxy.use_runsc);
+        assert_eq!(env_value(proxy, "CLADDING_SANDBOX_NAME"), None);
         assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert!(spec.agent.use_runsc);
         assert!(spec.agent.userns_keep_id);
