@@ -1,17 +1,5 @@
 # Changelog
 
-## [0.3.1](https://github.com/dstoc/cladding/compare/v0.3.0...v0.3.1) (2026-06-20)
-
-
-### Features
-
-* **container:** update node base, pi, remove gemini-cli ([642e610](https://github.com/dstoc/cladding/commit/642e6107320927370539bb96a681718d5cd24a94))
-
-
-### Miscellaneous Chores
-
-* force release 0.3.1 ([c0bbefe](https://github.com/dstoc/cladding/commit/c0bbefea51f5eb05b86ea1a79e5b0a3d96ff8068))
-
 ## [0.3.0](https://github.com/dstoc/cladding/compare/v0.2.2...v0.3.0) (2026-06-19)
 
 
