@@ -7,7 +7,7 @@
   "include-component-in-tag": false,
   "plugins": ["cargo-workspace"],
   "packages": {
-    "cladding": {
+    ".": {
       "release-type": "rust",
       "package-name": "cladding"
     }
