@@ -5,10 +5,10 @@ use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir.parent().unwrap();
+    let workspace_root = manifest_dir.as_path();
 
-    println!("cargo:rerun-if-changed=../crates/mcp-run/Cargo.toml");
-    println!("cargo:rerun-if-changed=../crates/mcp-run/src");
+    println!("cargo:rerun-if-changed=crates/mcp-run/Cargo.toml");
+    println!("cargo:rerun-if-changed=crates/mcp-run/src");
     println!("cargo:rerun-if-env-changed=CLADDING_MCP_RUN_BIN");
     println!("cargo:rerun-if-env-changed=CLADDING_RUN_REMOTE_BIN");
 

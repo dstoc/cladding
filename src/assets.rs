@@ -5,10 +5,10 @@ use include_dir::{Dir, include_dir};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CONTAINERFILE_CLADDING: &str = include_str!("../../Containerfile.cladding");
+const CONTAINERFILE_CLADDING: &str = include_str!("../Containerfile.cladding");
 
-static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../config-template");
-static SCRIPTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../scripts");
+static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/config-template");
+static SCRIPTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/scripts");
 
 static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
 static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
