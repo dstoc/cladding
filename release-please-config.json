@@ -5,7 +5,6 @@
   "draft": true,
   "force-tag-creation": true,
   "include-component-in-tag": false,
-  "plugins": ["cargo-workspace"],
   "packages": {
     ".": {
       "release-type": "rust",
