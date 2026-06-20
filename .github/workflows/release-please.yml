@@ -3,6 +3,12 @@ name: release-please
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing draft release tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -16,10 +22,11 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs['cladding--release_created'] }}
-      tag_name: ${{ steps.release.outputs['cladding--tag_name'] }}
+      release_created: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.release.outputs.release_created }}
+      tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
