@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.3](https://github.com/dstoc/cladding/compare/v0.3.2...v0.3.3) (2026-06-20)
+
+
+### Features
+
+* add cladding --version ([69416ae](https://github.com/dstoc/cladding/commit/69416ae21e0a118b1a67462f1f64c9ac08464811))
+
+
+### Bug Fixes
+
+* pass sandbox name to proxy runtime ([62cedb7](https://github.com/dstoc/cladding/commit/62cedb7aca19206411dbfb007d3ed8224e7e79d4))
+* quote nw sandbox squid domain file ([7497c9d](https://github.com/dstoc/cladding/commit/7497c9d067a8a1986dba2ead74f1f36d54a24010))
+* restore missing codex install in containerfile ([231da85](https://github.com/dstoc/cladding/commit/231da85147798503e9bbcfcb19bcfdb1f93b383c))
+
 ## [0.3.2](https://github.com/dstoc/cladding/compare/v0.3.0...v0.3.2) (2026-06-20)
 
 
