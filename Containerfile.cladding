@@ -1,4 +1,4 @@
-FROM node:24.14-trixie-slim
+FROM node:24.17-trixie-slim
 
 ARG USERNAME=user
 ARG UID=1000
@@ -34,13 +34,11 @@ RUN userdel node && if getent group $GID; then \
     && chsh -s /bin/zsh $USERNAME
 
 ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-codex.json
-ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-gemini.json
-ADD https://registry.npmjs.org/@mariozechner/pi-coding-agent /tmp/npm-pi.json
+ADD https://registry.npmjs.org/@earendil-works/pi-coding-agent /tmp/npm-pi.json
 ADD https://registry.npmjs.org/@anthropic-ai/claude-code /tmp/npm-claude.json
 
-RUN npm install -g @openai/codex@latest \
-    && npm install -g @google/gemini-cli@latest \
-    && npm install -g @mariozechner/pi-coding-agent \
+RUN npm install -g @google/gemini-cli@latest \
+    && npm install -g @earendil-works/pi-coding-agent \
     && npm install -g @anthropic-ai/claude-code
 
 USER $USERNAME
