@@ -2,9 +2,7 @@ use cladding::config::ExecutionConfig;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-const VERSION: &str = jj_version::jj_version!(
-    fallback = env!("CARGO_PKG_VERSION"),
-);
+const VERSION: &str = jj_version::jj_version!(fallback = env!("CARGO_PKG_VERSION"),);
 
 #[derive(Parser)]
 #[command(name = "cladding", version = VERSION, arg_required_else_help = true)]
