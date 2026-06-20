@@ -11,6 +11,7 @@ doctest = false
 anyhow = "1.0.102"
 clap = { version = "4.5.33", features = ["derive"] }
 include_dir = "0.7.4"
+jj-version = "0.1.1"
 libc = "0.2.170"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

@@ -2,8 +2,12 @@ use cladding::config::ExecutionConfig;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+const VERSION: &str = jj_version::jj_version!(
+    fallback = env!("CARGO_PKG_VERSION"),
+);
+
 #[derive(Parser)]
-#[command(name = "cladding", arg_required_else_help = true)]
+#[command(name = "cladding", version = VERSION, arg_required_else_help = true)]
 pub(super) struct Cli {
     #[arg(long, global = true, hide = true)]
     pub(super) project_root: Option<PathBuf>,
@@ -204,6 +208,15 @@ impl LogsTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_flag_displays_version() {
+        let err = match Cli::try_parse_from(["cladding", "--version"]) {
+            Ok(_) => panic!("version should exit"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
 
     #[test]
     fn expose_container_port_parses() {
