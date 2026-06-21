@@ -7,6 +7,8 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.as_path();
 
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=crates/mcp-run/Cargo.toml");
     println!("cargo:rerun-if-changed=crates/mcp-run/src");
     println!("cargo:rerun-if-env-changed=CLADDING_MCP_RUN_BIN");
@@ -37,7 +39,7 @@ fn main() {
     } else {
         let crate_dir = workspace_root.join("crates").join("mcp-run");
         let target_dir = crate_dir.join("target");
-        build_with_podman(&crate_dir);
+        build_with_podman(workspace_root);
         (target_dir, None)
     };
 
@@ -90,21 +92,21 @@ fn build_locally(workspace_root: &Path, target_dir: &Path, target: Option<&str>)
     }
 }
 
-fn build_with_podman(crate_dir: &Path) {
+fn build_with_podman(workspace_root: &Path) {
     let status = Command::new("podman")
         .arg("run")
         .arg("--rm")
         .arg("-e")
-        .arg("CARGO_TARGET_DIR=/work/mcp-run/target")
+        .arg("CARGO_TARGET_DIR=/work/crates/mcp-run/target")
         .arg("-v")
-        .arg(format!("{}:/work/mcp-run", crate_dir.display()))
+        .arg(format!("{}:/work", workspace_root.display()))
         .arg("-w")
-        .arg("/work/mcp-run")
+        .arg("/work")
         .arg("docker.io/library/rust:latest")
         .arg("cargo")
         .arg("build")
         .arg("--manifest-path")
-        .arg("/work/mcp-run/Cargo.toml")
+        .arg("/work/Cargo.toml")
         .arg("--release")
         .arg("--locked")
         .arg("--bin")
