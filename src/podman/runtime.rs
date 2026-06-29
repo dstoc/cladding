@@ -12,6 +12,33 @@ use super::command::{
 };
 use super::mounts::{append_mount_args, generated_empty_mask_dirs};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeResource {
+    pub kind: &'static str,
+    pub name: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeInventory {
+    expected_count: usize,
+    pub resources: Vec<RuntimeResource>,
+}
+
+impl RuntimeInventory {
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+    }
+
+    pub fn is_fully_running(&self) -> bool {
+        self.resources.len() == self.expected_count
+            && self
+                .resources
+                .iter()
+                .all(|resource| resource.state.eq_ignore_ascii_case("running"))
+    }
+}
+
 /// Direct runtime helpers for creating and cleaning up Podman resources.
 pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     prepare_runtime_socket_dirs(spec)?;
@@ -32,6 +59,40 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn runtime_inventory(spec: &RuntimeSpec, verbose: bool) -> Result<RuntimeInventory> {
+    let mut expected_count = 0;
+    let mut resources = Vec::new();
+
+    for pod in runtime_pods(spec) {
+        if pod.placement == RuntimePlacement::Pod {
+            expected_count += 1;
+            if let Some(state) = inspect_resource_state("pod", &pod.name, verbose)? {
+                resources.push(RuntimeResource {
+                    kind: "pod",
+                    name: pod.name.clone(),
+                    state,
+                });
+            }
+        }
+
+        for container in &pod.containers {
+            expected_count += 1;
+            if let Some(state) = inspect_resource_state("container", &container.name, verbose)? {
+                resources.push(RuntimeResource {
+                    kind: "container",
+                    name: container.name.clone(),
+                    state,
+                });
+            }
+        }
+    }
+
+    Ok(RuntimeInventory {
+        expected_count,
+        resources,
+    })
+}
+
 pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     for pod in runtime_pods(spec) {
         for container in &pod.containers {
@@ -43,6 +104,55 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn inspect_resource_state(kind: &'static str, name: &str, verbose: bool) -> Result<Option<String>> {
+    let mut exists_cmd = build_resource_exists_command(kind, name);
+    trace_command(&exists_cmd, verbose);
+    let exists = exists_cmd
+        .status()
+        .with_context(|| format!("failed to check whether {kind} exists: {name}"))?;
+
+    match exists.code() {
+        Some(1) => return Ok(None),
+        Some(0) => {}
+        _ => {
+            eprintln!("error: failed to check whether {kind} exists: {name}");
+            return Err(crate::error::Error::message(format!(
+                "podman {kind} exists failed"
+            )));
+        }
+    }
+
+    let mut inspect_cmd = build_resource_inspect_command(kind, name);
+    trace_command(&inspect_cmd, verbose);
+    let output = inspect_cmd
+        .output()
+        .with_context(|| format!("failed to inspect {kind}: {name}"))?;
+    if !output.status.success() {
+        return ensure_success_output(&output, "podman inspect").map(|_| None);
+    }
+
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
+}
+
+fn build_resource_exists_command(kind: &str, name: &str) -> Command {
+    let mut cmd = Command::new("podman");
+    cmd.args([kind, "exists", name]);
+    cmd
+}
+
+fn build_resource_inspect_command(kind: &str, name: &str) -> Command {
+    let mut cmd = Command::new("podman");
+    let format = if kind == "pod" {
+        "{{.State}}"
+    } else {
+        "{{.State.Status}}"
+    };
+    cmd.args([kind, "inspect", "--format", format, name]);
+    cmd
 }
 
 pub fn pod_create(use_runsc: bool, pod: &RuntimePod, verbose: bool) -> Result<()> {
@@ -322,10 +432,77 @@ mod tests {
             .collect()
     }
 
+    fn successful_status() -> std::process::ExitStatus {
+        std::process::Command::new("true").status().expect("status")
+    }
+
+    #[test]
+    fn runtime_inventory_requires_every_resource_to_be_running() {
+        let complete = RuntimeInventory {
+            expected_count: 2,
+            resources: vec![
+                RuntimeResource {
+                    kind: "pod",
+                    name: "demo-proxy".to_string(),
+                    state: "Running".to_string(),
+                },
+                RuntimeResource {
+                    kind: "container",
+                    name: "demo-agent-instance".to_string(),
+                    state: "running".to_string(),
+                },
+            ],
+        };
+        assert!(complete.is_fully_running());
+
+        let partial = RuntimeInventory {
+            expected_count: 2,
+            resources: complete.resources[..1].to_vec(),
+        };
+        assert!(!partial.is_fully_running());
+
+        let stopped = RuntimeInventory {
+            expected_count: 2,
+            resources: vec![
+                complete.resources[0].clone(),
+                RuntimeResource {
+                    state: "exited".to_string(),
+                    ..complete.resources[1].clone()
+                },
+            ],
+        };
+        assert!(!stopped.is_fully_running());
+    }
+
+    #[test]
+    fn resource_inspection_commands_target_pods_and_containers() {
+        assert_eq!(
+            command_args(&build_resource_exists_command("pod", "demo-proxy")),
+            vec!["pod", "exists", "demo-proxy"]
+        );
+        assert_eq!(
+            command_args(&build_resource_inspect_command("pod", "demo-proxy")),
+            vec!["pod", "inspect", "--format", "{{.State}}", "demo-proxy"]
+        );
+        assert_eq!(
+            command_args(&build_resource_inspect_command(
+                "container",
+                "demo-agent-instance"
+            )),
+            vec![
+                "container",
+                "inspect",
+                "--format",
+                "{{.State.Status}}",
+                "demo-agent-instance"
+            ]
+        );
+    }
+
     #[test]
     fn remove_output_is_missing_container_matches_expected_errors() {
         let output = Output {
-            status: std::process::Command::new("true").status().expect("status"),
+            status: successful_status(),
             stdout: Vec::new(),
             stderr: b"Error: no such container".to_vec(),
         };

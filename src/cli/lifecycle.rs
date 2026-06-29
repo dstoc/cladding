@@ -12,6 +12,7 @@ use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::podman::{
     list_running_projects, podman_build_image, podman_required, runtime_cleanup, runtime_create,
+    runtime_inventory,
 };
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashSet;
@@ -181,13 +182,28 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     let config = load_cladding_config_v2(&context.project_root)?;
     materialize_runtime_scripts(&context.project_root)?;
     let status = project_runtime_status(context, &config, verbose)?;
+    let spec = RuntimeSpec::build(&context.project_root, &config);
+    let inventory = runtime_inventory(&spec, verbose)?;
 
-    if status.already_running {
+    if status.already_running && inventory.is_fully_running() {
         println!(
             "already running: {} ({})",
             config.name, status.current_project_root
         );
         return Ok(());
+    }
+
+    if !inventory.is_empty() {
+        eprintln!(
+            "error: cladding project '{}' has an incomplete or stopped runtime",
+            config.name
+        );
+        eprintln!("existing runtime resources:");
+        for resource in inventory.resources {
+            eprintln!("  {} {} ({})", resource.kind, resource.name, resource.state);
+        }
+        eprintln!("hint: run 'cladding down' before running 'cladding up' again");
+        return Err(Error::message("incomplete or stopped runtime"));
     }
 
     check_required_binaries(context, &config)?;
@@ -196,7 +212,6 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     check_required_config_files(context, &config)?;
     warn_obsolete_generated_paths(context);
     let _ = report_runtime_script_mismatch(context, "warning")?;
-    let spec = RuntimeSpec::build(&context.project_root, &config);
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;
