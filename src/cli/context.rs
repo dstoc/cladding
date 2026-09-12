@@ -17,10 +17,7 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
         if candidate.is_dir() {
             return Some(candidate);
         }
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => return None,
-        }
+        current = current.parent()?;
     }
 }
 
