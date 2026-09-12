@@ -1,6 +1,6 @@
-use super::CONTAINER_WORKSPACE_DIR;
 use super::args::{LogsTarget, RunWithScissorsTarget};
 use super::context::{Context, project_runtime_status};
+use super::{CONTAINER_HOME_DIR, CONTAINER_WORKSPACE_DIR};
 use anyhow::Context as _;
 use cladding::config::{ExecutionConfig, MountTarget, load_cladding_config_v2};
 use cladding::error::{Error, Result};
@@ -292,33 +292,16 @@ fn resolve_container_workdir(
         .filter(|path| path.starts_with(project_dir))
     {
         let custom_workspace_host_path = canonicalize_path(&custom_workspace_host_path)?;
-        let workdir_rel = cwd.strip_prefix(&custom_workspace_host_path).map_err(|_| {
-            eprintln!(
-                "error: could not determine current path relative to configured workspace hostPath ({}): {}",
-                custom_workspace_host_path.display(),
-                cwd.display()
-            );
-            eprintln!(
-                "hint: run cladding from {} or one of its subdirectories",
-                custom_workspace_host_path.display()
-            );
-            Error::message("invalid working directory")
-        })?;
-        return Ok(join_container_workspace(workdir_rel));
+        if let Ok(workdir_rel) = cwd.strip_prefix(&custom_workspace_host_path) {
+            return Ok(join_container_workspace(workdir_rel));
+        }
+
+        return Ok(PathBuf::from(CONTAINER_HOME_DIR));
     }
 
-    let workdir_rel = cwd.strip_prefix(project_dir).map_err(|_| {
-        eprintln!(
-            "error: could not determine current path relative to project dir ({}): {}",
-            project_dir.display(),
-            cwd.display()
-        );
-        eprintln!(
-            "hint: run cladding from {} or one of its subdirectories",
-            project_dir.display()
-        );
-        Error::message("invalid working directory")
-    })?;
+    let Ok(workdir_rel) = cwd.strip_prefix(project_dir) else {
+        return Ok(PathBuf::from(CONTAINER_HOME_DIR));
+    };
 
     Ok(join_container_workspace(workdir_rel))
 }
@@ -434,6 +417,66 @@ mod tests {
             resolved,
             PathBuf::from(CONTAINER_WORKSPACE_DIR).join("src/module")
         );
+    }
+
+    #[test]
+    fn resolve_container_workdir_falls_back_to_home_outside_project() {
+        let temp = create_temp_dir("home-fallback");
+        let project_dir = temp.join("project");
+        let outside_dir = temp.join("outside");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::create_dir_all(&outside_dir).expect("create outside dir");
+
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            mounts: Vec::new(),
+        };
+
+        let resolved =
+            resolve_container_workdir(&config, &project_dir, &outside_dir, MountTarget::Agent)
+                .expect("workdir");
+        assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
+    }
+
+    #[test]
+    fn resolve_container_workdir_falls_back_to_home_outside_custom_workspace() {
+        let temp = create_temp_dir("custom-home-fallback");
+        let project_dir = temp.join("project");
+        let custom_root = project_dir.join("workspace");
+        let outside_dir = project_dir.join("other");
+        fs::create_dir_all(&custom_root).expect("create custom workspace");
+        fs::create_dir_all(&outside_dir).expect("create outside dir");
+
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            mounts: vec![ResolvedMountConfig {
+                mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
+                host_path: Some(custom_root),
+                volume: None,
+                read_only: false,
+                targets: vec![MountTarget::Agent],
+                ignore: false,
+            }],
+        };
+
+        let resolved =
+            resolve_container_workdir(&config, &project_dir, &outside_dir, MountTarget::Agent)
+                .expect("workdir");
+        assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
     }
 
     fn create_temp_dir(name: &str) -> PathBuf {

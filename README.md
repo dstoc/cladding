@@ -70,7 +70,7 @@ In short: the agent cannot freely access the network; users can run sandbox comm
   cladding up
   ```
 
-* Run commands in the agent container (workdir follows your host `cwd` relative to the directory containing `.cladding`):
+* Run commands in the agent container (workdir follows your host `cwd` relative to the directory containing `.cladding`; if it cannot be mapped, the command starts in `/home/user`):
 
   ```bash
   cladding run codex --yolo
