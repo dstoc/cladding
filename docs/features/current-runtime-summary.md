@@ -38,7 +38,7 @@ The proxy bridge sidecar uses the proxy socket directories. The agent uses the p
 
 ## Blocking `cladding expose`
 - `cladding expose <container-port> [host-port]` runs in the foreground on the host.
-- It binds `127.0.0.1:<host-port>` and forwards through `cladding run socat ...` to `127.0.0.1:<container-port>` inside the agent container.
+- It binds `127.0.0.1:<host-port>` by default, or the address selected with `--bind-address`, and forwards through `cladding run socat ...` to `127.0.0.1:<container-port>` inside the agent container.
 - No persistent expose containers are created.
 
 ## Blocking `cladding inject`

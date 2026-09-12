@@ -7,6 +7,7 @@ use cladding::error::{Error, Result};
 use cladding::fs_utils::is_executable;
 use cladding::podman::{podman_container_exists, podman_required};
 use std::env;
+use std::net::IpAddr;
 use std::path::Path;
 use std::process::Command;
 
@@ -35,9 +36,14 @@ pub(super) fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
     let host_port = args.host_port.unwrap_or(args.container_port);
     let current_exe =
         env::current_exe().with_context(|| "failed to determine current executable")?;
-    let status = build_blocking_expose_command(&current_exe, args.container_port, host_port)
-        .status()
-        .with_context(|| "failed to run socat")?;
+    let status = build_blocking_expose_command(
+        &current_exe,
+        args.container_port,
+        host_port,
+        args.bind_address,
+    )
+    .status()
+    .with_context(|| "failed to run socat")?;
 
     cladding::podman::ensure_success(status, "socat")
 }
@@ -61,10 +67,15 @@ fn build_blocking_expose_command(
     current_exe: &Path,
     container_port: u16,
     host_port: u16,
+    bind_address: IpAddr,
 ) -> Command {
     let mut cmd = Command::new("socat");
+    let listener = match bind_address {
+        IpAddr::V4(_) => "TCP4-LISTEN",
+        IpAddr::V6(_) => "TCP6-LISTEN",
+    };
     cmd.arg(format!(
-        "TCP-LISTEN:{host_port},bind=127.0.0.1,reuseaddr,fork"
+        "{listener}:{host_port},bind={bind_address},reuseaddr,fork"
     ));
     let current_exe = shell_single_quote_path(current_exe);
     cmd.arg(format!(
@@ -95,16 +106,30 @@ mod tests {
             Path::new("/tmp/cladding test/bin's/cladding"),
             5432,
             15432,
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
         );
         let args = command_args(&cmd);
 
         assert_eq!(cmd.get_program().to_string_lossy(), "socat");
         assert_eq!(args.len(), 2);
-        assert_eq!(args[0], "TCP-LISTEN:15432,bind=127.0.0.1,reuseaddr,fork");
+        assert_eq!(args[0], "TCP4-LISTEN:15432,bind=127.0.0.1,reuseaddr,fork");
         assert_eq!(
             args[1],
             "EXEC:'/tmp/cladding test/bin'\\''s/cladding' run socat STDIO TCP\\:127.0.0.1\\:5432"
         );
         assert!(!args.iter().any(|arg| arg.starts_with("--")));
+    }
+
+    #[test]
+    fn build_blocking_expose_command_uses_ipv6_listener_for_ipv6_bind() {
+        let cmd = build_blocking_expose_command(
+            Path::new("/usr/local/bin/cladding"),
+            3000,
+            9000,
+            "::1".parse::<IpAddr>().unwrap(),
+        );
+        let args = command_args(&cmd);
+
+        assert_eq!(args[0], "TCP6-LISTEN:9000,bind=::1,reuseaddr,fork");
     }
 }

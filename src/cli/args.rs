@@ -1,5 +1,6 @@
 use cladding::config::ExecutionConfig;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 const VERSION: &str = jj_version::jj_version!(fallback = env!("CARGO_PKG_VERSION"),);
@@ -75,6 +76,9 @@ pub(super) struct ExposeArgs {
     pub(super) container_port: u16,
     #[arg(value_name = "HOSTPORT", value_parser = clap::value_parser!(u16).range(1..=65535))]
     pub(super) host_port: Option<u16>,
+    /// Host IP address on which to listen
+    #[arg(long, value_name = "ADDRESS", default_value = "127.0.0.1")]
+    pub(super) bind_address: IpAddr,
 }
 
 #[derive(Debug, Args)]
@@ -223,6 +227,7 @@ mod tests {
             CommandSpec::Expose(args) => {
                 assert_eq!(args.container_port, 3000);
                 assert_eq!(args.host_port, None);
+                assert_eq!(args.bind_address, "127.0.0.1".parse::<IpAddr>().unwrap());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -235,9 +240,44 @@ mod tests {
             CommandSpec::Expose(args) => {
                 assert_eq!(args.container_port, 3000);
                 assert_eq!(args.host_port, Some(9000));
+                assert_eq!(args.bind_address, "127.0.0.1".parse::<IpAddr>().unwrap());
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn expose_bind_address_parses_ipv4_and_ipv6() {
+        let ipv4 = Cli::try_parse_from([
+            "cladding",
+            "expose",
+            "3000",
+            "--bind-address",
+            "192.168.1.20",
+        ])
+        .expect("ipv4 bind address should parse");
+        match ipv4.command.expect("command") {
+            CommandSpec::Expose(args) => {
+                assert_eq!(args.bind_address, "192.168.1.20".parse::<IpAddr>().unwrap());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let ipv6 = Cli::try_parse_from(["cladding", "expose", "3000", "--bind-address", "::1"])
+            .expect("ipv6 bind address should parse");
+        match ipv6.command.expect("command") {
+            CommandSpec::Expose(args) => {
+                assert_eq!(args.bind_address, "::1".parse::<IpAddr>().unwrap());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expose_bind_address_rejects_interface_names() {
+        assert!(
+            Cli::try_parse_from(["cladding", "expose", "3000", "--bind-address", "eth0",]).is_err()
+        );
     }
 
     #[test]

@@ -82,9 +82,14 @@ In short: the agent cannot freely access the network; users can run sandbox comm
   ```bash
   cladding expose 3000
   cladding expose 3000 9000
+  cladding expose 3000 --bind-address 192.168.1.20
+  cladding expose 3000 9000 --bind-address ::1
   ```
 
-  `cladding expose` runs in the foreground. Stop it with Ctrl-C.
+  `cladding expose` runs in the foreground and defaults to listening on
+  `127.0.0.1`. Use `--bind-address` to select a host IP address; `0.0.0.0`
+  or `::` listens on all IPv4 or IPv6 interfaces respectively. Stop it with
+  Ctrl-C.
 
 * Temporarily make one host-reachable TCP endpoint available on agent localhost while the project is running:
 
@@ -215,7 +220,7 @@ cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
 cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the agent container
 cladding run-with-scissors [--target nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] [cmd] # run a command in an enabled sandbox container
-cladding expose <containerport> [hostport] # block while forwarding localhost hostport to agent containerport
+cladding expose <containerport> [hostport] [--bind-address <address>] # block while forwarding host address/port to agent containerport
 cladding inject <host-endpoint> [containerport] # block while forwarding agent localhost containerport to a host-reachable endpoint
 cladding reload-proxy # reconfigure squid after domain-list edits
 cladding logs [agent|proxy|nw-sandbox|fs-sandbox] [podman logs args...] # view container logs
