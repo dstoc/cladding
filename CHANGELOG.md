@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5](https://github.com/dstoc/cladding/compare/v0.3.4...v0.3.5) (2026-09-12)
+
+
+### Features
+
+* fallback to container home for unmappable cwd ([b104204](https://github.com/dstoc/cladding/commit/b1042043eb657c2f298f281520e6f9c7b31d0423))
+
 ## [0.3.4](https://github.com/dstoc/cladding/compare/v0.3.3...v0.3.4) (2026-09-12)
 
 
