@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.4](https://github.com/dstoc/cladding/compare/v0.3.3...v0.3.4) (2026-09-12)
+
+
+### Features
+
+* allow choosing expose bind address ([18ba7f4](https://github.com/dstoc/cladding/commit/18ba7f48cb05e33c3802076b20715bc11e0cb96f))
+
+
+### Bug Fixes
+
+* detect incomplete runtime before cladding up ([f290b5d](https://github.com/dstoc/cladding/commit/f290b5dc85e1c25189cf78cab245e34df70195f7))
+* satisfy clippy question-mark lint ([8173ba2](https://github.com/dstoc/cladding/commit/8173ba2c584a991bc2b917e653b2580df231f1cd))
+
 ## [0.3.3](https://github.com/dstoc/cladding/compare/v0.3.2...v0.3.3) (2026-06-20)
 
 
