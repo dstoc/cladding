@@ -2,6 +2,7 @@ use crate::assets::containerfile as embedded_containerfile;
 use crate::error::{Error, Result};
 use anyhow::Context as _;
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -24,6 +25,7 @@ pub fn podman_build_image(
         );
         return Err(Error::message("missing Containerfile"));
     }
+    validate_build_context(context)?;
     let mut cmd = build_command(image, containerfile, context, build_args, host_ids);
 
     let mut child = cmd.spawn().with_context(|| "failed to run podman build")?;
@@ -41,6 +43,19 @@ pub fn podman_build_image(
         .with_context(|| "failed to wait on podman build")?;
 
     ensure_success(status, "podman build")
+}
+
+fn validate_build_context(context: &Path) -> Result<()> {
+    let resolved_context = fs::canonicalize(context)
+        .with_context(|| format!("failed to resolve build context {}", context.display()))?;
+    if !resolved_context.is_dir() {
+        eprintln!(
+            "error: build context is not a directory: {}",
+            resolved_context.display()
+        );
+        return Err(Error::message("invalid build context"));
+    }
+    Ok(())
 }
 
 fn build_command(
@@ -111,6 +126,7 @@ mod tests {
                 "/tmp/config/context",
             ]
         );
+        assert!(!args.iter().any(|arg| arg == "--ignorefile"));
         assert!(!args.windows(2).any(|pair| pair == ["-f", "-"]));
     }
 
