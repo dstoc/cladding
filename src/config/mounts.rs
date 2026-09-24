@@ -220,16 +220,22 @@ pub(super) fn parse_mounts_v2(
             _ => {}
         }
 
-        if matches!(
-            configured_type,
-            Some(MountType::Readonly | MountType::Overlay)
-        ) && host_path
+        let host_path_is_private = host_path
             .as_deref()
-            .is_some_and(|path| path_is_inside_private_config(config_dir, path))
+            .is_some_and(|path| path_is_inside_private_config(config_dir, path));
+        let mount_path_is_inside_workspace_mask =
+            Path::new(mount_path).starts_with("/home/user/workspace/.cladding");
+        let host_path_contains_private_config = mount_type == MountType::Bind
+            && mount_path_is_inside_workspace_mask
+            && host_path
+                .as_deref()
+                .is_some_and(|path| path_contains_private_config(config_dir, path));
+        if (host_path_is_private || host_path_contains_private_config)
+            && (mount_type != MountType::Bind || mount_path_is_inside_workspace_mask)
         {
             eprintln!(
                 "error: cladding.json invalid field 'mounts[{index}].hostPath' (cannot mount files from the private .cladding directory with type '{}')",
-                configured_type.expect("matched mount type").as_str()
+                mount_type.as_str()
             );
             eprintln!("file: {}", config_path.display());
             return Err(Error::message("invalid cladding.json"));
@@ -437,6 +443,12 @@ fn path_is_inside_private_config(config_dir: &Path, candidate: &Path) -> bool {
     candidate.starts_with(config_dir)
 }
 
+fn path_contains_private_config(config_dir: &Path, candidate: &Path) -> bool {
+    let config_dir = fs::canonicalize(config_dir).unwrap_or_else(|_| normalize_path(config_dir));
+    let candidate = fs::canonicalize(candidate).unwrap_or_else(|_| normalize_path(candidate));
+    config_dir.starts_with(candidate)
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -574,6 +586,40 @@ mod tests {
             "mounts": [{ "mount": "/workspace", "hostPath": "../workspace", "type": "overlay", "targets": ["agent"] }]
         });
         assert!(parse_mounts(&temp, &agent_overlay, &runsc_config).is_err());
+    }
+
+    #[test]
+    fn parse_mounts_rejects_private_cladding_files_for_implicit_and_explicit_binds() {
+        let temp = create_temp_dir("private-bind-mount");
+        for mount in [
+            serde_json::json!({
+                "mount": "/home/user/workspace/.cladding",
+                "hostPath": "."
+            }),
+            serde_json::json!({
+                "mount": "/home/user/workspace/.cladding",
+                "hostPath": ".",
+                "type": "bind"
+            }),
+            serde_json::json!({
+                "mount": "/home/user/workspace/.cladding",
+                "hostPath": ".."
+            }),
+            serde_json::json!({
+                "mount": "/home/user/workspace/.cladding",
+                "hostPath": "..",
+                "type": "bind"
+            }),
+        ] {
+            assert!(
+                parse_mounts(
+                    &temp,
+                    &serde_json::json!({ "mounts": [mount] }),
+                    &execution_config(true, false)
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
