@@ -215,7 +215,10 @@ pub(super) fn check_required_host_paths(spec: &RuntimeSpec) -> Result<()> {
 
 pub(super) fn check_required_images(config: &ExecutionConfig, verbose: bool) -> Result<()> {
     let mut missing = false;
-    let mut images = vec![("agent", config.agent_image())];
+    let mut images = vec![
+        ("agent", config.agent_image()),
+        ("proxy", config.proxy_image()),
+    ];
     if config.nw_sandbox_enabled() {
         images.push(("nw_sandbox", config.nw_sandbox_image()));
     }
@@ -237,7 +240,7 @@ pub(super) fn check_required_images(config: &ExecutionConfig, verbose: bool) -> 
             Ok(status) if status.success() => {}
             Ok(_) => {
                 eprintln!("missing: image {image}");
-                if image_is_buildable_by_cladding(image) {
+                if image_is_buildable_by_cladding(config, image) {
                     eprintln!("hint: run cladding build");
                 } else {
                     eprintln!(
@@ -284,8 +287,21 @@ pub(super) fn check_runsc_runtime(config: &ExecutionConfig, verbose: bool) -> Re
     }
 }
 
-fn image_is_buildable_by_cladding(image: &str) -> bool {
+fn image_is_buildable_by_cladding(config: &ExecutionConfig, image: &str) -> bool {
     image == DEFAULT_CLADDING_BUILD_IMAGE
+        || (config.agent.image == image && config.agent.build.is_some())
+        || config
+            .nw_sandbox
+            .as_ref()
+            .is_some_and(|component| component.image == image && component.build.is_some())
+        || config
+            .fs_sandbox
+            .as_ref()
+            .is_some_and(|component| component.image == image && component.build.is_some())
+        || config
+            .proxy
+            .as_ref()
+            .is_some_and(|proxy| proxy.image == image && proxy.build.is_some())
 }
 
 #[cfg(test)]
@@ -406,15 +422,19 @@ mod tests {
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
+                build: None,
             },
             nw_sandbox: nw_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
                 image: "sandbox:image".to_string(),
+                build: None,
             }),
             fs_sandbox: fs_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
                 image: "fs:image".to_string(),
+                build: None,
             }),
+            proxy: None,
             mounts,
         }
     }

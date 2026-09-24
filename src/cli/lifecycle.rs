@@ -7,7 +7,9 @@ use super::context::{Context, project_runtime_status};
 use super::{DEFAULT_CLADDING_BUILD_IMAGE, DEFAULT_CLI_BUILD_IMAGE, DEFAULT_SANDBOX_BUILD_IMAGE};
 use anyhow::Context as _;
 use cladding::assets::{materialize_config, materialize_runtime_scripts, write_embedded_tools};
-use cladding::config::{load_cladding_config_v2, write_default_cladding_config};
+use cladding::config::{
+    ExecutionConfig, ImageBuildConfig, load_cladding_config_v2, write_default_cladding_config,
+};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::podman::{
@@ -15,7 +17,7 @@ use cladding::podman::{
     runtime_inventory,
 };
 use cladding::runtime::RuntimeSpec;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 
 pub(super) fn cmd_build(context: &Context) -> Result<()> {
@@ -23,6 +25,7 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
 
     let host_uid = unsafe { libc::getuid() };
     let host_gid = unsafe { libc::getgid() };
+    let build_plan = plan_image_builds(&config)?;
 
     let tools_dir = context.project_root.join("tools");
     if is_broken_symlink(&tools_dir)? {
@@ -36,57 +39,123 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
 
     write_embedded_tools(&tools_bin_dir)?;
 
-    let mut built_images = HashSet::new();
-    build_default_image(
-        "agent",
-        config.agent_image(),
-        host_uid,
-        host_gid,
-        &mut built_images,
-    )?;
-    if config.nw_sandbox_enabled() {
-        build_default_image(
-            "nw sandbox",
-            config.nw_sandbox_image(),
-            host_uid,
-            host_gid,
-            &mut built_images,
-        )?;
-    }
-    if config.fs_sandbox_enabled() {
-        build_default_image(
-            "fs sandbox",
-            config.fs_sandbox_image(),
-            host_uid,
-            host_gid,
-            &mut built_images,
-        )?;
+    let default_context = context
+        .project_root
+        .parent()
+        .unwrap_or(&context.project_root);
+    for target in build_plan {
+        match target.build {
+            BuildDefinition::Embedded => podman_build_image(
+                &target.image,
+                None,
+                default_context,
+                &Default::default(),
+                Some((host_uid, host_gid)),
+            )?,
+            BuildDefinition::Custom(build) => podman_build_image(
+                &target.image,
+                Some(&build.containerfile),
+                &build.context,
+                &build.args,
+                None,
+            )?,
+        }
     }
 
     Ok(())
 }
 
-fn build_default_image(
-    label: &str,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BuildDefinition {
+    Embedded,
+    Custom(ImageBuildConfig),
+}
+
+#[derive(Debug, Clone)]
+struct PlannedImageBuild {
+    image: String,
+    build: BuildDefinition,
+}
+
+fn plan_image_builds(config: &ExecutionConfig) -> Result<Vec<PlannedImageBuild>> {
+    let mut builds_by_image = HashMap::<String, BuildDefinition>::new();
+    let mut plan = Vec::new();
+
+    add_image_build(
+        &mut plan,
+        &mut builds_by_image,
+        "agent",
+        config.agent_image(),
+        config.agent.build.as_ref(),
+    )?;
+    if let Some(component) = config
+        .nw_sandbox
+        .as_ref()
+        .filter(|component| component.enabled)
+    {
+        add_image_build(
+            &mut plan,
+            &mut builds_by_image,
+            "nw_sandbox",
+            &component.image,
+            component.build.as_ref(),
+        )?;
+    }
+    if let Some(component) = config
+        .fs_sandbox
+        .as_ref()
+        .filter(|component| component.enabled)
+    {
+        add_image_build(
+            &mut plan,
+            &mut builds_by_image,
+            "fs_sandbox",
+            &component.image,
+            component.build.as_ref(),
+        )?;
+    }
+    if let Some(proxy) = &config.proxy {
+        add_image_build(
+            &mut plan,
+            &mut builds_by_image,
+            "proxy",
+            &proxy.image,
+            proxy.build.as_ref(),
+        )?;
+    }
+
+    Ok(plan)
+}
+
+fn add_image_build(
+    plan: &mut Vec<PlannedImageBuild>,
+    builds_by_image: &mut HashMap<String, BuildDefinition>,
+    component: &str,
     image: &str,
-    host_uid: u32,
-    host_gid: u32,
-    built_images: &mut HashSet<String>,
+    custom_build: Option<&ImageBuildConfig>,
 ) -> Result<()> {
-    if !built_images.insert(image.to_string()) {
-        println!("skip: {label} image already built ({image})");
+    let build = match custom_build {
+        Some(build) => BuildDefinition::Custom(build.clone()),
+        None if image == DEFAULT_CLADDING_BUILD_IMAGE => BuildDefinition::Embedded,
+        None => return Ok(()),
+    };
+
+    if let Some(existing) = builds_by_image.get(image) {
+        if existing != &build {
+            eprintln!(
+                "error: components define conflicting builds for image '{image}' (including {component})"
+            );
+            return Err(Error::message("conflicting image build definitions"));
+        }
         return Ok(());
     }
 
-    if image != DEFAULT_CLADDING_BUILD_IMAGE {
-        println!(
-            "skip: not building {label} image (config image is {}, build target is {})",
-            image, DEFAULT_CLADDING_BUILD_IMAGE
-        );
-        return Ok(());
-    }
-
-    podman_build_image(image, host_uid, host_gid)
+    builds_by_image.insert(image.to_string(), build.clone());
+    plan.push(PlannedImageBuild {
+        image: image.to_string(),
+        build,
+    });
+    Ok(())
 }
 
 pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result<()> {
@@ -266,5 +335,101 @@ fn record_cleanup_result(target: &mut Option<Error>, result: Result<()>) {
         && target.is_none()
     {
         *target = Some(err);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cladding::config::{ExecutionComponentConfig, ExecutionProxyConfig, ResolvedMountConfig};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    fn config() -> ExecutionConfig {
+        ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: DEFAULT_CLADDING_BUILD_IMAGE.to_string(),
+                build: None,
+            },
+            nw_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: DEFAULT_CLADDING_BUILD_IMAGE.to_string(),
+                build: None,
+            }),
+            fs_sandbox: None,
+            proxy: None,
+            mounts: Vec::<ResolvedMountConfig>::new(),
+        }
+    }
+
+    fn build(context: &str, feature: &str) -> ImageBuildConfig {
+        ImageBuildConfig {
+            containerfile: PathBuf::from("/tmp/Containerfile"),
+            context: PathBuf::from(context),
+            args: BTreeMap::from([("FEATURE".to_string(), feature.to_string())]),
+        }
+    }
+
+    #[test]
+    fn build_plan_reuses_embedded_default_image_across_components() {
+        let plan = plan_image_builds(&config()).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].image, DEFAULT_CLADDING_BUILD_IMAGE);
+        assert_eq!(plan[0].build, BuildDefinition::Embedded);
+    }
+
+    #[test]
+    fn build_plan_deduplicates_shared_custom_image_definitions() {
+        let mut config = config();
+        config.agent.image = "localhost/shared:latest".to_string();
+        config.agent.build = Some(build("/tmp/context", "enabled"));
+        config.nw_sandbox.as_mut().unwrap().image = "localhost/shared:latest".to_string();
+        config.nw_sandbox.as_mut().unwrap().build = Some(build("/tmp/context", "enabled"));
+
+        let plan = plan_image_builds(&config).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].image, "localhost/shared:latest");
+    }
+
+    #[test]
+    fn build_plan_rejects_conflicting_definitions_for_a_shared_image_tag() {
+        let mut config = config();
+        config.agent.image = "localhost/shared:latest".to_string();
+        config.agent.build = Some(build("/tmp/agent", "agent"));
+        config.nw_sandbox.as_mut().unwrap().image = "localhost/shared:latest".to_string();
+        config.nw_sandbox.as_mut().unwrap().build = Some(build("/tmp/sandbox", "sandbox"));
+
+        assert!(plan_image_builds(&config).is_err());
+    }
+
+    #[test]
+    fn build_plan_skips_disabled_sandbox_builds() {
+        let mut config = config();
+        config.agent.image = "agent:prebuilt".to_string();
+        config.nw_sandbox.as_mut().unwrap().enabled = false;
+        config.nw_sandbox.as_mut().unwrap().image = "localhost/sandbox:latest".to_string();
+        config.nw_sandbox.as_mut().unwrap().build = Some(build("/tmp/sandbox", "enabled"));
+
+        assert!(plan_image_builds(&config).unwrap().is_empty());
+    }
+
+    #[test]
+    fn build_plan_includes_custom_proxy_build() {
+        let mut config = config();
+        config.agent.image = "agent:prebuilt".to_string();
+        config.nw_sandbox = None;
+        config.proxy = Some(ExecutionProxyConfig {
+            image: "localhost/proxy:latest".to_string(),
+            build: Some(build("/tmp/proxy", "enabled")),
+        });
+
+        let plan = plan_image_builds(&config).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].image, "localhost/proxy:latest");
+        assert!(matches!(plan[0].build, BuildDefinition::Custom(_)));
     }
 }

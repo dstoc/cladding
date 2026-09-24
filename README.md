@@ -101,6 +101,51 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 
   `cladding inject <host-endpoint> [containerport]` runs in the foreground and stops with Ctrl-C. A bare port such as `11434` maps agent `127.0.0.1:11434` to host `127.0.0.1:11434`. A second port changes only the agent-side listener, so `cladding inject 5432 15432` maps agent `127.0.0.1:15432` to host `127.0.0.1:5432`. An explicit `host:port` is resolved from the host and should be treated as a deliberate temporary exception for that one endpoint, not general host networking.
 
+### Configuring container images
+
+Each component can use an existing image or build one from a Containerfile. The component `image` value is the build output tag when `build` is also set. If `image` is omitted, `cladding build` generates a local tag such as `localhost/cladding-myproject-agent:latest`.
+
+```json
+{
+  "name": "myproject",
+  "agent": {
+    "build": {
+      "containerfile": "containers/agent.Containerfile",
+      "context": ".",
+      "args": { "FEATURE": "enabled" }
+    }
+  },
+  "nw_sandbox": {
+    "enabled": true,
+    "image": "localhost/my-sandbox:latest",
+    "build": {
+      "containerfile": "containers/sandbox.Containerfile",
+      "context": ".."
+    }
+  },
+  "fs_sandbox": {
+    "image": "localhost/my-fs-sandbox:latest",
+    "build": {
+      "containerfile": "containers/fs-sandbox.Containerfile",
+      "context": ".."
+    }
+  },
+  "proxy": {
+    "image": "localhost/my-proxy:latest",
+    "build": {
+      "containerfile": "containers/proxy.Containerfile",
+      "context": "."
+    }
+  }
+}
+```
+
+`containerfile` and `context` paths are relative to `.cladding/cladding.json`. `context` defaults to the `.cladding` directory when omitted. Build `args` are string values passed to Podman as ordinary Containerfile build arguments.
+
+`cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag.
+
+The default proxy image is used when `proxy` is omitted. Set `proxy.image` to use a prebuilt proxy image, or configure `proxy.build` to build a proxy image locally.
+
 ### Configuring mounts
 
 `cladding.json` supports a `mounts` list. Each entry has:

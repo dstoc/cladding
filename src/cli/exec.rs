@@ -368,9 +368,11 @@ mod tests {
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
+                build: None,
             },
             nw_sandbox: None,
             fs_sandbox: None,
+            proxy: None,
             mounts: Vec::new(),
         };
 
@@ -397,9 +399,11 @@ mod tests {
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
+                build: None,
             },
             nw_sandbox: None,
             fs_sandbox: None,
+            proxy: None,
             mounts: vec![ResolvedMountConfig {
                 mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
                 host_path: Some(custom_root.clone()),
@@ -433,9 +437,11 @@ mod tests {
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
+                build: None,
             },
             nw_sandbox: None,
             fs_sandbox: None,
+            proxy: None,
             mounts: Vec::new(),
         };
 
@@ -460,9 +466,11 @@ mod tests {
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
+                build: None,
             },
             nw_sandbox: None,
             fs_sandbox: None,
+            proxy: None,
             mounts: vec![ResolvedMountConfig {
                 mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
                 host_path: Some(custom_root),
