@@ -44,7 +44,7 @@ ssl_bump splice all
 
 The `--client-requested` option matters. Without it, Squid's default `ssl::server_name` ACL can match any available name from the CONNECT URI, client SNI, or upstream certificate. The bump rule must test the CONNECT host and client-requested SNI as separate ACLs. If SNI is absent, Squid falls back to the CONNECT target; the decrypted request still must pass the exact URL and Host ACLs below.
 
-The Squid 7.2 parser supports wildcard `include` directives. The reference includes `/run/squid-private/rules/*.conf`. Its rule files have stable names and do not depend on evaluation order. The integration test exercises both files through the wildcard include.
+The Squid 7.7 parser supports wildcard `include` directives. The reference includes `/run/squid-private/rules/*.conf`. Its rule files have stable names and do not depend on evaluation order. The integration test exercises both files through the wildcard include.
 
 ### Credential rules
 
@@ -56,7 +56,7 @@ The private API and Git rules are [github-api.conf](reference/credentials/rules/
 - an exact, anchored HTTP `Host` value;
 - for Git, a Git smart-HTTP path under `*.git`.
 
-Each rule applies `request_header_access Authorization deny ...` before `request_header_add Authorization ...`. The ACLs require both a `proto HTTPS` effective URL and Squid's `connections_encrypted` check, which confirms TLS on the client and upstream connections. Squid 7.2 reconstructs origin-form requests on a bumped TLS connection as `https` URLs using the decrypted Host value. Its `HttpHeaderTools` implementation removes denied fields before it adds configured fields. The API test sends two client Authorization fields and checks that the origin receives exactly one delegated Bearer value. The Git test also supplies a client Authorization field and checks for exactly one delegated Basic value.
+Each rule applies `request_header_access Authorization deny ...` before `request_header_add Authorization ...`. The ACLs require both a `proto HTTPS` effective URL and Squid's `connections_encrypted` check, which confirms TLS on the client and upstream connections. Squid 7.7 reconstructs origin-form requests on a bumped TLS connection as `https` URLs using the decrypted Host value. Its `HttpHeaderTools` implementation removes denied fields before it adds configured fields. The API test sends two client Authorization fields and checks that the origin receives exactly one delegated Bearer value. The Git test also supplies a client Authorization field and checks for exactly one delegated Basic value.
 
 The host-side `.cladding/credentials` layout is:
 
@@ -96,11 +96,15 @@ The helper path is `/usr/local/libexec/security_file_certgen`. The startup scrip
 
 ### Pinned Squid image
 
-[reference/Containerfile](reference/Containerfile) builds Squid 7.2 from the upstream `SQUID_7_2` release. It pins the Ubuntu 26.04 multi-architecture base digest to `sha256:cd21a4f68a617580279d4b091cb18e3af9fa8a87500665f0ae5f7f757d17d367` and verifies the Squid source archive SHA-256 `5e077be1d83a9e696ce8d0d9e723b1273152207a091404be68a4b9a9e18c7003`.
+[reference/Containerfile](reference/Containerfile) builds Squid 7.7 from upstream commit `173863d3ec547d7fc5227ddbb5d8093c88b4842f` (`SQUID_7_7`). It pins the Ubuntu 26.04 multi-architecture base digest to `sha256:cd21a4f68a617580279d4b091cb18e3af9fa8a87500665f0ae5f7f757d17d367` and verifies the Squid source archive SHA-256 `e3bd613b91b1c498ec2992276063342a85cd6edddd5521294e04f44bc055da9b`.
 
 The configure options are `--with-openssl`, `--enable-ssl-crtd`, and `--enable-http-violations`. The image build checks the reported compile options, Squid version, and helper path. The startup runs `squid -k parse` against the generated reference config. The `request_header_access` directive is conditional on `--enable-http-violations` in Squid 7.
 
 This build avoids relying on a floating Squid tag or on an image compiled with GnuTLS. Squid's own configuration reference marks `request_header_access` and `sslcrtd_program` as Squid 7 directives; `request_header_access` requires `--enable-http-violations`, and `sslcrtd_program` requires `--enable-ssl-crtd`.
+
+#### Simpler Ubuntu package option considered
+
+Ubuntu 26.04 publishes an OpenSSL-flavoured `squid-openssl` package at version `7.2-2ubuntu2.2`; the [Ubuntu package file list](https://packages.ubuntu.com/resolute-updates/riscv64/squid-openssl/filelist) includes `/usr/sbin/squid-openssl` and `/usr/lib/squid/security_file_certgen`. This could shorten the image build, but the suggested `ubuntu:26.04` plus unversioned `apt install` does not pin either the base image or Squid package. The [package metadata](https://packages.ubuntu.com/resolute/squid-openssl) identifies the OpenSSL flavour but does not establish that its binary includes `--enable-http-violations`, which is mandatory for Authorization removal with `request_header_access`. The reference therefore keeps the checksum-pinned upstream build and checks all three required compile options (`--with-openssl`, `--enable-ssl-crtd`, and `--enable-http-violations`) at image build time. A package-based build is a future simplification if it pins the base and package version and passes the same compile-option and controlled-origin checks.
 
 ### Security boundary and redirects
 
@@ -132,7 +136,7 @@ This runner has no Docker, Podman, Squid, or Buildah executable, and its network
 
 ## Success criteria
 
-- The reference image reports Squid 7.2, OpenSSL, SSL certificate generation, and HTTP violations support.
+- The reference image reports Squid 7.7, OpenSSL, SSL certificate generation, and HTTP violations support.
 - The 3128 listener bumps only when exact CONNECT and client-requested SNI ACLs match.
 - The 3129 listener remains an ordinary tunnel.
 - Each delegated credential replaces all client Authorization fields only for its exact HTTPS destination, TLS-protected upstream connection, and Git path.
@@ -148,5 +152,7 @@ This runner has no Docker, Podman, Squid, or Buildah executable, and its network
 - [Squid 7 `request_header_add`](https://www.squid-cache.org/Doc/config/request_header_add/)
 - [Squid 7 dynamic certificate helper](https://www.squid-cache.org/Doc/config/sslcrtd_program/)
 - [Squid 7 outgoing TLS verification settings](https://www.squid-cache.org/Doc/config/tls_outgoing_options/)
-- [Squid 7.2 source release](https://github.com/squid-cache/squid/releases/tag/SQUID_7_2)
-- [Squid Rock 7.2 build definition](https://github.com/canonical/squid-rock/blob/main/squid/7.2-26.04/rockcraft.yaml), which identifies its build as the GnuTLS variant.
+- [Squid 7.7 source release](https://github.com/squid-cache/squid/releases/tag/SQUID_7_7)
+- [Squid 7 `http_port` TLS options](https://www.squid-cache.org/Doc/config/http_port/)
+- [Ubuntu 26.04 `squid-openssl` package](https://packages.ubuntu.com/resolute/squid-openssl)
+- [Ubuntu 26.04 helper and executable paths](https://packages.ubuntu.com/resolute-updates/riscv64/squid-openssl/filelist)

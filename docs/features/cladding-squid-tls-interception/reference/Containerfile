@@ -1,8 +1,8 @@
 FROM ubuntu:26.04@sha256:cd21a4f68a617580279d4b091cb18e3af9fa8a87500665f0ae5f7f757d17d367 AS build
 
-ARG SQUID_VERSION=7.2
-ARG SQUID_RELEASE_TAG=SQUID_7_2
-ARG SQUID_SOURCE_SHA256=5e077be1d83a9e696ce8d0d9e723b1273152207a091404be68a4b9a9e18c7003
+ARG SQUID_VERSION=7.7
+ARG SQUID_RELEASE_TAG=SQUID_7_7
+ARG SQUID_SOURCE_SHA256=e3bd613b91b1c498ec2992276063342a85cd6edddd5521294e04f44bc055da9b
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -60,7 +60,7 @@ COPY reference/startup.sh /usr/local/bin/cladding-proxy-startup
 COPY reference/render-credentials.sh /usr/local/bin/cladding-proxy-render-credentials
 
 RUN chmod 0755 /usr/local/bin/cladding-proxy-startup /usr/local/bin/cladding-proxy-render-credentials \
-    && /usr/local/sbin/squid -v | grep -q 'Squid Cache: Version 7.2'
+    && /usr/local/sbin/squid -v | grep -q 'Squid Cache: Version 7.7'
 
 ENV PATH="/usr/local/sbin:/usr/local/bin:${PATH}"
 ENTRYPOINT ["/usr/local/bin/cladding-proxy-startup"]
