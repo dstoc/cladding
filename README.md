@@ -144,7 +144,7 @@ Each component can use an existing image or build one from a Containerfile. The 
 
 `cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag.
 
-The filtering-only proxy remains the default when `proxy` is omitted. Set `proxy.builtin` to `"squid-mitm"` to select the built-in TLS proxy image. A built-in proxy cannot be combined with `proxy.image` or `proxy.build`.
+The default proxy image is used when `proxy` is omitted. Set `proxy.image` to use a prebuilt proxy image, or configure `proxy.build` to build a proxy image locally.
 
 ### Configuring mounts
 

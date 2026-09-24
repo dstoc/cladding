@@ -1,7 +1,7 @@
 use super::mounts::parse_mounts_v2;
 use super::types::{
-    BUILTIN_SQUID_MITM_IMAGE, BuiltinProxy, DEFAULT_COMPONENT_IMAGE, DEFAULT_PROXY_IMAGE,
-    ExecutionComponentConfig, ExecutionConfig, ExecutionProxyConfig, ImageBuildConfig,
+    DEFAULT_COMPONENT_IMAGE, DEFAULT_PROXY_IMAGE, ExecutionComponentConfig, ExecutionConfig,
+    ExecutionProxyConfig, ImageBuildConfig,
 };
 use crate::error::{Error, Result};
 use anyhow::Context as _;
@@ -250,7 +250,7 @@ fn parse_proxy_object(
         Error::message("invalid cladding.json")
     })?;
 
-    let allowed = ["image", "build", "builtin"];
+    let allowed = ["image", "build"];
     for field in object.keys() {
         if !allowed.contains(&field.as_str()) {
             eprintln!("error: cladding.json unknown key: proxy.{field}");
@@ -259,28 +259,8 @@ fn parse_proxy_object(
         }
     }
 
-    let builtin = match object.get("builtin") {
-        None => None,
-        Some(value) if value.as_str() == Some("squid-mitm") => Some(BuiltinProxy::SquidMitm),
-        Some(_) => {
-            eprintln!("error: cladding.json invalid field 'proxy.builtin' (expected 'squid-mitm')");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        }
-    };
-
-    if builtin.is_some() && (object.contains_key("image") || object.contains_key("build")) {
-        eprintln!(
-            "error: cladding.json invalid field 'proxy.builtin' (mutually exclusive with proxy.image and proxy.build)"
-        );
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid cladding.json"));
-    }
-
     let build = parse_build_config(object.get("build"), key, config_path)?;
-    let image = if builtin == Some(BuiltinProxy::SquidMitm) {
-        BUILTIN_SQUID_MITM_IMAGE.to_string()
-    } else if let Some(value) = object.get("image") {
+    let image = if let Some(value) = object.get("image") {
         let Some(image) = value.as_str() else {
             eprintln!("error: cladding.json invalid field 'proxy.image' (expected string)");
             eprintln!("file: {}", config_path.display());
@@ -298,11 +278,7 @@ fn parse_proxy_object(
         DEFAULT_PROXY_IMAGE.to_string()
     };
 
-    Ok(Some(ExecutionProxyConfig {
-        image,
-        build,
-        builtin,
-    }))
+    Ok(Some(ExecutionProxyConfig { image, build }))
 }
 
 fn parse_build_config(
@@ -530,42 +506,6 @@ mod tests {
             proxy.build.as_ref().unwrap().containerfile,
             temp.join("containers/proxy.Containerfile")
         );
-    }
-
-    #[test]
-    fn load_cladding_config_selects_builtin_squid_mitm_proxy() {
-        let temp = create_temp_dir("builtin-proxy");
-        fs::write(
-            temp.join("cladding.json"),
-            r#"{
-  "name": "demo",
-  "agent": { "image": "agent:image" },
-  "proxy": { "builtin": "squid-mitm" }
-}"#,
-        )
-        .unwrap();
-
-        let config = load_cladding_config_v2(&temp).unwrap();
-        let proxy = config.proxy.as_ref().unwrap();
-        assert_eq!(proxy.builtin, Some(BuiltinProxy::SquidMitm));
-        assert_eq!(proxy.image, BUILTIN_SQUID_MITM_IMAGE);
-        assert!(proxy.build.is_none());
-    }
-
-    #[test]
-    fn load_cladding_config_rejects_proxy_builtin_with_custom_image_or_build() {
-        let temp = create_temp_dir("builtin-proxy-conflict");
-        fs::write(
-            temp.join("cladding.json"),
-            r#"{
-  "name": "demo",
-  "agent": { "image": "agent:image" },
-  "proxy": { "builtin": "squid-mitm", "image": "custom:latest" }
-}"#,
-        )
-        .unwrap();
-
-        assert!(load_cladding_config_v2(&temp).is_err());
     }
 
     #[test]

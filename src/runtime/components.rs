@@ -474,8 +474,7 @@ done
 mod tests {
     use super::*;
     use crate::config::{
-        BUILTIN_SQUID_MITM_IMAGE, BuiltinProxy, ExecutionComponentConfig, ExecutionConfig,
-        ExecutionProxyConfig, ResolvedMountConfig,
+        ExecutionComponentConfig, ExecutionConfig, ExecutionProxyConfig, ResolvedMountConfig,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -758,7 +757,6 @@ mod tests {
         config.proxy = Some(ExecutionProxyConfig {
             image: "localhost/custom-proxy:latest".to_string(),
             build: None,
-            builtin: None,
         });
 
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
@@ -768,21 +766,6 @@ mod tests {
             spec.proxy.containers[0].image,
             "localhost/custom-proxy:latest"
         );
-        assert_eq!(spec.proxy.containers[1].name, "demo-proxy-bridge");
-    }
-
-    #[test]
-    fn build_runtime_spec_selects_builtin_squid_mitm_image() {
-        let mut config = execution_config(false, false, Vec::new(), false);
-        config.proxy = Some(ExecutionProxyConfig {
-            image: BUILTIN_SQUID_MITM_IMAGE.to_string(),
-            build: None,
-            builtin: Some(BuiltinProxy::SquidMitm),
-        });
-
-        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
-
-        assert_eq!(spec.proxy.containers[0].image, BUILTIN_SQUID_MITM_IMAGE);
         assert_eq!(spec.proxy.containers[1].name, "demo-proxy-bridge");
     }
 

@@ -424,7 +424,6 @@ mod tests {
         config.proxy = Some(ExecutionProxyConfig {
             image: "localhost/proxy:latest".to_string(),
             build: Some(build("/tmp/proxy", "enabled")),
-            builtin: None,
         });
 
         let plan = plan_image_builds(&config).unwrap();

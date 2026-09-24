@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 pub const DEFAULT_COMPONENT_IMAGE: &str = "localhost/cladding-default:latest";
 pub const DEFAULT_PROXY_IMAGE: &str = "docker.io/ubuntu/squid:latest";
-pub const BUILTIN_SQUID_MITM_IMAGE: &str = "localhost/cladding-squid-mitm:latest";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageBuildConfig {
@@ -19,16 +18,10 @@ pub struct ExecutionComponentConfig {
     pub build: Option<ImageBuildConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinProxy {
-    SquidMitm,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionProxyConfig {
     pub image: String,
     pub build: Option<ImageBuildConfig>,
-    pub builtin: Option<BuiltinProxy>,
 }
 
 #[derive(Debug, Clone)]
