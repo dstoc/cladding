@@ -422,6 +422,7 @@ fn is_sensitive_build_arg(name: &str) -> bool {
     [
         "secret",
         "credential",
+        "accesskey",
         "password",
         "passwd",
         "token",
@@ -640,6 +641,41 @@ mod tests {
         .unwrap();
 
         assert!(load_cladding_config_v2(&temp).is_err());
+    }
+
+    #[test]
+    fn load_cladding_config_rejects_access_key_build_argument_aliases() {
+        for (index, name) in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_ACCESS_KEY",
+            "ACCESS_KEY_ID",
+            "accessKeyId",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let temp = create_temp_dir(&format!("access-key-build-arg-{index}"));
+            fs::write(
+                temp.join("cladding.json"),
+                format!(
+                    r#"{{
+  "name": "demo",
+  "agent": {{
+    "build": {{
+      "containerfile": "Containerfile",
+      "args": {{ "{name}": "should-not-be-passed" }}
+    }}
+  }}
+}}"#
+                ),
+            )
+            .unwrap();
+
+            assert!(
+                load_cladding_config_v2(&temp).is_err(),
+                "expected build argument {name} to be rejected"
+            );
+        }
     }
 
     #[test]
