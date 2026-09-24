@@ -1,0 +1,26 @@
+name: Proxy TLS interception reference
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/proxy-tls-interception.yml
+      - docs/features/cladding-squid-tls-interception/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/proxy-tls-interception.yml
+      - docs/features/cladding-squid-tls-interception/**
+
+permissions:
+  contents: read
+
+jobs:
+  squid-7-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Docker is available
+        run: docker info
+      - name: Build pinned Squid 7 image and run controlled-origin tests
+        run: docs/features/cladding-squid-tls-interception/reference/test.sh
