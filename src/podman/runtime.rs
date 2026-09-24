@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::runtime::{RuntimeContainer, RuntimePlacement, RuntimePod, RuntimeSpec};
 use anyhow::Context as _;
+use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -104,6 +105,159 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Clean up resources only when their Podman labels identify this runtime.
+/// This is used by one-off startup and teardown paths so a name collision
+/// cannot cause cleanup to remove another project's resources.
+pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+    let inventory = runtime_inventory(spec, verbose)?;
+    let exists = |kind: &str, name: &str| {
+        inventory
+            .resources
+            .iter()
+            .any(|resource| resource.kind == kind && resource.name == name)
+    };
+
+    let mut owned_resources = HashMap::<(String, String), bool>::new();
+    for pod in runtime_pods(spec) {
+        let pod_exists = pod.placement == RuntimePlacement::Pod && exists("pod", &pod.name);
+        let pod_owned = if pod_exists {
+            resource_labels_match("pod", &pod.name, spec)?
+        } else {
+            false
+        };
+        if pod_exists {
+            owned_resources.insert(("pod".to_string(), pod.name.clone()), pod_owned);
+        }
+        let pod_id = if pod_owned {
+            Some(inspect_value("pod", &pod.name, "{{.Id}}", verbose)?)
+        } else {
+            None
+        };
+        for container in &pod.containers {
+            if !exists("container", &container.name) {
+                continue;
+            }
+
+            let owned = match pod.placement {
+                RuntimePlacement::Standalone => {
+                    resource_labels_match("container", &container.name, spec)?
+                }
+                RuntimePlacement::Pod => {
+                    if let Some(pod_id) = pod_id.as_deref() {
+                        let container_pod =
+                            inspect_value("container", &container.name, "{{.Pod}}", verbose)?;
+                        container_pod == pod_id || container_pod == pod.name
+                    } else {
+                        false
+                    }
+                }
+            };
+            owned_resources.insert(("container".to_string(), container.name.clone()), owned);
+        }
+    }
+
+    if inventory.resources.iter().all(|resource| {
+        owned_resources
+            .get(&(resource.kind.to_string(), resource.name.clone()))
+            .copied()
+            .unwrap_or(false)
+    }) {
+        return runtime_cleanup(spec, verbose);
+    }
+
+    let mut cleanup_error = None;
+    for pod in runtime_pods(spec) {
+        let pod_exists = pod.placement == RuntimePlacement::Pod && exists("pod", &pod.name);
+        let pod_owned = owned_resources
+            .get(&("pod".to_string(), pod.name.clone()))
+            .copied()
+            .unwrap_or(false);
+        let mut pod_cleanup_failed = false;
+
+        for container in &pod.containers {
+            if !exists("container", &container.name) {
+                continue;
+            }
+            let container_owned = owned_resources
+                .get(&("container".to_string(), container.name.clone()))
+                .copied()
+                .unwrap_or(false);
+            if !container_owned {
+                pod_cleanup_failed = true;
+                record_cleanup_result(
+                    &mut cleanup_error,
+                    Err(crate::error::Error::message(format!(
+                        "refusing to remove container '{}' because it is not owned by one-off instance '{}'",
+                        container.name, spec.project_name
+                    ))),
+                );
+                continue;
+            }
+            let result = container_rm(&container.name, verbose);
+            if result.is_err() {
+                pod_cleanup_failed = true;
+            }
+            record_cleanup_result(&mut cleanup_error, result);
+        }
+
+        if pod_exists {
+            if pod_owned && !pod_cleanup_failed {
+                record_cleanup_result(&mut cleanup_error, pod_rm(&pod.name, verbose));
+            } else if !pod_owned {
+                record_cleanup_result(
+                    &mut cleanup_error,
+                    Err(crate::error::Error::message(format!(
+                        "refusing to remove pod '{}' because it is not owned by one-off instance '{}'",
+                        pod.name, spec.project_name
+                    ))),
+                );
+            }
+        }
+    }
+
+    match cleanup_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+fn record_cleanup_result(target: &mut Option<crate::error::Error>, result: Result<()>) {
+    if let Err(err) = result
+        && target.is_none()
+    {
+        *target = Some(err);
+    }
+}
+
+fn resource_labels_match(kind: &str, name: &str, spec: &RuntimeSpec) -> Result<bool> {
+    let format = if kind == "pod" {
+        "{{json .Labels}}"
+    } else {
+        "{{json .Config.Labels}}"
+    };
+    let labels = inspect_value(kind, name, format, false)?;
+    let labels: serde_json::Value = serde_json::from_str(&labels)
+        .with_context(|| format!("failed to parse labels for {kind} {name}"))?;
+
+    Ok(labels.get("cladding").and_then(serde_json::Value::as_str)
+        == Some(spec.project_name.as_str())
+        && labels
+            .get("project_root")
+            .and_then(serde_json::Value::as_str)
+            == Some(spec.project_root.to_string_lossy().as_ref()))
+}
+
+fn inspect_value(kind: &str, name: &str, format: &str, verbose: bool) -> Result<String> {
+    let mut cmd = Command::new("podman");
+    cmd.args([kind, "inspect", "--format", format, name]);
+    trace_command(&cmd, verbose);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to inspect {kind} {name}"))?;
+    ensure_success_output(&output, "podman inspect")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn inspect_resource_state(kind: &'static str, name: &str, verbose: bool) -> Result<Option<String>> {

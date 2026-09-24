@@ -14,17 +14,52 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 
+struct PodmanExec<'a> {
+    command_name: &'a str,
+    mount_target: MountTarget,
+    container_name: &'a str,
+    env_vars: &'a [String],
+    args: &'a [String],
+    allow_interactive: bool,
+    forward_stdin: bool,
+    forward_signals: bool,
+}
+
 pub(super) fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
     let config = context.load_config()?;
     let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
     run_podman_exec(
         context,
         &config,
-        "run",
-        MountTarget::Agent,
-        &container_name,
-        env_vars,
-        args,
+        PodmanExec {
+            command_name: "run",
+            mount_target: MountTarget::Agent,
+            container_name: &container_name,
+            env_vars,
+            args,
+            allow_interactive: true,
+            forward_stdin: true,
+            forward_signals: false,
+        },
+    )
+}
+
+pub(super) fn cmd_run_once(context: &Context, args: &[String], forward_stdin: bool) -> Result<()> {
+    let config = context.load_config()?;
+    let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
+    run_podman_exec(
+        context,
+        &config,
+        PodmanExec {
+            command_name: "once",
+            mount_target: MountTarget::Agent,
+            container_name: &container_name,
+            env_vars: &[],
+            args,
+            allow_interactive: forward_stdin,
+            forward_stdin,
+            forward_signals: true,
+        },
     )
 }
 
@@ -58,11 +93,16 @@ pub(super) fn cmd_run_with_scissors(
     run_podman_exec(
         context,
         &config,
-        "run-with-scissors",
-        mount_target,
-        &container_name,
-        env_vars,
-        args,
+        PodmanExec {
+            command_name: "run-with-scissors",
+            mount_target,
+            container_name: &container_name,
+            env_vars,
+            args,
+            allow_interactive: true,
+            forward_stdin: true,
+            forward_signals: false,
+        },
     )
 }
 
@@ -132,12 +172,18 @@ fn logs_target_disabled(config: &ExecutionConfig, target: LogsTarget) -> Result<
 fn run_podman_exec(
     context: &Context,
     config: &ExecutionConfig,
-    command_name: &str,
-    mount_target: MountTarget,
-    container_name: &str,
-    env_vars: &[String],
-    args: &[String],
+    request: PodmanExec<'_>,
 ) -> Result<()> {
+    let PodmanExec {
+        command_name,
+        mount_target,
+        container_name,
+        env_vars,
+        args,
+        allow_interactive,
+        forward_stdin,
+        forward_signals,
+    } = request;
     if args.is_empty() {
         eprintln!("usage: cladding {command_name} [--env KEY[=VALUE] ...] <command> [args...]");
         return Err(Error::message(format!("missing {command_name} command")));
@@ -156,7 +202,7 @@ fn run_podman_exec(
     let cwd = canonicalize_path(&cwd)?;
     let container_workdir = resolve_container_workdir(config, &project_dir, &cwd, mount_target)?;
 
-    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let interactive = allow_interactive && io::stdin().is_terminal() && io::stdout().is_terminal();
 
     let mut cmd = Command::new("podman");
     if interactive {
@@ -176,10 +222,18 @@ fn run_podman_exec(
             "--env",
             &format!("FORCE_COLOR={force_color}"),
         ]);
-    } else {
+    } else if forward_stdin {
         cmd.args([
             "exec",
             "-i",
+            "-w",
+            &container_workdir.display().to_string(),
+            "--env",
+            "LANG=C.UTF-8",
+        ]);
+    } else {
+        cmd.args([
+            "exec",
             "-w",
             &container_workdir.display().to_string(),
             "--env",
@@ -203,16 +257,26 @@ fn run_podman_exec(
 
     let mut signal_handle = None;
     let mut signal_thread = None;
-    if !interactive {
+    if !interactive || forward_signals {
         let kill_pattern = args.join(" ");
         let mut signals =
             Signals::new([SIGINT, SIGTERM]).with_context(|| "failed to install signal handlers")?;
         signal_handle = Some(signals.handle());
         let container_name = container_name.to_string();
         signal_thread = Some(thread::spawn(move || {
-            if signals.forever().next().is_some() && !kill_pattern.is_empty() {
+            if let Some(signal) = signals.forever().next()
+                && !kill_pattern.is_empty()
+            {
+                let signal = format!("-{signal}");
                 let _ = Command::new("podman")
-                    .args(["exec", &container_name, "pkill", "-f", &kill_pattern])
+                    .args([
+                        "exec",
+                        &container_name,
+                        "pkill",
+                        &signal,
+                        "-f",
+                        &kill_pattern,
+                    ])
                     .status();
             }
         }));
@@ -239,7 +303,19 @@ fn run_podman_exec(
             })
         }
     } else {
-        Err(Error::message("podman exec failed"))
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            let code = status.signal().map(|signal| 128 + signal).unwrap_or(1);
+            Err(Error::CommandFailed {
+                context: "podman exec",
+                code,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(Error::message("podman exec failed"))
+        }
     }
 }
 
