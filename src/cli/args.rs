@@ -1,6 +1,8 @@
 use cladding::config::ExecutionConfig;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use std::net::IpAddr;
+#[cfg(test)]
+use std::path::Path;
 use std::path::PathBuf;
 
 const VERSION: &str = jj_version::jj_version!(fallback = env!("CARGO_PKG_VERSION"),);
@@ -8,6 +10,17 @@ const VERSION: &str = jj_version::jj_version!(fallback = env!("CARGO_PKG_VERSION
 #[derive(Parser)]
 #[command(name = "cladding", version = VERSION, arg_required_else_help = true)]
 pub(super) struct Cli {
+    /// Select the `.cladding` directory used for runtime state and default config
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        conflicts_with = "project_root"
+    )]
+    pub(super) cladding_dir: Option<PathBuf>,
+    /// Load config from FILE, or from stdin when FILE is `-`
+    #[arg(long, global = true, value_name = "FILE")]
+    pub(super) config: Option<PathBuf>,
     #[arg(long, global = true, hide = true)]
     pub(super) project_root: Option<PathBuf>,
     #[command(subcommand)]
@@ -67,6 +80,12 @@ pub(super) enum CommandSpec {
     Expose(ExposeArgs),
     /// Connect agent localhost to a host-reachable TCP endpoint
     Inject(InjectArgs),
+}
+
+impl CommandSpec {
+    pub(super) fn uses_config(&self) -> bool {
+        !matches!(self, Self::Init { .. } | Self::Ps)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -291,6 +310,58 @@ mod tests {
         let down = Cli::try_parse_from(["cladding", "down", "--verbose"]).expect("cli parse");
         match down.command.expect("command") {
             CommandSpec::Down { verbose } => assert!(verbose),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_directory_and_config_options_parse_before_and_after_command() {
+        let before = Cli::try_parse_from([
+            "cladding",
+            "--cladding-dir",
+            "/tmp/app/.cladding",
+            "--config",
+            "./custom.json",
+            "up",
+        ])
+        .expect("global options before command should parse");
+        assert_eq!(
+            before.cladding_dir.as_deref(),
+            Some(Path::new("/tmp/app/.cladding"))
+        );
+        assert_eq!(before.config.as_deref(), Some(Path::new("./custom.json")));
+        assert!(matches!(before.command, Some(CommandSpec::Up { .. })));
+
+        let after = Cli::try_parse_from([
+            "cladding",
+            "up",
+            "--cladding-dir",
+            "/tmp/app/.cladding",
+            "--config",
+            "-",
+        ])
+        .expect("global options after command should parse");
+        assert_eq!(after.config.as_deref(), Some(Path::new("-")));
+        assert_eq!(
+            after.cladding_dir.as_deref(),
+            Some(Path::new("/tmp/app/.cladding"))
+        );
+    }
+
+    #[test]
+    fn run_arguments_remain_positional_after_global_options() {
+        let cli = Cli::try_parse_from([
+            "cladding",
+            "--config",
+            "custom.json",
+            "run",
+            "echo",
+            "--config",
+        ])
+        .expect("run command arguments should remain positional");
+        assert_eq!(cli.config.as_deref(), Some(Path::new("custom.json")));
+        match cli.command.expect("command") {
+            CommandSpec::Run { args, .. } => assert_eq!(args, ["echo", "--config"]),
             other => panic!("unexpected command: {other:?}"),
         }
     }

@@ -1,7 +1,7 @@
 use super::DEFAULT_CLADDING_BUILD_IMAGE;
 use super::context::Context;
 use cladding::assets::{scripts_files, tool_files};
-use cladding::config::{ExecutionConfig, load_cladding_config_v2};
+use cladding::config::ExecutionConfig;
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_executable, path_is_symlink};
 use cladding::podman::runsc_available;
@@ -13,14 +13,18 @@ use std::process::Command;
 
 pub(super) fn cmd_check(context: &Context) -> Result<()> {
     let legacy_config_entries_present = check_legacy_config_entries(context);
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
 
     warn_obsolete_generated_paths(context);
     check_required_binaries(context, &config)?;
     check_runsc_runtime(&config, false)?;
     check_required_config_files(context, &config)?;
     check_required_images(&config, false)?;
-    let spec = RuntimeSpec::build(&context.project_root, &config);
+    let spec = RuntimeSpec::build_with_workspace_root(
+        &context.project_root,
+        &context.workspace_root,
+        &config,
+    );
     check_required_host_paths(&spec)?;
     if legacy_config_entries_present {
         return Err(Error::message("legacy config entries"));
@@ -361,7 +365,7 @@ mod tests {
         fs::create_dir_all(&config_dir).expect("create config dir");
         fs::write(config_dir.join("cli_domains.lst"), "legacy").expect("write legacy config");
 
-        let context = Context { project_root: temp };
+        let context = Context::default_for_project(temp);
 
         assert!(check_legacy_config_entries(&context));
     }
@@ -379,7 +383,7 @@ mod tests {
             fs::write(path, contents).expect("write script");
         }
 
-        let context = Context { project_root: temp };
+        let context = Context::default_for_project(temp);
         assert!(!report_runtime_script_mismatch(&context, "error").expect("check scripts"));
 
         fs::write(
@@ -400,9 +404,7 @@ mod tests {
         fs::create_dir_all(&bin_dir).expect("create bin dir");
         write_embedded_tools(&bin_dir).expect("write tools");
 
-        let context = Context {
-            project_root: temp.clone(),
-        };
+        let context = Context::default_for_project(temp.clone());
         let config = execution_config(true, true, Vec::new());
 
         assert!(check_required_binaries(&context, &config).is_ok());

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Load `cladding.json` from a selected `.cladding` directory.
 pub fn load_cladding_config_v2(project_root: &Path) -> Result<ExecutionConfig> {
     let config_path = project_root.join("cladding.json");
 
@@ -18,22 +19,42 @@ pub fn load_cladding_config_v2(project_root: &Path) -> Result<ExecutionConfig> {
         return Err(Error::message("missing cladding.json"));
     }
 
-    let raw = fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    load_cladding_config_v2_from_path(&config_path)
+}
 
-    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
+/// Load a JSON config file and resolve its relative paths from its parent directory.
+pub fn load_cladding_config_v2_from_path(config_path: &Path) -> Result<ExecutionConfig> {
+    if !config_path.is_file() {
+        eprintln!(
+            "error: configuration file does not exist or is not a file: {}",
+            config_path.display()
+        );
+        eprintln!("hint: pass a JSON config file with --config FILE, or use --config - for stdin");
+        return Err(Error::message("invalid configuration file path"));
+    }
+
+    let raw = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    load_cladding_config_v2_from_str(config_path, &raw)
+}
+
+/// Parse JSON and resolve relative paths from the parent of `config_path`.
+///
+/// For stdin input, pass a synthetic path whose parent is the required base directory.
+pub fn load_cladding_config_v2_from_str(config_path: &Path, raw: &str) -> Result<ExecutionConfig> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
         eprintln!("error: cladding.json must include string key: name");
         Error::message("invalid cladding.json")
     })?;
 
-    validate_top_level_keys(&parsed, &config_path)?;
+    validate_top_level_keys(&parsed, config_path)?;
 
-    let name = get_config_string(&parsed, "name", &config_path)?;
-    let use_runsc = get_config_bool(&parsed, "use_runsc", &config_path)?;
-    let agent = parse_component_object(&parsed, "agent", true, &name, &config_path)?;
-    let nw_sandbox = parse_component_object(&parsed, "nw_sandbox", false, &name, &config_path)?;
-    let fs_sandbox = parse_component_object(&parsed, "fs_sandbox", false, &name, &config_path)?;
-    let proxy = parse_proxy_object(&parsed, &name, &config_path)?;
+    let name = get_config_string(&parsed, "name", config_path)?;
+    let use_runsc = get_config_bool(&parsed, "use_runsc", config_path)?;
+    let agent = parse_component_object(&parsed, "agent", true, &name, config_path)?;
+    let nw_sandbox = parse_component_object(&parsed, "nw_sandbox", false, &name, config_path)?;
+    let fs_sandbox = parse_component_object(&parsed, "fs_sandbox", false, &name, config_path)?;
+    let proxy = parse_proxy_object(&parsed, &name, config_path)?;
     let execution_config = ExecutionConfig {
         name: name.clone(),
         use_runsc,
@@ -44,10 +65,14 @@ pub fn load_cladding_config_v2(project_root: &Path) -> Result<ExecutionConfig> {
         mounts: Vec::new(),
     };
     let mut used_mount_targets = HashSet::new();
+    let config_dir = resolve_path(
+        Path::new("."),
+        config_path.parent().unwrap_or(Path::new(".")),
+    );
     let mounts = parse_mounts_v2(
-        project_root,
+        &config_dir,
         &parsed,
-        &config_path,
+        config_path,
         &execution_config,
         &mut used_mount_targets,
     )?;
@@ -505,6 +530,55 @@ mod tests {
         assert_eq!(
             proxy.build.as_ref().unwrap().containerfile,
             temp.join("containers/proxy.Containerfile")
+        );
+    }
+
+    #[test]
+    fn explicit_config_resolves_build_and_mount_paths_from_its_directory() {
+        let temp = create_temp_dir("explicit-config-paths");
+        let config_dir = temp.join("external-config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("custom.json");
+        fs::write(
+            &config_path,
+            r#"{
+  "name": "demo",
+  "agent": { "build": { "containerfile": "containers/agent.Containerfile" } },
+  "mounts": [{ "mount": "/data", "hostPath": "assets" }]
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cladding_config_v2_from_path(&config_path).unwrap();
+
+        assert_eq!(
+            config.agent.build.unwrap().containerfile,
+            config_dir.join("containers/agent.Containerfile")
+        );
+        assert_eq!(
+            config.mounts[0].host_path.as_deref(),
+            Some(config_dir.join("assets").as_path())
+        );
+    }
+
+    #[test]
+    fn stdin_config_uses_its_synthetic_file_directory_for_references() {
+        let temp = create_temp_dir("stdin-config-paths");
+        let raw = r#"{
+  "name": "demo",
+  "agent": { "build": { "containerfile": "containers/agent.Containerfile" } },
+  "mounts": [{ "mount": "/data", "hostPath": "assets" }]
+}"#;
+
+        let config = load_cladding_config_v2_from_str(&temp.join("cladding.json"), raw).unwrap();
+
+        assert_eq!(
+            config.agent.build.unwrap().containerfile,
+            temp.join("containers/agent.Containerfile")
+        );
+        assert_eq!(
+            config.mounts[0].host_path.as_deref(),
+            Some(temp.join("assets").as_path())
         );
     }
 

@@ -10,9 +10,12 @@ mod lifecycle;
 use anyhow::Context as _;
 use args::{Cli, CommandSpec};
 use clap::Parser;
-use context::{Context, resolve_project_root};
+use context::{
+    ConfigSource, Context, resolve_project_root, resolve_workspace_root, stdin_config_base_dir,
+};
 
-use cladding::error::Result;
+use cladding::error::{Error, Result};
+use std::io::Read as _;
 
 pub use errors::print_error_and_exit;
 
@@ -27,9 +30,35 @@ pub fn run() -> Result<()> {
     let command = cli.command.unwrap();
 
     let cwd = std::env::current_dir().with_context(|| "failed to determine current directory")?;
-    let project_root = resolve_project_root(&cwd, cli.project_root.as_ref(), &command)?;
+    if cli.config.is_some() && !command.uses_config() {
+        eprintln!("error: this command does not read configuration");
+        eprintln!("hint: --config applies to commands that use the Cladding configuration");
+        return Err(Error::message("unsupported --config option for command"));
+    }
+    if cli.cladding_dir.is_some() && matches!(&command, CommandSpec::Ps) {
+        eprintln!("error: 'ps' is not scoped to a project directory");
+        eprintln!("hint: omit --cladding-dir when listing all running projects");
+        return Err(Error::message("unsupported --cladding-dir option for ps"));
+    }
 
-    let context = Context { project_root };
+    let selected_root = cli.cladding_dir.as_ref().or(cli.project_root.as_ref());
+    let project_root = resolve_project_root(&cwd, selected_root, &command)?;
+    let workspace_root = resolve_workspace_root(&cwd);
+
+    let config_source = match cli.config {
+        None => ConfigSource::Default,
+        Some(path) if path == std::path::Path::new("-") => {
+            let base_dir = stdin_config_base_dir(&cwd, cli.cladding_dir.as_deref());
+            let mut raw = String::new();
+            std::io::stdin()
+                .read_to_string(&mut raw)
+                .with_context(|| "failed to read configuration from stdin")?;
+            ConfigSource::Stdin { raw, base_dir }
+        }
+        Some(path) => ConfigSource::File(path),
+    };
+
+    let context = Context::new(project_root, workspace_root, config_source);
 
     match command {
         CommandSpec::Build => lifecycle::cmd_build(&context),

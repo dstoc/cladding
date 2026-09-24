@@ -3,7 +3,6 @@ use super::context::{Context, project_runtime_status};
 use super::exec::agent_runtime_names;
 use super::expose::socat_required;
 use anyhow::Context as _;
-use cladding::config::load_cladding_config_v2;
 use cladding::error::{Error, Result};
 use cladding::podman::{podman_container_exists, podman_required};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
@@ -22,7 +21,7 @@ pub(super) fn cmd_inject(context: &Context, args: &InjectArgs) -> Result<()> {
     podman_required("podman (required for cladding inject)")?;
     socat_required("inject")?;
 
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
     let status = project_runtime_status(context, &config, false)?;
     if !status.already_running {
         eprintln!("error: cladding project '{}' is not running", config.name);
