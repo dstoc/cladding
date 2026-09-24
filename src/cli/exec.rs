@@ -2,7 +2,7 @@ use super::args::{LogsTarget, RunWithScissorsTarget};
 use super::context::{Context, project_runtime_status};
 use super::{CONTAINER_HOME_DIR, CONTAINER_WORKSPACE_DIR};
 use anyhow::Context as _;
-use cladding::config::{ExecutionConfig, MountTarget, load_cladding_config_v2};
+use cladding::config::{ExecutionConfig, MountTarget};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::canonicalize_path;
 use cladding::podman::podman_required;
@@ -15,7 +15,7 @@ use std::process::Command;
 use std::thread;
 
 pub(super) fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
     let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
     run_podman_exec(
         context,
@@ -34,7 +34,7 @@ pub(super) fn cmd_run_with_scissors(
     env_vars: &[String],
     args: &[String],
 ) -> Result<()> {
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
     let (container_name, mount_target) = match target {
         RunWithScissorsTarget::NwSandbox => {
             if !target.enabled(&config) {
@@ -92,7 +92,7 @@ fn run_with_scissors_target_disabled(
 pub(super) fn cmd_logs(context: &Context, target: LogsTarget, args: &[String]) -> Result<()> {
     podman_required("podman (required for cladding logs)")?;
 
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
     let pod_name = match target {
         LogsTarget::Agent => project_component_name(&config.name, "agent"),
         LogsTarget::Proxy => project_component_name(&config.name, "proxy"),
@@ -250,7 +250,7 @@ fn run_podman_exec(
 }
 
 pub(super) fn cmd_reload_proxy(context: &Context) -> Result<()> {
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
 
     let status = Command::new("podman")
         .args([

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub(super) fn parse_mounts_v2(
-    project_root: &Path,
+    config_dir: &Path,
     parsed: &serde_json::Value,
     config_path: &Path,
     execution_config: &ExecutionConfig,
@@ -52,7 +52,7 @@ pub(super) fn parse_mounts_v2(
                 Some(if candidate.is_absolute() {
                     candidate
                 } else {
-                    project_root.join(candidate)
+                    config_dir.join(candidate)
                 })
             }
             None => None,

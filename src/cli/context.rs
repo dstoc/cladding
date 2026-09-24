@@ -1,5 +1,8 @@
 use super::args::CommandSpec;
-use cladding::config::ExecutionConfig;
+use cladding::config::{
+    ExecutionConfig, load_cladding_config_v2, load_cladding_config_v2_from_path,
+    load_cladding_config_v2_from_str,
+};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::canonicalize_path;
 use cladding::podman::list_running_projects;
@@ -8,6 +11,45 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub(super) struct Context {
     pub(super) project_root: PathBuf,
+    config_source: ConfigSource,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum ConfigSource {
+    Default,
+    File(PathBuf),
+    Stdin { raw: String, base_dir: PathBuf },
+}
+
+impl Context {
+    pub(super) fn new(project_root: PathBuf, config_source: ConfigSource) -> Self {
+        Self {
+            project_root,
+            config_source,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn default_for_project(project_root: PathBuf) -> Self {
+        Self::new(project_root, ConfigSource::Default)
+    }
+
+    pub(super) fn load_config(&self) -> Result<ExecutionConfig> {
+        match &self.config_source {
+            ConfigSource::Default => load_cladding_config_v2(&self.project_root),
+            ConfigSource::File(path) => load_cladding_config_v2_from_path(path),
+            ConfigSource::Stdin { raw, base_dir } => {
+                load_cladding_config_v2_from_str(&base_dir.join("cladding.json"), raw)
+            }
+        }
+    }
+}
+
+pub(super) fn stdin_config_base_dir(cwd: &Path, cladding_dir: Option<&Path>) -> PathBuf {
+    cladding_dir
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.to_path_buf())
 }
 
 fn find_project_root(start: &Path) -> Option<PathBuf> {
@@ -27,6 +69,22 @@ pub(super) fn resolve_project_root(
     command: &CommandSpec,
 ) -> Result<PathBuf> {
     if let Some(root) = override_root {
+        if matches!(command, CommandSpec::Init { .. }) {
+            if root.exists() && !root.is_dir() {
+                eprintln!(
+                    "error: selected .cladding path exists but is not a directory: {}",
+                    root.display()
+                );
+                return Err(Error::message("invalid .cladding path"));
+            }
+        } else if !root.is_dir() {
+            eprintln!(
+                "error: selected .cladding directory does not exist or is not a directory: {}",
+                root.display()
+            );
+            eprintln!("hint: pass the path to an existing .cladding directory");
+            return Err(Error::message("invalid .cladding directory"));
+        }
         return Ok(root.to_path_buf());
     }
 
@@ -101,4 +159,124 @@ pub(super) fn project_runtime_status(
         current_project_root,
         already_running,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn explicit_config_load_is_independent_of_selected_runtime_directory() {
+        let temp = create_temp_dir("external-config");
+        let runtime_dir = temp.join("runtime/.cladding");
+        let config_dir = temp.join("configs");
+        fs::create_dir_all(&runtime_dir).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("custom.json");
+        fs::write(
+            &config_path,
+            r#"{"name":"custom","agent":{"image":"agent:test"}}"#,
+        )
+        .unwrap();
+
+        let context = Context::new(runtime_dir.clone(), ConfigSource::File(config_path));
+        let config = context.load_config().unwrap();
+
+        assert_eq!(context.project_root, runtime_dir);
+        assert_eq!(config.name, "custom");
+    }
+
+    #[test]
+    fn stdin_config_references_use_the_provided_base_directory() {
+        let temp = create_temp_dir("stdin-config");
+        let runtime_dir = temp.join("runtime/.cladding");
+        let config_base = temp.join("project");
+        fs::create_dir_all(&runtime_dir).unwrap();
+        fs::create_dir_all(&config_base).unwrap();
+        let raw = r#"{
+            "name":"custom",
+            "agent":{"build":{"containerfile":"containers/agent.Containerfile"}}
+        }"#;
+        let context = Context::new(
+            runtime_dir,
+            ConfigSource::Stdin {
+                raw: raw.to_string(),
+                base_dir: config_base.clone(),
+            },
+        );
+
+        let config = context.load_config().unwrap();
+
+        assert_eq!(
+            config.agent.build.unwrap().containerfile,
+            config_base.join("containers/agent.Containerfile")
+        );
+    }
+
+    #[test]
+    fn explicit_directory_and_default_discovery_select_the_expected_root() {
+        let temp = create_temp_dir("directory-discovery");
+        let project_root = temp.join("project/.cladding");
+        let cwd = temp.join("project/src");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let command = CommandSpec::Up { verbose: false };
+
+        assert_eq!(
+            resolve_project_root(&cwd, None, &command).unwrap(),
+            project_root
+        );
+        assert_eq!(
+            resolve_project_root(&cwd, Some(&project_root), &command).unwrap(),
+            project_root
+        );
+    }
+
+    #[test]
+    fn init_can_create_an_explicit_cladding_directory() {
+        let temp = create_temp_dir("init-directory");
+        let selected_root = temp.join("project/.cladding");
+
+        let root = resolve_project_root(
+            &temp,
+            Some(&selected_root),
+            &CommandSpec::Init { name: None },
+        )
+        .unwrap();
+
+        assert_eq!(root, selected_root);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn stdin_config_base_uses_selected_directory_parent_or_invocation_directory() {
+        let cwd = Path::new("/work/current");
+        let selected = Path::new("/tmp/project/.cladding");
+
+        assert_eq!(
+            stdin_config_base_dir(cwd, Some(selected)),
+            PathBuf::from("/tmp/project")
+        );
+        assert_eq!(
+            stdin_config_base_dir(cwd, None),
+            PathBuf::from("/work/current")
+        );
+    }
+
+    fn create_temp_dir(name: &str) -> PathBuf {
+        let unique = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "cladding-context-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        if path.exists() {
+            fs::remove_dir_all(&path).unwrap();
+        }
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 }

@@ -101,6 +101,27 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 
   `cladding inject <host-endpoint> [containerport]` runs in the foreground and stops with Ctrl-C. A bare port such as `11434` maps agent `127.0.0.1:11434` to host `127.0.0.1:11434`. A second port changes only the agent-side listener, so `cladding inject 5432 15432` maps agent `127.0.0.1:15432` to host `127.0.0.1:5432`. An explicit `host:port` is resolved from the host and should be treated as a deliberate temporary exception for that one endpoint, not general host networking.
 
+### Selecting the Cladding directory and configuration
+
+Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without this option, Cladding searches the invocation directory and its parents as before. This option selects Cladding runtime and configuration files. It does not change the host working directory or run an implicit `cd`; commands keep the existing mapping from the invocation directory to the agent.
+
+Use `--config FILE` to load a specific JSON configuration file. Use `--config -` to read the JSON configuration from stdin. When omitted, Cladding loads `cladding.json` from the selected or discovered `.cladding` directory.
+
+Both options are available to the configuration-consuming commands: `build`, `check`, `up`, `down`, `destroy`, `run`, `run-with-scissors`, `logs`, `reload-proxy`, `expose`, and `inject`.
+
+When both options are set, `--config` selects the configuration contents and `--cladding-dir` selects the runtime directory. Relative build paths and mount `hostPath` values resolve from the configuration file's directory. For stdin configuration, they resolve from the parent of the explicitly selected `.cladding` directory, or from the invocation directory when `--cladding-dir` is omitted.
+
+Place shared options before the command when using commands that accept arbitrary command arguments:
+
+```bash
+cladding --cladding-dir /tmp/project/.cladding up
+cladding --config ./custom.json run codex --yolo
+cladding --cladding-dir /tmp/project/.cladding down
+cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - check
+```
+
+`init` accepts `--cladding-dir` to choose where it creates the directory. It does not read `--config`. `ps` lists all running projects, so it does not accept either project-specific option. Reading `--config -` consumes stdin as configuration; the same stdin stream is not available to a command run through `cladding run`.
+
 ### Configuring container images
 
 Each component can use an existing image or build one from a Containerfile. The component `image` value is the build output tag when `build` is also set. If `image` is omitted, `cladding build` generates a local tag such as `localhost/cladding-myproject-agent:latest`.

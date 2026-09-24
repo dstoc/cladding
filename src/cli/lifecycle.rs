@@ -7,9 +7,7 @@ use super::context::{Context, project_runtime_status};
 use super::{DEFAULT_CLADDING_BUILD_IMAGE, DEFAULT_CLI_BUILD_IMAGE, DEFAULT_SANDBOX_BUILD_IMAGE};
 use anyhow::Context as _;
 use cladding::assets::{materialize_config, materialize_runtime_scripts, write_embedded_tools};
-use cladding::config::{
-    ExecutionConfig, ImageBuildConfig, load_cladding_config_v2, write_default_cladding_config,
-};
+use cladding::config::{ExecutionConfig, ImageBuildConfig, write_default_cladding_config};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::podman::{
@@ -21,7 +19,7 @@ use std::collections::HashMap;
 use std::fs;
 
 pub(super) fn cmd_build(context: &Context) -> Result<()> {
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
 
     let host_uid = unsafe { libc::getuid() };
     let host_gid = unsafe { libc::getgid() };
@@ -248,7 +246,7 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
 }
 
 pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
     materialize_runtime_scripts(&context.project_root)?;
     let status = project_runtime_status(context, &config, verbose)?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
@@ -288,7 +286,7 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
 }
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose));
@@ -300,7 +298,7 @@ pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
 }
 
 pub(super) fn cmd_destroy(context: &Context) -> Result<()> {
-    let config = load_cladding_config_v2(&context.project_root)?;
+    let config = context.load_config()?;
     let spec = RuntimeSpec::build(&context.project_root, &config);
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false));
