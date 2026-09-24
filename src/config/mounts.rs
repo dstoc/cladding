@@ -41,6 +41,7 @@ pub(super) fn parse_mounts_v2(
                 Error::message("invalid cladding.json")
             })?;
         ensure_absolute_mount_path(config_path, &format!("mounts[{index}].mount"), mount_path)?;
+        let normalized_mount_path = normalize_path(Path::new(mount_path));
 
         let host_path = match object.get("hostPath") {
             Some(value) => {
@@ -224,7 +225,7 @@ pub(super) fn parse_mounts_v2(
             .as_deref()
             .is_some_and(|path| path_is_inside_private_config(config_dir, path));
         let mount_path_is_inside_workspace_mask =
-            Path::new(mount_path).starts_with("/home/user/workspace/.cladding");
+            normalized_mount_path.starts_with("/home/user/workspace/.cladding");
         let host_path_contains_private_config = mount_type == MountType::Bind
             && mount_path_is_inside_workspace_mask
             && host_path
@@ -253,7 +254,7 @@ pub(super) fn parse_mounts_v2(
         };
 
         if ignore
-            && mount_path == "/home/user/workspace/.cladding"
+            && normalized_mount_path == Path::new("/home/user/workspace/.cladding")
             && targets
                 .iter()
                 .any(|target| matches!(target, MountTarget::Agent | MountTarget::NwSandbox))
@@ -608,6 +609,15 @@ mod tests {
             serde_json::json!({
                 "mount": "/home/user/workspace/.cladding",
                 "hostPath": "..",
+                "type": "bind"
+            }),
+            serde_json::json!({
+                "mount": "/home/user/workspace/../workspace/.cladding",
+                "hostPath": "."
+            }),
+            serde_json::json!({
+                "mount": "/home/user/workspace/../workspace/.cladding",
+                "hostPath": ".",
                 "type": "bind"
             }),
         ] {
