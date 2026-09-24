@@ -373,7 +373,6 @@ mod tests {
             nw_sandbox: None,
             fs_sandbox: None,
             proxy: None,
-            build_secret_dirs: Vec::new(),
             mounts: Vec::new(),
         };
 
@@ -405,7 +404,6 @@ mod tests {
             nw_sandbox: None,
             fs_sandbox: None,
             proxy: None,
-            build_secret_dirs: Vec::new(),
             mounts: vec![ResolvedMountConfig {
                 mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
                 host_path: Some(custom_root.clone()),
@@ -444,7 +442,6 @@ mod tests {
             nw_sandbox: None,
             fs_sandbox: None,
             proxy: None,
-            build_secret_dirs: Vec::new(),
             mounts: Vec::new(),
         };
 
@@ -474,7 +471,6 @@ mod tests {
             nw_sandbox: None,
             fs_sandbox: None,
             proxy: None,
-            build_secret_dirs: Vec::new(),
             mounts: vec![ResolvedMountConfig {
                 mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
                 host_path: Some(custom_root),

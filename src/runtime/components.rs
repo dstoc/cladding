@@ -505,7 +505,6 @@ mod tests {
                 build: None,
             }),
             proxy: None,
-            build_secret_dirs: Vec::new(),
             mounts,
         }
     }

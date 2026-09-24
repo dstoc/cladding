@@ -39,7 +39,6 @@ pub struct ExecutionConfig {
     pub nw_sandbox: Option<ExecutionComponentConfig>,
     pub fs_sandbox: Option<ExecutionComponentConfig>,
     pub proxy: Option<ExecutionProxyConfig>,
-    pub build_secret_dirs: Vec<PathBuf>,
     pub mounts: Vec<ResolvedMountConfig>,
 }
 

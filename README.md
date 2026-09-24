@@ -140,9 +140,9 @@ Each component can use an existing image or build one from a Containerfile. The 
 }
 ```
 
-`containerfile` and `context` paths are relative to `.cladding/cladding.json`. `context` defaults to the `.cladding` directory when omitted. Build `args` are string values passed to Podman as ordinary Containerfile build arguments. Do not put secrets in build arguments. Names that indicate credentials, passwords, tokens, secrets, or private keys are rejected.
+`containerfile` and `context` paths are relative to `.cladding/cladding.json`. `context` defaults to the `.cladding` directory when omitted. Build `args` are string values passed to Podman as ordinary Containerfile build arguments.
 
-`cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag. It excludes `.cladding/credentials` and a configured `proxy.credentialsDir` from the build context.
+`cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag.
 
 The filtering-only proxy remains the default when `proxy` is omitted. Set `proxy.builtin` to `"squid-mitm"` to select the built-in TLS proxy image. A built-in proxy cannot be combined with `proxy.image` or `proxy.build`.
 

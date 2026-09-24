@@ -34,22 +34,6 @@ pub fn load_cladding_config_v2(project_root: &Path) -> Result<ExecutionConfig> {
     let nw_sandbox = parse_component_object(&parsed, "nw_sandbox", false, &name, &config_path)?;
     let fs_sandbox = parse_component_object(&parsed, "fs_sandbox", false, &name, &config_path)?;
     let proxy = parse_proxy_object(&parsed, &name, &config_path)?;
-    let mut build_secret_dirs = vec![resolve_path(
-        config_path.parent().unwrap_or(project_root),
-        Path::new("credentials"),
-    )];
-    if let Some(credentials_dir) = parsed
-        .get("proxy")
-        .and_then(|value| value.get("credentialsDir"))
-        .and_then(serde_json::Value::as_str)
-    {
-        build_secret_dirs.push(resolve_path(
-            config_path.parent().unwrap_or(project_root),
-            Path::new(credentials_dir),
-        ));
-    }
-    build_secret_dirs.sort();
-    build_secret_dirs.dedup();
     let execution_config = ExecutionConfig {
         name: name.clone(),
         use_runsc,
@@ -57,7 +41,6 @@ pub fn load_cladding_config_v2(project_root: &Path) -> Result<ExecutionConfig> {
         nw_sandbox,
         fs_sandbox,
         proxy,
-        build_secret_dirs,
         mounts: Vec::new(),
     };
     let mut used_mount_targets = HashSet::new();
@@ -267,23 +250,13 @@ fn parse_proxy_object(
         Error::message("invalid cladding.json")
     })?;
 
-    let allowed = ["image", "build", "builtin", "credentialsDir"];
+    let allowed = ["image", "build", "builtin"];
     for field in object.keys() {
         if !allowed.contains(&field.as_str()) {
             eprintln!("error: cladding.json unknown key: proxy.{field}");
             eprintln!("file: {}", config_path.display());
             return Err(Error::message("invalid cladding.json"));
         }
-    }
-
-    if let Some(value) = object.get("credentialsDir")
-        && value.as_str().is_none_or(str::is_empty)
-    {
-        eprintln!(
-            "error: cladding.json invalid field 'proxy.credentialsDir' (expected non-empty string)"
-        );
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid cladding.json"));
     }
 
     let builtin = match object.get("builtin") {
@@ -393,11 +366,10 @@ fn parse_build_config(
                 eprintln!("file: {}", config_path.display());
                 return Err(Error::message("invalid cladding.json"));
             };
-            if name.is_empty() || is_sensitive_build_arg(name) {
+            if name.is_empty() {
                 eprintln!(
-                    "error: cladding.json field '{field}.args.{name}' uses a reserved secret-like build argument name"
+                    "error: cladding.json field '{field}.args.{name}' must not have an empty name"
                 );
-                eprintln!("hint: do not pass secrets through Containerfile build arguments");
                 eprintln!("file: {}", config_path.display());
                 return Err(Error::message("invalid cladding.json"));
             }
@@ -411,26 +383,6 @@ fn parse_build_config(
         context: resolve_path(base, Path::new(context)),
         args,
     }))
-}
-
-fn is_sensitive_build_arg(name: &str) -> bool {
-    let normalized = name
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    [
-        "secret",
-        "credential",
-        "accesskey",
-        "password",
-        "passwd",
-        "token",
-        "apikey",
-        "privatekey",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
 }
 
 fn generated_image_tag(project_name: &str, component_key: &str) -> String {
@@ -542,8 +494,7 @@ mod tests {
   },
   "proxy": {
     "image": "localhost/custom-proxy:latest",
-    "build": { "containerfile": "containers/proxy.Containerfile", "context": "../proxy" },
-    "credentialsDir": "../private-secrets"
+    "build": { "containerfile": "containers/proxy.Containerfile", "context": "../proxy" }
   }
 }"#,
         )
@@ -578,12 +529,6 @@ mod tests {
         assert_eq!(
             proxy.build.as_ref().unwrap().containerfile,
             temp.join("containers/proxy.Containerfile")
-        );
-        assert!(config.build_secret_dirs.contains(&temp.join("credentials")));
-        assert!(
-            config
-                .build_secret_dirs
-                .contains(&temp.parent().unwrap().join("private-secrets"))
         );
     }
 
@@ -624,8 +569,8 @@ mod tests {
     }
 
     #[test]
-    fn load_cladding_config_rejects_secret_like_build_argument_names() {
-        let temp = create_temp_dir("secret-build-arg");
+    fn load_cladding_config_accepts_ordinary_build_argument_names() {
+        let temp = create_temp_dir("ordinary-build-arg");
         fs::write(
             temp.join("cladding.json"),
             r#"{
@@ -633,49 +578,17 @@ mod tests {
   "agent": {
     "build": {
       "containerfile": "Containerfile",
-      "args": { "API_TOKEN": "should-not-be-passed" }
+      "args": { "API_TOKEN": "ordinary-value", "AWS_ACCESS_KEY_ID": "ordinary-value" }
     }
   }
 }"#,
         )
         .unwrap();
 
-        assert!(load_cladding_config_v2(&temp).is_err());
-    }
-
-    #[test]
-    fn load_cladding_config_rejects_access_key_build_argument_aliases() {
-        for (index, name) in [
-            "AWS_ACCESS_KEY_ID",
-            "AWS_ACCESS_KEY",
-            "ACCESS_KEY_ID",
-            "accessKeyId",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let temp = create_temp_dir(&format!("access-key-build-arg-{index}"));
-            fs::write(
-                temp.join("cladding.json"),
-                format!(
-                    r#"{{
-  "name": "demo",
-  "agent": {{
-    "build": {{
-      "containerfile": "Containerfile",
-      "args": {{ "{name}": "should-not-be-passed" }}
-    }}
-  }}
-}}"#
-                ),
-            )
-            .unwrap();
-
-            assert!(
-                load_cladding_config_v2(&temp).is_err(),
-                "expected build argument {name} to be rejected"
-            );
-        }
+        let config = load_cladding_config_v2(&temp).unwrap();
+        let args = &config.agent.build.as_ref().unwrap().args;
+        assert_eq!(args.get("API_TOKEN").unwrap(), "ordinary-value");
+        assert_eq!(args.get("AWS_ACCESS_KEY_ID").unwrap(), "ordinary-value");
     }
 
     #[test]

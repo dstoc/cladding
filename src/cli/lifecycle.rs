@@ -50,7 +50,6 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
                 None,
                 default_context,
                 &Default::default(),
-                &config.build_secret_dirs,
                 Some((host_uid, host_gid)),
             )?,
             BuildDefinition::Custom(build) => podman_build_image(
@@ -58,7 +57,6 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
                 Some(&build.containerfile),
                 &build.context,
                 &build.args,
-                &config.build_secret_dirs,
                 None,
             )?,
         }
@@ -363,7 +361,6 @@ mod tests {
             }),
             fs_sandbox: None,
             proxy: None,
-            build_secret_dirs: Vec::new(),
             mounts: Vec::<ResolvedMountConfig>::new(),
         }
     }
