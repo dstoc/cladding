@@ -20,7 +20,11 @@ pub(super) fn cmd_check(context: &Context) -> Result<()> {
     check_runsc_runtime(&config, false)?;
     check_required_config_files(context, &config)?;
     check_required_images(&config, false)?;
-    let spec = RuntimeSpec::build(&context.project_root, &config);
+    let spec = RuntimeSpec::build_with_workspace_root(
+        &context.project_root,
+        &context.workspace_root,
+        &config,
+    );
     check_required_host_paths(&spec)?;
     if legacy_config_entries_present {
         return Err(Error::message("legacy config entries"));

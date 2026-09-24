@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub(super) struct Context {
     pub(super) project_root: PathBuf,
+    pub(super) workspace_root: PathBuf,
     config_source: ConfigSource,
 }
 
@@ -22,16 +23,22 @@ pub(super) enum ConfigSource {
 }
 
 impl Context {
-    pub(super) fn new(project_root: PathBuf, config_source: ConfigSource) -> Self {
+    pub(super) fn new(
+        project_root: PathBuf,
+        workspace_root: PathBuf,
+        config_source: ConfigSource,
+    ) -> Self {
         Self {
             project_root,
+            workspace_root,
             config_source,
         }
     }
 
     #[cfg(test)]
     pub(super) fn default_for_project(project_root: PathBuf) -> Self {
-        Self::new(project_root, ConfigSource::Default)
+        let workspace_root = project_root.parent().unwrap_or(&project_root).to_path_buf();
+        Self::new(project_root, workspace_root, ConfigSource::Default)
     }
 
     pub(super) fn load_config(&self) -> Result<ExecutionConfig> {
@@ -61,6 +68,23 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
         }
         current = current.parent()?;
     }
+}
+
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+pub(super) fn resolve_workspace_root(cwd: &Path) -> PathBuf {
+    find_project_root(cwd)
+        .and_then(|root| root.parent().map(Path::to_path_buf))
+        .or_else(|| find_git_root(cwd))
+        .unwrap_or_else(|| cwd.to_path_buf())
 }
 
 pub(super) fn resolve_project_root(
@@ -183,10 +207,16 @@ mod tests {
         )
         .unwrap();
 
-        let context = Context::new(runtime_dir.clone(), ConfigSource::File(config_path));
+        let workspace_dir = temp.join("checkout");
+        let context = Context::new(
+            runtime_dir.clone(),
+            workspace_dir.clone(),
+            ConfigSource::File(config_path),
+        );
         let config = context.load_config().unwrap();
 
         assert_eq!(context.project_root, runtime_dir);
+        assert_eq!(context.workspace_root, workspace_dir);
         assert_eq!(config.name, "custom");
     }
 
@@ -203,6 +233,7 @@ mod tests {
         }"#;
         let context = Context::new(
             runtime_dir,
+            config_base.clone(),
             ConfigSource::Stdin {
                 raw: raw.to_string(),
                 base_dir: config_base.clone(),
@@ -234,6 +265,37 @@ mod tests {
             resolve_project_root(&cwd, Some(&project_root), &command).unwrap(),
             project_root
         );
+    }
+
+    #[test]
+    fn workspace_root_uses_git_root_without_discovered_cladding() {
+        let temp = create_temp_dir("git-workspace-root");
+        let checkout = temp.join("checkout");
+        let cwd = checkout.join("src/module");
+        fs::create_dir_all(checkout.join(".git")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_workspace_root(&cwd), checkout);
+    }
+
+    #[test]
+    fn workspace_root_falls_back_to_invocation_directory_without_project_markers() {
+        let temp = create_temp_dir("workspace-cwd-fallback");
+        let cwd = temp.join("current");
+        fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_workspace_root(&cwd), cwd);
+    }
+
+    #[test]
+    fn workspace_root_keeps_discovered_cladding_parent() {
+        let temp = create_temp_dir("workspace-discovery");
+        let project = temp.join("project");
+        let cwd = project.join("src/module");
+        fs::create_dir_all(project.join(".cladding")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(resolve_workspace_root(&cwd), project);
     }
 
     #[test]

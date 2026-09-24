@@ -10,7 +10,9 @@ mod lifecycle;
 use anyhow::Context as _;
 use args::{Cli, CommandSpec};
 use clap::Parser;
-use context::{ConfigSource, Context, resolve_project_root, stdin_config_base_dir};
+use context::{
+    ConfigSource, Context, resolve_project_root, resolve_workspace_root, stdin_config_base_dir,
+};
 
 use cladding::error::{Error, Result};
 use std::io::Read as _;
@@ -41,6 +43,7 @@ pub fn run() -> Result<()> {
 
     let selected_root = cli.cladding_dir.as_ref().or(cli.project_root.as_ref());
     let project_root = resolve_project_root(&cwd, selected_root, &command)?;
+    let workspace_root = resolve_workspace_root(&cwd);
 
     let config_source = match cli.config {
         None => ConfigSource::Default,
@@ -55,7 +58,7 @@ pub fn run() -> Result<()> {
         Some(path) => ConfigSource::File(path),
     };
 
-    let context = Context::new(project_root, config_source);
+    let context = Context::new(project_root, workspace_root, config_source);
 
     match command {
         CommandSpec::Build => lifecycle::cmd_build(&context),

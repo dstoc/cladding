@@ -37,10 +37,7 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
 
     write_embedded_tools(&tools_bin_dir)?;
 
-    let default_context = context
-        .project_root
-        .parent()
-        .unwrap_or(&context.project_root);
+    let default_context = &context.workspace_root;
     for target in build_plan {
         match target.build {
             BuildDefinition::Embedded => podman_build_image(
@@ -249,7 +246,11 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     let config = context.load_config()?;
     materialize_runtime_scripts(&context.project_root)?;
     let status = project_runtime_status(context, &config, verbose)?;
-    let spec = RuntimeSpec::build(&context.project_root, &config);
+    let spec = RuntimeSpec::build_with_workspace_root(
+        &context.project_root,
+        &context.workspace_root,
+        &config,
+    );
     let inventory = runtime_inventory(&spec, verbose)?;
 
     if status.already_running && inventory.is_fully_running() {
@@ -287,7 +288,11 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     let config = context.load_config()?;
-    let spec = RuntimeSpec::build(&context.project_root, &config);
+    let spec = RuntimeSpec::build_with_workspace_root(
+        &context.project_root,
+        &context.workspace_root,
+        &config,
+    );
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose));
 
@@ -299,7 +304,11 @@ pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
 
 pub(super) fn cmd_destroy(context: &Context) -> Result<()> {
     let config = context.load_config()?;
-    let spec = RuntimeSpec::build(&context.project_root, &config);
+    let spec = RuntimeSpec::build_with_workspace_root(
+        &context.project_root,
+        &context.workspace_root,
+        &config,
+    );
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false));
 

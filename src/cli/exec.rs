@@ -150,15 +150,9 @@ fn run_podman_exec(
         return Err(Error::message("project is not running"));
     }
 
-    let project_dir = context
-        .project_root
-        .parent()
-        .ok_or_else(|| Error::message("could not resolve project directory"))?
-        .to_path_buf();
-
     let cwd = env::current_dir().with_context(|| "failed to determine current directory")?;
 
-    let project_dir = canonicalize_path(&project_dir)?;
+    let project_dir = canonicalize_path(&context.workspace_root)?;
     let cwd = canonicalize_path(&cwd)?;
     let container_workdir = resolve_container_workdir(config, &project_dir, &cwd, mount_target)?;
 

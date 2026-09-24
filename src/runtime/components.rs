@@ -25,15 +25,32 @@ const NETWORK_NONE: &str = "none";
 
 impl RuntimeSpec {
     pub fn build(project_root: &Path, config: &ExecutionConfig) -> Self {
+        let workspace_root = project_root.join("..");
+        Self::build_with_workspace_root(project_root, &workspace_root, config)
+    }
+
+    pub fn build_with_workspace_root(
+        project_root: &Path,
+        workspace_root: &Path,
+        config: &ExecutionConfig,
+    ) -> Self {
         let project_root = project_root.to_path_buf();
+        let workspace_root = workspace_root.to_path_buf();
         let custom_mounts = build_custom_mounts(&config.name, &config.mounts);
         let names = RuntimeNames::from_config(config);
 
         let proxy = build_proxy_pod(&project_root, config, &names, &custom_mounts);
-        let agent = build_agent_pod(&project_root, config, &names, &custom_mounts);
+        let agent = build_agent_pod(
+            &project_root,
+            &workspace_root,
+            config,
+            &names,
+            &custom_mounts,
+        );
         let nw_sandbox = names.nw_sandbox_name.as_ref().map(|component_name| {
             build_nw_sandbox_pod(
                 &project_root,
+                &workspace_root,
                 config,
                 &names,
                 component_name,
@@ -120,12 +137,13 @@ fn build_proxy_pod(
 
 fn build_agent_pod(
     project_root: &Path,
+    workspace_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mut mounts = apply_custom_mounts(
-        build_agent_mounts(project_root, custom_mounts),
+        build_agent_mounts(project_root, workspace_root, custom_mounts),
         custom_mounts,
         MountTarget::Agent,
     );
@@ -239,13 +257,14 @@ fn build_agent_pod(
 
 fn build_nw_sandbox_pod(
     project_root: &Path,
+    workspace_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
     component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mut mounts = apply_custom_mounts(
-        build_sandbox_mounts(project_root, custom_mounts),
+        build_sandbox_mounts(project_root, workspace_root, custom_mounts),
         custom_mounts,
         MountTarget::NwSandbox,
     );
@@ -691,6 +710,53 @@ mod tests {
             .into_iter()
             .collect()
         );
+    }
+
+    #[test]
+    fn external_runtime_directory_does_not_select_workspace_mount() {
+        let config = execution_config(true, false, Vec::new(), false);
+        let spec = RuntimeSpec::build_with_workspace_root(
+            Path::new("/tmp/other/.cladding"),
+            Path::new("/repo"),
+            &config,
+        );
+        let agent = container(&spec.agent, "demo-agent-instance");
+        let workspace = agent
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/home/user/workspace")
+            .expect("agent workspace mount");
+        assert!(matches!(
+            &workspace.source,
+            super::super::types::RuntimeMountSource::HostPath { path }
+                if path == &PathBuf::from("/repo")
+        ));
+
+        let nw = container(
+            spec.nw_sandbox.as_ref().expect("nw sandbox"),
+            "demo-nw-sandbox-instance",
+        );
+        let workspace = nw
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/home/user/workspace")
+            .expect("sandbox workspace mount");
+        assert!(matches!(
+            &workspace.source,
+            super::super::types::RuntimeMountSource::HostPath { path }
+                if path == &PathBuf::from("/repo")
+        ));
+
+        let config_mount = agent
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/opt/config")
+            .expect("configuration mount");
+        assert!(matches!(
+            &config_mount.source,
+            super::super::types::RuntimeMountSource::HostPath { path }
+                if path == &PathBuf::from("/tmp/other/.cladding/config")
+        ));
     }
 
     #[test]

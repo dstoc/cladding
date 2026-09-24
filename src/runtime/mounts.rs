@@ -45,6 +45,7 @@ pub(super) fn build_proxy_mounts(
 
 pub(super) fn build_agent_mounts(
     project_root: &Path,
+    workspace_root: &Path,
     _custom_mounts: &[RuntimeCustomMount],
 ) -> Vec<RuntimeMount> {
     vec![
@@ -73,7 +74,7 @@ pub(super) fn build_agent_mounts(
             mount_path: "/home/user/workspace".to_string(),
             read_only: false,
             source: RuntimeMountSource::HostPath {
-                path: project_root.join(".."),
+                path: workspace_root.to_path_buf(),
             },
         },
         RuntimeMount {
@@ -88,6 +89,7 @@ pub(super) fn build_agent_mounts(
 
 pub(super) fn build_sandbox_mounts(
     project_root: &Path,
+    workspace_root: &Path,
     _custom_mounts: &[RuntimeCustomMount],
 ) -> Vec<RuntimeMount> {
     vec![
@@ -116,7 +118,7 @@ pub(super) fn build_sandbox_mounts(
             mount_path: "/home/user/workspace".to_string(),
             read_only: false,
             source: RuntimeMountSource::HostPath {
-                path: project_root.join(".."),
+                path: workspace_root.to_path_buf(),
             },
         },
         RuntimeMount {

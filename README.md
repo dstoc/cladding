@@ -103,7 +103,7 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 
 ### Selecting the Cladding directory and configuration
 
-Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without this option, Cladding searches the invocation directory and its parents as before. This option selects Cladding runtime and configuration files. It does not change the host working directory or run an implicit `cd`; commands keep the existing mapping from the invocation directory to the agent.
+Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without this option, Cladding searches the invocation directory and its parents as before. This option selects Cladding runtime and configuration files. The agent workspace uses the invocation project: Cladding mounts the parent of a `.cladding` directory discovered from the invocation directory. If discovery finds none, Cladding uses the Git checkout root when available, or the invocation directory otherwise. The agent's working directory follows the invocation directory within that workspace.
 
 Use `--config FILE` to load a specific JSON configuration file. Use `--config -` to read the JSON configuration from stdin. When omitted, Cladding loads `cladding.json` from the selected or discovered `.cladding` directory.
 
