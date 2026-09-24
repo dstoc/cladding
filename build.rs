@@ -23,6 +23,7 @@ fn main() {
         env::var("CLADDING_MCP_RUN_BIN"),
         env::var("CLADDING_RUN_REMOTE_BIN"),
     ) {
+        println!("cargo:warning=Using prebuilt embedded helpers; skipping nested release build");
         copy_bin(Path::new(&mcp_run), &out_dir.join("mcp-run"));
         copy_bin(Path::new(&run_remote), &out_dir.join("run-remote"));
         return;

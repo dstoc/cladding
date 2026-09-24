@@ -24,12 +24,27 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    env:
+      CLADDING_MCP_RUN_BIN: ${{ github.workspace }}/target/mcp-run/release/mcp-run
+      CLADDING_RUN_REMOTE_BIN: ${{ github.workspace }}/target/mcp-run/release/run-remote
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Start a fresh cache and keep workspace artifacts for the helper build.
+          prefix-key: v1-rust
+          # Refresh cached helper artifacts when helper sources or CI build settings change.
+          key: ${{ hashFiles('crates/mcp-run/src/**', 'crates/mcp-run/Cargo.toml', '.github/workflows/ci.yml') }}
+          cache-workspace-crates: true
+      - name: Build embedded helpers
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
+      - name: Verify embedded helpers
+        run: |
+          test -x "$CLADDING_MCP_RUN_BIN"
+          test -x "$CLADDING_RUN_REMOTE_BIN"
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
