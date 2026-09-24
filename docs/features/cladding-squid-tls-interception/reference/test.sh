@@ -112,8 +112,8 @@ cat "$temporary/public-ca/interception-ca.crt" "$temporary/certs/origin-ca.crt" 
 cp "$temporary/public-ca/interception-ca.crt" "$temporary/client-certs/interception-ca.crt"
 cp "$temporary/certs/origin-ca.crt" "$temporary/client-certs/origin-ca.crt"
 
-docker build --pull -t "$proxy_image" -f reference/Containerfile "$feature_dir"
-docker build --pull -t "$test_image" -f reference/Containerfile.test "$feature_dir"
+docker build --pull -t "$proxy_image" -f "$reference_dir/Containerfile" "$feature_dir"
+docker build --pull -t "$test_image" -f "$reference_dir/Containerfile.test" "$feature_dir"
 docker network create "$network" >/dev/null
 
 docker run -d --name "$origin_container" --network "$network" \
