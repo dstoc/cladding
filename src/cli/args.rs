@@ -56,6 +56,11 @@ pub(super) enum CommandSpec {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run one command in an isolated environment, then remove it
+    Once {
+        #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Run a command in the sandbox container
     RunWithScissors {
         #[arg(long, value_enum, default_value_t = RunWithScissorsTarget::NwSandbox)]
@@ -364,6 +369,31 @@ mod tests {
             CommandSpec::Run { args, .. } => assert_eq!(args, ["echo", "--config"]),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn once_requires_a_command_after_double_dash() {
+        let cli = Cli::try_parse_from([
+            "cladding",
+            "--config",
+            "job.json",
+            "once",
+            "--",
+            "codex",
+            "exec",
+            "--full-auto",
+        ])
+        .expect("once arguments should parse after --");
+
+        assert_eq!(cli.config.as_deref(), Some(Path::new("job.json")));
+        match cli.command.expect("command") {
+            CommandSpec::Once { args } => {
+                assert_eq!(args, ["codex", "exec", "--full-auto"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["cladding", "once", "codex"]).is_err());
+        assert!(Cli::try_parse_from(["cladding", "once", "--"]).is_err());
     }
 
     #[test]

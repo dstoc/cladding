@@ -6,6 +6,7 @@ mod exec;
 mod expose;
 mod inject;
 mod lifecycle;
+mod once;
 
 use anyhow::Context as _;
 use args::{Cli, CommandSpec};
@@ -46,6 +47,11 @@ pub fn run() -> Result<()> {
     let workspace_root = resolve_workspace_root(&cwd);
 
     let config_source = match cli.config {
+        None if matches!(&command, CommandSpec::Once { .. }) && !project_root.is_dir() => {
+            ConfigSource::OnceDefault {
+                base_dir: cwd.clone(),
+            }
+        }
         None => ConfigSource::Default,
         Some(path) if path == std::path::Path::new("-") => {
             let base_dir = stdin_config_base_dir(&cwd, cli.cladding_dir.as_deref());
@@ -59,6 +65,7 @@ pub fn run() -> Result<()> {
     };
 
     let context = Context::new(project_root, workspace_root, config_source);
+    let config_uses_stdin = context.config_uses_stdin();
 
     match command {
         CommandSpec::Build => lifecycle::cmd_build(&context),
@@ -68,6 +75,7 @@ pub fn run() -> Result<()> {
         CommandSpec::Down { verbose } => lifecycle::cmd_down(&context, verbose),
         CommandSpec::Destroy => lifecycle::cmd_destroy(&context),
         CommandSpec::Run { env, args } => exec::cmd_run(&context, &env, &args),
+        CommandSpec::Once { args } => once::cmd_once(&context, &args, config_uses_stdin),
         CommandSpec::RunWithScissors { target, env, args } => {
             exec::cmd_run_with_scissors(&context, target, &env, &args)
         }

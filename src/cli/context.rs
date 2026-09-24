@@ -1,7 +1,7 @@
 use super::args::CommandSpec;
 use cladding::config::{
     ExecutionConfig, load_cladding_config_v2, load_cladding_config_v2_from_path,
-    load_cladding_config_v2_from_str,
+    load_cladding_config_v2_from_str, write_default_cladding_config,
 };
 use cladding::error::{Error, Result};
 use cladding::fs_utils::canonicalize_path;
@@ -18,8 +18,10 @@ pub(super) struct Context {
 #[derive(Debug, Clone)]
 pub(super) enum ConfigSource {
     Default,
+    OnceDefault { base_dir: PathBuf },
     File(PathBuf),
     Stdin { raw: String, base_dir: PathBuf },
+    Resolved(Box<ExecutionConfig>),
 }
 
 impl Context {
@@ -44,11 +46,36 @@ impl Context {
     pub(super) fn load_config(&self) -> Result<ExecutionConfig> {
         match &self.config_source {
             ConfigSource::Default => load_cladding_config_v2(&self.project_root),
+            ConfigSource::OnceDefault { base_dir } => {
+                let raw = write_default_cladding_config(
+                    Some("once"),
+                    super::DEFAULT_SANDBOX_BUILD_IMAGE,
+                    super::DEFAULT_CLI_BUILD_IMAGE,
+                )?;
+                load_cladding_config_v2_from_str(&base_dir.join("cladding.json"), &raw)
+            }
             ConfigSource::File(path) => load_cladding_config_v2_from_path(path),
             ConfigSource::Stdin { raw, base_dir } => {
                 load_cladding_config_v2_from_str(&base_dir.join("cladding.json"), raw)
             }
+            ConfigSource::Resolved(config) => Ok(config.as_ref().clone()),
         }
+    }
+
+    pub(super) fn with_resolved_config(
+        &self,
+        project_root: PathBuf,
+        config: ExecutionConfig,
+    ) -> Self {
+        Self::new(
+            project_root,
+            self.workspace_root.clone(),
+            ConfigSource::Resolved(Box::new(config)),
+        )
+    }
+
+    pub(super) fn config_uses_stdin(&self) -> bool {
+        matches!(self.config_source, ConfigSource::Stdin { .. })
     }
 }
 
@@ -115,7 +142,7 @@ pub(super) fn resolve_project_root(
     match find_project_root(cwd) {
         Some(root) => Ok(root),
         None => match command {
-            CommandSpec::Init { .. } => Ok(cwd.join(".cladding")),
+            CommandSpec::Init { .. } | CommandSpec::Once { .. } => Ok(cwd.join(".cladding")),
             CommandSpec::Ps => Ok(cwd.join(".cladding")),
             _ => {
                 eprintln!(
@@ -265,6 +292,43 @@ mod tests {
             resolve_project_root(&cwd, Some(&project_root), &command).unwrap(),
             project_root
         );
+    }
+
+    #[test]
+    fn once_can_select_a_missing_default_directory_without_creating_it() {
+        let temp = create_temp_dir("once-missing-directory");
+        let project_root = temp.join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let selected = resolve_project_root(
+            &project_root,
+            None,
+            &CommandSpec::Once {
+                args: vec!["echo".to_string()],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selected, project_root.join(".cladding"));
+        assert!(!selected.exists());
+    }
+
+    #[test]
+    fn once_default_config_uses_shared_config_loading_without_persistent_state() {
+        let temp = create_temp_dir("once-default-config");
+        let selected_root = temp.join(".cladding");
+        let context = Context::new(
+            selected_root.clone(),
+            temp.clone(),
+            ConfigSource::OnceDefault {
+                base_dir: temp.clone(),
+            },
+        );
+
+        let config = context.load_config().unwrap();
+
+        assert_eq!(config.name, "once");
+        assert!(config.nw_sandbox_enabled());
+        assert!(!selected_root.exists());
     }
 
     #[test]

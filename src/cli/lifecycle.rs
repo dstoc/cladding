@@ -11,8 +11,8 @@ use cladding::config::{ExecutionConfig, ImageBuildConfig, write_default_cladding
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::podman::{
-    list_running_projects, podman_build_image, podman_required, runtime_cleanup, runtime_create,
-    runtime_inventory,
+    list_running_projects, podman_build_image, podman_required, runtime_cleanup,
+    runtime_cleanup_owned, runtime_create, runtime_inventory,
 };
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashMap;
@@ -243,6 +243,22 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
 }
 
 pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
+    let mut runtime_create_attempted = false;
+    cmd_up_inner(context, verbose, false, &mut runtime_create_attempted)
+}
+
+pub(super) fn cmd_up_once(context: &Context, verbose: bool) -> (Result<()>, bool) {
+    let mut runtime_create_attempted = false;
+    let result = cmd_up_inner(context, verbose, true, &mut runtime_create_attempted);
+    (result, runtime_create_attempted)
+}
+
+fn cmd_up_inner(
+    context: &Context,
+    verbose: bool,
+    fail_if_already_running: bool,
+    runtime_create_attempted: &mut bool,
+) -> Result<()> {
     let config = context.load_config()?;
     materialize_runtime_scripts(&context.project_root)?;
     let status = project_runtime_status(context, &config, verbose)?;
@@ -254,6 +270,13 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     let inventory = runtime_inventory(&spec, verbose)?;
 
     if status.already_running && inventory.is_fully_running() {
+        if fail_if_already_running {
+            eprintln!(
+                "error: one-off instance '{}' collides with existing runtime resources",
+                config.name
+            );
+            return Err(Error::message("one-off runtime name collision"));
+        }
         println!(
             "already running: {} ({})",
             config.name, status.current_project_root
@@ -283,7 +306,21 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;
+    *runtime_create_attempted = true;
     runtime_create(&spec, verbose)
+}
+
+pub(super) fn prepare_once_runtime_root(project_root: &std::path::Path) -> Result<()> {
+    let config_dir = project_root.join("config");
+    let home_dir = project_root.join("home");
+    let tools_bin_dir = project_root.join("tools/bin");
+
+    fs::create_dir_all(&config_dir).with_context(|| "failed to create one-off config directory")?;
+    materialize_config(&config_dir)?;
+    fs::create_dir_all(&home_dir).with_context(|| "failed to create one-off home directory")?;
+    fs::create_dir_all(&tools_bin_dir)
+        .with_context(|| "failed to create one-off tools directory")?;
+    write_embedded_tools(&tools_bin_dir)
 }
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
@@ -300,6 +337,16 @@ pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+pub(super) fn cmd_down_once(context: &Context) -> Result<()> {
+    let config = context.load_config()?;
+    let spec = RuntimeSpec::build_with_workspace_root(
+        &context.project_root,
+        &context.workspace_root,
+        &config,
+    );
+    runtime_cleanup_owned(&spec, false)
 }
 
 pub(super) fn cmd_destroy(context: &Context) -> Result<()> {

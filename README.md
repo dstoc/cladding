@@ -77,6 +77,16 @@ In short: the agent cannot freely access the network; users can run sandbox comm
   cladding run --env GEMINI_API_KEY gemini
   ```
 
+* Run one command in a fresh environment and remove it when the command ends:
+
+  ```bash
+  cladding --config job.json once -- codex exec "Implement the task"
+  cladding --cladding-dir /tmp/job/.cladding --config - once -- cargo test --workspace
+  cladding once -- codex exec "Implement the task"
+  ```
+
+  `once` creates a UUID-named instance and a private runtime directory outside the source workspace. It can use the shared `.cladding` discovery behavior or a supplied configuration without creating runtime state in the source tree. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command after `--` runs with the same agent working-directory and environment rules as `run`. Without `--config -`, `once` keeps the normal `run` stdin and terminal behavior. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+
 * Temporarily publish a TCP port from the agent container to the host while the project is running:
 
   ```bash
@@ -107,7 +117,7 @@ Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without th
 
 Use `--config FILE` to load a specific JSON configuration file. Use `--config -` to read the JSON configuration from stdin. When omitted, Cladding loads `cladding.json` from the selected or discovered `.cladding` directory.
 
-Both options are available to the configuration-consuming commands: `build`, `check`, `up`, `down`, `destroy`, `run`, `run-with-scissors`, `logs`, `reload-proxy`, `expose`, and `inject`.
+Both options are available to the configuration-consuming commands: `build`, `check`, `up`, `down`, `destroy`, `run`, `once`, `run-with-scissors`, `logs`, `reload-proxy`, `expose`, and `inject`.
 
 When both options are set, `--config` selects the configuration contents and `--cladding-dir` selects the runtime directory. Relative build paths and mount `hostPath` values resolve from the configuration file's directory. For stdin configuration, they resolve from the parent of the explicitly selected `.cladding` directory, or from the invocation directory when `--cladding-dir` is omitted.
 
