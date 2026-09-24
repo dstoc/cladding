@@ -9,5 +9,5 @@ pub use load::{
 };
 pub use types::{
     DEFAULT_COMPONENT_IMAGE, DEFAULT_PROXY_IMAGE, ExecutionComponentConfig, ExecutionConfig,
-    ExecutionProxyConfig, ImageBuildConfig, MountTarget, ResolvedMountConfig,
+    ExecutionProxyConfig, ImageBuildConfig, MountTarget, MountType, ResolvedMountConfig,
 };

@@ -42,11 +42,21 @@ pub enum MountTarget {
     FsSandbox,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountType {
+    Bind,
+    Readonly,
+    Overlay,
+    Tmpfs,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedMountConfig {
     pub mount_path: String,
     pub host_path: Option<PathBuf>,
     pub volume: Option<String>,
+    pub mount_type: MountType,
+    pub tmpfs_size_bytes: Option<u64>,
     pub read_only: bool,
     pub targets: Vec<MountTarget>,
     pub ignore: bool,

@@ -402,7 +402,7 @@ fn join_container_workspace(workdir_rel: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cladding::config::{ExecutionComponentConfig, ResolvedMountConfig};
+    use cladding::config::{ExecutionComponentConfig, MountType, ResolvedMountConfig};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -478,6 +478,8 @@ mod tests {
                 mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
                 host_path: Some(custom_root.clone()),
                 volume: None,
+                mount_type: MountType::Bind,
+                tmpfs_size_bytes: None,
                 read_only: false,
                 targets: vec![MountTarget::Agent],
                 ignore: false,
@@ -545,6 +547,8 @@ mod tests {
                 mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
                 host_path: Some(custom_root),
                 volume: None,
+                mount_type: MountType::Bind,
+                tmpfs_size_bytes: None,
                 read_only: false,
                 targets: vec![MountTarget::Agent],
                 ignore: false,
