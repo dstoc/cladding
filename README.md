@@ -101,6 +101,51 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 
   `cladding inject <host-endpoint> [containerport]` runs in the foreground and stops with Ctrl-C. A bare port such as `11434` maps agent `127.0.0.1:11434` to host `127.0.0.1:11434`. A second port changes only the agent-side listener, so `cladding inject 5432 15432` maps agent `127.0.0.1:15432` to host `127.0.0.1:5432`. An explicit `host:port` is resolved from the host and should be treated as a deliberate temporary exception for that one endpoint, not general host networking.
 
+### Configuring container images
+
+Each component can use an existing image or build one from a Containerfile. The component `image` value is the build output tag when `build` is also set. If `image` is omitted, `cladding build` generates a local tag such as `localhost/cladding-myproject-agent:latest`.
+
+```json
+{
+  "name": "myproject",
+  "agent": {
+    "build": {
+      "containerfile": "containers/agent.Containerfile",
+      "context": ".",
+      "args": { "FEATURE": "enabled" }
+    }
+  },
+  "nw_sandbox": {
+    "enabled": true,
+    "image": "localhost/my-sandbox:latest",
+    "build": {
+      "containerfile": "containers/sandbox.Containerfile",
+      "context": ".."
+    }
+  },
+  "fs_sandbox": {
+    "image": "localhost/my-fs-sandbox:latest",
+    "build": {
+      "containerfile": "containers/fs-sandbox.Containerfile",
+      "context": ".."
+    }
+  },
+  "proxy": {
+    "image": "localhost/my-proxy:latest",
+    "build": {
+      "containerfile": "containers/proxy.Containerfile",
+      "context": "."
+    }
+  }
+}
+```
+
+`containerfile` and `context` paths are relative to `.cladding/cladding.json`. `context` defaults to the `.cladding` directory when omitted. Build `args` are string values passed to Podman as ordinary Containerfile build arguments. Do not put secrets in build arguments. Names that indicate credentials, passwords, tokens, secrets, or private keys are rejected.
+
+`cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag. It excludes `.cladding/credentials` and a configured `proxy.credentialsDir` from the build context.
+
+The filtering-only proxy remains the default when `proxy` is omitted. Set `proxy.builtin` to `"squid-mitm"` to select the built-in TLS proxy image. A built-in proxy cannot be combined with `proxy.image` or `proxy.build`.
+
 ### Configuring mounts
 
 `cladding.json` supports a `mounts` list. Each entry has:

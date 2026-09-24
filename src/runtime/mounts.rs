@@ -243,15 +243,20 @@ mod tests {
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
+                build: None,
             },
             nw_sandbox: nw_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
                 image: "nw:image".to_string(),
+                build: None,
             }),
             fs_sandbox: fs_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
                 image: "fs:image".to_string(),
+                build: None,
             }),
+            proxy: None,
+            build_secret_dirs: Vec::new(),
             mounts,
         }
     }

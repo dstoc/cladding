@@ -396,6 +396,8 @@ mod tests {
             agent: component(true),
             nw_sandbox: Some(component(nw_sandbox_enabled)),
             fs_sandbox: Some(component(fs_sandbox_enabled)),
+            proxy: None,
+            build_secret_dirs: Vec::new(),
             mounts: Vec::new(),
         }
     }
@@ -404,6 +406,7 @@ mod tests {
         ExecutionComponentConfig {
             enabled,
             image: "image:latest".to_string(),
+            build: None,
         }
     }
 

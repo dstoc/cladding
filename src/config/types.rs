@@ -1,11 +1,34 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub const DEFAULT_COMPONENT_IMAGE: &str = "localhost/cladding-default:latest";
+pub const DEFAULT_PROXY_IMAGE: &str = "docker.io/ubuntu/squid:latest";
+pub const BUILTIN_SQUID_MITM_IMAGE: &str = "localhost/cladding-squid-mitm:latest";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageBuildConfig {
+    pub containerfile: PathBuf,
+    pub context: PathBuf,
+    pub args: BTreeMap<String, String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionComponentConfig {
     pub enabled: bool,
     pub image: String,
+    pub build: Option<ImageBuildConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinProxy {
+    SquidMitm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionProxyConfig {
+    pub image: String,
+    pub build: Option<ImageBuildConfig>,
+    pub builtin: Option<BuiltinProxy>,
 }
 
 #[derive(Debug, Clone)]
@@ -15,6 +38,8 @@ pub struct ExecutionConfig {
     pub agent: ExecutionComponentConfig,
     pub nw_sandbox: Option<ExecutionComponentConfig>,
     pub fs_sandbox: Option<ExecutionComponentConfig>,
+    pub proxy: Option<ExecutionProxyConfig>,
+    pub build_secret_dirs: Vec<PathBuf>,
     pub mounts: Vec<ResolvedMountConfig>,
 }
 
@@ -95,6 +120,13 @@ impl ExecutionConfig {
             .as_ref()
             .map(|component| component.image.as_str())
             .unwrap_or(DEFAULT_COMPONENT_IMAGE)
+    }
+
+    pub fn proxy_image(&self) -> &str {
+        self.proxy
+            .as_ref()
+            .map(|proxy| proxy.image.as_str())
+            .unwrap_or(DEFAULT_PROXY_IMAGE)
     }
 
     pub fn nw_sandbox_enabled(&self) -> bool {

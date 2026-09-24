@@ -88,7 +88,7 @@ fn build_proxy_pod(
 
     let mut containers = vec![RuntimeContainer {
         name: runtime_container_name(&names.proxy_name),
-        image: "docker.io/ubuntu/squid:latest".to_string(),
+        image: config.proxy_image().to_string(),
         command: vec![
             "/bin/sh".to_string(),
             "/opt/scripts/proxy_startup.sh".to_string(),
@@ -473,7 +473,10 @@ done
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ExecutionComponentConfig, ExecutionConfig, ResolvedMountConfig};
+    use crate::config::{
+        BUILTIN_SQUID_MITM_IMAGE, BuiltinProxy, ExecutionComponentConfig, ExecutionConfig,
+        ExecutionProxyConfig, ResolvedMountConfig,
+    };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
@@ -489,15 +492,20 @@ mod tests {
             agent: ExecutionComponentConfig {
                 enabled: true,
                 image: "agent:image".to_string(),
+                build: None,
             },
             nw_sandbox: nw_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
                 image: "nw:image".to_string(),
+                build: None,
             }),
             fs_sandbox: fs_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
                 image: "fs:image".to_string(),
+                build: None,
             }),
+            proxy: None,
+            build_secret_dirs: Vec::new(),
             mounts,
         }
     }
@@ -555,6 +563,10 @@ mod tests {
         );
         assert_eq!(spec.proxy.containers[0].name, "demo-proxy-instance");
         assert_eq!(spec.proxy.containers[1].name, "demo-proxy-bridge");
+        assert_eq!(
+            spec.proxy.containers[0].image,
+            "docker.io/ubuntu/squid:latest"
+        );
         assert_eq!(spec.agent.containers[0].name, "demo-agent-instance");
         assert_eq!(
             spec.nw_sandbox.as_ref().expect("nw pod").containers[0].name,
@@ -739,6 +751,40 @@ mod tests {
         assert_eq!(env_value(agent, "RUN_FS_SANDBOX_SOCKET"), None);
         assert_eq!(env_value(agent, "RUN_NW_SANDBOX_SERVER"), None);
         assert_eq!(env_value(agent, "RUN_FS_SANDBOX_SERVER"), None);
+    }
+
+    #[test]
+    fn build_runtime_spec_uses_selected_proxy_image_and_keeps_bridge_sidecar() {
+        let mut config = execution_config(false, false, Vec::new(), false);
+        config.proxy = Some(ExecutionProxyConfig {
+            image: "localhost/custom-proxy:latest".to_string(),
+            build: None,
+            builtin: None,
+        });
+
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+
+        assert_eq!(spec.proxy.containers.len(), 2);
+        assert_eq!(
+            spec.proxy.containers[0].image,
+            "localhost/custom-proxy:latest"
+        );
+        assert_eq!(spec.proxy.containers[1].name, "demo-proxy-bridge");
+    }
+
+    #[test]
+    fn build_runtime_spec_selects_builtin_squid_mitm_image() {
+        let mut config = execution_config(false, false, Vec::new(), false);
+        config.proxy = Some(ExecutionProxyConfig {
+            image: BUILTIN_SQUID_MITM_IMAGE.to_string(),
+            build: None,
+            builtin: Some(BuiltinProxy::SquidMitm),
+        });
+
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+
+        assert_eq!(spec.proxy.containers[0].image, BUILTIN_SQUID_MITM_IMAGE);
+        assert_eq!(spec.proxy.containers[1].name, "demo-proxy-bridge");
     }
 
     #[test]
