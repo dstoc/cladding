@@ -3,15 +3,29 @@ use std::process::Command;
 
 pub(super) fn append_mount_args(cmd: &mut Command, pod_name: &str, mounts: &[RuntimeMount]) {
     for mount in mounts {
+        if let RuntimeMountSource::Tmpfs { size_bytes } = &mount.source {
+            let mut spec = format!("type=tmpfs,dst={},tmpfs-mode=1777,U=true", mount.mount_path);
+            if let Some(size_bytes) = size_bytes {
+                spec.push_str(&format!(",tmpfs-size={size_bytes}"));
+            }
+            cmd.arg("--mount");
+            cmd.arg(spec);
+            continue;
+        }
+
         let source = match &mount.source {
             RuntimeMountSource::HostPath { path } => path.display().to_string(),
+            RuntimeMountSource::OverlayHostPath { path } => path.display().to_string(),
             RuntimeMountSource::NamedVolume { claim_name } => claim_name.clone(),
             RuntimeMountSource::GeneratedEmptyMask { path } => path.display().to_string(),
+            RuntimeMountSource::Tmpfs { .. } => unreachable!("tmpfs mounts handled above"),
             RuntimeMountSource::EmptyDir => empty_dir_volume_name(pod_name, &mount.mount_path),
         };
 
         let mut volume = format!("{source}:{}", mount.mount_path);
-        if mount.read_only {
+        if matches!(&mount.source, RuntimeMountSource::OverlayHostPath { .. }) {
+            volume.push_str(":O");
+        } else if mount.read_only {
             volume.push_str(":ro");
         }
         cmd.arg("--volume");
@@ -129,6 +143,48 @@ mod tests {
                 "cladding-demo-agent-empty-workspace-tmp:/workspace/tmp",
                 "--volume",
                 "/tmp/demo/runtime/empty-mask:/home/user/workspace/.cladding:ro",
+            ]
+        );
+    }
+
+    #[test]
+    fn append_mount_args_formats_overlay_and_ephemeral_tmpfs_options() {
+        let mut cmd = Command::new("podman");
+        append_mount_args(
+            &mut cmd,
+            "demo-agent",
+            &[
+                RuntimeMount {
+                    mount_path: "/workspace".to_string(),
+                    read_only: false,
+                    source: RuntimeMountSource::OverlayHostPath {
+                        path: "/tmp/project".into(),
+                    },
+                },
+                RuntimeMount {
+                    mount_path: "/tmp/cache".to_string(),
+                    read_only: false,
+                    source: RuntimeMountSource::Tmpfs {
+                        size_bytes: Some(1024 * 1024 * 1024),
+                    },
+                },
+                RuntimeMount {
+                    mount_path: "/run".to_string(),
+                    read_only: false,
+                    source: RuntimeMountSource::Tmpfs { size_bytes: None },
+                },
+            ],
+        );
+
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--volume",
+                "/tmp/project:/workspace:O",
+                "--mount",
+                "type=tmpfs,dst=/tmp/cache,tmpfs-mode=1777,U=true,tmpfs-size=1073741824",
+                "--mount",
+                "type=tmpfs,dst=/run,tmpfs-mode=1777,U=true",
             ]
         );
     }

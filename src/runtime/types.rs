@@ -91,7 +91,9 @@ pub struct RuntimeCustomMount {
 #[derive(Debug, Clone)]
 pub enum RuntimeMountSource {
     HostPath { path: PathBuf },
+    OverlayHostPath { path: PathBuf },
     NamedVolume { claim_name: String },
     GeneratedEmptyMask { path: PathBuf },
+    Tmpfs { size_bytes: Option<u64> },
     EmptyDir,
 }

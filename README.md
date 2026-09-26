@@ -184,12 +184,20 @@ The default proxy image is used when `proxy` is omitted. Set `proxy.image` to us
 * `mount` (required, absolute path in the container)
 * `hostPath` (optional, host bind mount; relative paths are resolved from `.cladding/`)
 * `volume` (optional, named volume; mutually exclusive with `hostPath`)
-* `readOnly` (optional, default `false`; ignored for `volume` mounts and forced `true` for empty mask mounts)
+* `type` (optional: `bind`, `readonly`, `overlay`, or `tmpfs`; omitted `type` defaults host paths to writable binds and keeps existing volume and empty mount behavior)
+* `size` (optional size string for `type: "tmpfs"`, such as `1GiB`; if omitted, Podman chooses the size)
+* `readOnly` (deprecated; accepted for compatibility on existing mounts, but new read-only host mounts should use `type: "readonly"`)
 * `targets` (optional; explicit list of `agent`, `nw-sandbox`, `fs-sandbox`)
 * `ignore` (optional, default `false`; when true, removes an existing default mount at the same `mount` path instead of replacing it)
 
-If neither `hostPath` nor `volume` is set, a managed empty runtime volume is mounted read-only - this is intended for masking or hiding underlying files.
+If `type` is omitted and neither `hostPath` nor `volume` is set, a managed empty runtime volume is mounted read-only. This is intended for masking or hiding underlying files.
 Mounts apply to the components named in `targets`. When `targets` is omitted, the mount applies to the agent and to `nw-sandbox` when it is enabled. `fs-sandbox` only receives custom mounts that explicitly target `fs-sandbox`.
+
+`bind`, `readonly`, and `overlay` require `hostPath`. `bind` is a writable host bind. `readonly` prevents container writes to the host source. `overlay` gives each container its own disposable writable layer over that source. If an overlay targets both the agent and `nw-sandbox`, writes in one container are not visible in the other. The host source stays unchanged. Overlay writes last only for that container's lifetime, so `cladding down` and the next `cladding up` discard them. Podman overlays are rejected for the agent when `use_runsc` is enabled. Legacy `readOnly: true` selects the same read-only bind behavior, while legacy `readOnly: false` keeps a bind writable.
+
+`tmpfs` is a writable, memory-backed mount and cannot use `hostPath` or `volume`. Cladding accepts byte values and `K`, `M`, `G`, `T`, `KiB`, `MiB`, `GiB`, and `TiB` size units; decimal `KB`, `MB`, `GB`, and `TB` units are also accepted. Podman receives the limit in bytes. Cladding sets mode `1777` and asks Podman to set ownership to the container's mapped user and group. Tmpfs contents disappear when the container stops. Existing named volumes keep their current persistence behavior.
+
+Cladding keeps the `.cladding` mask beneath workspace overlays and read-only mounts whose host source contains the private `.cladding` directory. A `readonly` or `overlay` mount cannot use a path inside `.cladding` as its host source.
 
 Example:
 
@@ -204,7 +212,9 @@ Example:
   },
   "mounts": [
     { "mount": "/home/user/workspace/.cache/npm", "volume": "npm-cache" },
-    { "mount": "/opt/data", "hostPath": "../data", "readOnly": true },
+    { "mount": "/opt/data", "hostPath": "../data", "type": "readonly" },
+    { "mount": "/home/user/workspace", "hostPath": "..", "type": "overlay" },
+    { "mount": "/tmp/cache", "type": "tmpfs", "size": "1GiB" },
     { "mount": "/tmp/isolated" },
     { "mount": "/opt/nw-sandbox-only", "hostPath": "../nw-sandbox-data", "targets": ["nw-sandbox"] },
     { "mount": "/opt/fs-sandbox-only", "hostPath": "../fs-sandbox-data", "targets": ["fs-sandbox"] }
@@ -217,8 +227,8 @@ Default mounts for the agent and `nw-sandbox` (as if expressed via `mounts`):
 ```json
 {
   "mounts": [
-    { "mount": "/opt/config", "hostPath": "config", "readOnly": true },
-    { "mount": "/opt/tools", "hostPath": "tools", "readOnly": true },
+    { "mount": "/opt/config", "hostPath": "config", "type": "readonly" },
+    { "mount": "/opt/tools", "hostPath": "tools", "type": "readonly" },
     { "mount": "/home/user", "hostPath": "home" },
     { "mount": "/home/user/workspace", "hostPath": ".." },
     { "mount": "/home/user/workspace/.cladding" }
@@ -228,7 +238,7 @@ Default mounts for the agent and `nw-sandbox` (as if expressed via `mounts`):
 
 The `fs-sandbox` default mount set is narrower: `/opt/config` and `/opt/tools` are mounted read-only, plus an internal run socket under `/run/cladding/run/fs-sandbox`. It does not receive `/home/user`, `/home/user/workspace`, or the `.cladding` workspace mask unless custom mounts explicitly target `fs-sandbox`.
 
-Default mounts may be overridden by adding an entry with the same `mount` value, or removed by adding an entry with the same `mount` and `"ignore": true`.
+Default mounts may be overridden by adding an entry with the same `mount` value, or removed by adding an entry with the same `mount` and `"ignore": true`. The `.cladding` workspace mask cannot be removed with `ignore` for the agent or `nw-sandbox`.
 
 ## Architecture + Network Controls
 

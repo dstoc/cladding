@@ -877,6 +877,13 @@ mod tests {
     }
 
     #[test]
+    fn container_cleanup_removes_the_container_that_owns_disposable_mounts() {
+        let cmd = build_container_rm_command("demo-agent-instance");
+
+        assert_eq!(command_args(&cmd), vec!["rm", "-f", "demo-agent-instance"]);
+    }
+
+    #[test]
     fn build_container_run_command_adds_runsc_flags_when_enabled() {
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),

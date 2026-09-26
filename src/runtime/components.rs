@@ -36,7 +36,7 @@ impl RuntimeSpec {
     ) -> Self {
         let project_root = project_root.to_path_buf();
         let workspace_root = workspace_root.to_path_buf();
-        let custom_mounts = build_custom_mounts(&config.name, &config.mounts);
+        let custom_mounts = build_custom_mounts(&project_root, &config.name, &config.mounts);
         let names = RuntimeNames::from_config(config);
 
         let proxy = build_proxy_pod(&project_root, config, &names, &custom_mounts);

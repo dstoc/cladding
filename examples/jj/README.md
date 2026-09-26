@@ -210,7 +210,7 @@ Configure cladding to enable `fs-sandbox` and bind the workspace mounts and jj-c
         "nw-sandbox",
         "fs-sandbox"
       ],
-      "readOnly": true
+      "type": "readonly"
     }
   ]
 }
