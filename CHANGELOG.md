@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.6](https://github.com/dstoc/cladding/compare/v0.3.5...v0.3.6) (2026-09-26)
+
+
+### Features
+
+* add one-off execution with automatic teardown ([#38](https://github.com/dstoc/cladding/issues/38)) ([defd261](https://github.com/dstoc/cladding/commit/defd26128fadf6e0b305d41a03910f37eb74ca11))
+* Add shared --cladding-dir and --config CLI options ([#37](https://github.com/dstoc/cladding/issues/37)) ([b4f31c0](https://github.com/dstoc/cladding/commit/b4f31c045672bf770fe1fe1d8a415ecfebc30291))
+* configurable component images and builds ([#34](https://github.com/dstoc/cladding/issues/34)) ([c8db780](https://github.com/dstoc/cladding/commit/c8db780dcc29d8d97c973ae472f1ed88e89f8a52))
+* support read-only, overlay, and tmpfs mounts ([#40](https://github.com/dstoc/cladding/issues/40)) ([2a1f4de](https://github.com/dstoc/cladding/commit/2a1f4ded6472ab45bb6f6c384be2b86dc7f87bb0))
+
 ## [0.3.5](https://github.com/dstoc/cladding/compare/v0.3.4...v0.3.5) (2026-09-12)
 
 
