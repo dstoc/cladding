@@ -323,19 +323,21 @@ pub(super) fn cmd_reload_proxy(context: &Context) -> Result<()> {
     let config = context.load_config()?;
 
     let status = Command::new("podman")
-        .args([
-            "exec",
-            &runtime_container_name(&project_component_name(&config.name, "proxy")),
-            "squid",
-            "-k",
-            "reconfigure",
-            "-f",
-            "/tmp/squid_generated.conf",
-        ])
+        .args(reload_proxy_args(&config.name))
         .status()
         .with_context(|| "failed to run podman exec")?;
 
-    cladding::podman::ensure_success(status, "podman exec")
+    cladding::podman::ensure_success(status, "Baffle reload via podman exec")
+}
+
+fn reload_proxy_args(project_name: &str) -> [String; 5] {
+    [
+        "exec".to_string(),
+        runtime_container_name(&project_component_name(project_name, "proxy")),
+        "baffle".to_string(),
+        "reload".to_string(),
+        "--all".to_string(),
+    ]
 }
 
 pub(super) fn runtime_container_name(pod_name: &str) -> String {
@@ -344,6 +346,19 @@ pub(super) fn runtime_container_name(pod_name: &str) -> String {
 
 fn project_component_name(project_name: &str, component: &str) -> String {
     format!("{project_name}-{component}")
+}
+
+#[cfg(test)]
+mod reload_proxy_tests {
+    use super::reload_proxy_args;
+
+    #[test]
+    fn reload_proxy_targets_all_baffle_sessions_in_the_proxy_container() {
+        assert_eq!(
+            reload_proxy_args("demo"),
+            ["exec", "demo-proxy-instance", "baffle", "reload", "--all"]
+        );
+    }
 }
 
 pub(super) fn agent_runtime_names(project_name: &str) -> (String, String) {

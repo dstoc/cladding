@@ -85,23 +85,21 @@ fn build_proxy_pod(
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mounts = build_proxy_mounts(project_root, custom_mounts);
-    let mut containers = vec![RuntimeContainer {
+    let containers = vec![RuntimeContainer {
         name: runtime_container_name(&names.proxy_name),
         image: config.proxy_image().to_string(),
-        command: Vec::new(),
+        command: vec![
+            "/bin/sh".to_string(),
+            "-ec".to_string(),
+            "echo 'Baffle runtime is not installed; proxy egress is disabled.' >&2; exec sleep infinity".to_string(),
+        ],
         workdir: None,
         env: Vec::new(),
         mounts,
-        ports: vec![3128, 3129],
+        ports: Vec::new(),
         stdin: false,
         tty: false,
     }];
-
-    containers.push(build_proxy_bridge_sidecar(
-        &names.proxy_name,
-        project_root,
-        names.nw_sandbox_name.is_some(),
-    ));
 
     RuntimePod {
         name: names.proxy_name.clone(),
@@ -379,67 +377,6 @@ fn runtime_container_name(pod_name: &str) -> String {
     format!("{pod_name}-instance")
 }
 
-fn build_proxy_bridge_sidecar(
-    pod_name: &str,
-    project_root: &Path,
-    nw_sandbox_enabled: bool,
-) -> RuntimeContainer {
-    let mut bridge_commands = vec![format!(
-        "socat UNIX-LISTEN:{},fork,reuseaddr TCP:127.0.0.1:3128",
-        runtime_socket_mount_path(RUNTIME_PROXY_AGENT_MOUNT_PATH, "proxy.sock")
-    )];
-    let mut mounts = build_scoped_socket_mount(
-        project_root,
-        RUNTIME_PROXY_AGENT_SOCKET_DIR,
-        RUNTIME_PROXY_AGENT_MOUNT_PATH,
-    );
-    if nw_sandbox_enabled {
-        bridge_commands.push(format!(
-            "socat UNIX-LISTEN:{},fork,reuseaddr TCP:127.0.0.1:3129",
-            runtime_socket_mount_path(RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH, "proxy.sock")
-        ));
-        mounts.extend(build_scoped_socket_mount(
-            project_root,
-            RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
-            RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
-        ));
-    }
-
-    let mut script = String::from("set -eu\n");
-    script.push_str("pids=\"\"\n");
-    for command in &bridge_commands {
-        script.push_str(command);
-        script.push_str(" &\n");
-        script.push_str("pids=\"$pids $!\"\n");
-    }
-    script.push_str("trap 'kill $pids 2>/dev/null || true' INT TERM\n");
-    script.push_str(
-        r#"
-while true; do
-  for pid in $pids; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      wait "$pid" 2>/dev/null || true
-      exit 1
-    fi
-  done
-  sleep 1
-done
-"#,
-    );
-
-    RuntimeContainer {
-        name: format!("{pod_name}-bridge"),
-        image: "alpine/socat".to_string(),
-        command: vec!["/bin/sh".to_string(), "-ec".to_string(), script],
-        workdir: None,
-        env: Vec::new(),
-        mounts,
-        ports: Vec::new(),
-        stdin: false,
-        tty: false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,7 +456,7 @@ mod tests {
         assert_eq!(spec.agent.network_name, "none");
         assert!(spec.agent.userns_keep_id);
         assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
-        assert_eq!(spec.proxy.containers.len(), 2);
+        assert_eq!(spec.proxy.containers.len(), 1);
         assert_eq!(spec.agent.containers.len(), 1);
         assert_eq!(
             spec.nw_sandbox.as_ref().expect("nw pod").containers.len(),
@@ -530,11 +467,13 @@ mod tests {
             1
         );
         assert_eq!(spec.proxy.containers[0].name, "demo-proxy-instance");
-        assert_eq!(spec.proxy.containers[1].name, "demo-proxy-bridge");
-        assert!(spec.proxy.containers[0].command.is_empty());
+        assert_eq!(spec.proxy.containers[0].command[0], "/bin/sh");
+        assert_eq!(spec.proxy.containers[0].command[1], "-ec");
+        assert!(spec.proxy.containers[0].command[2].contains("proxy egress is disabled"));
+        assert!(spec.proxy.containers[0].ports.is_empty());
         assert_eq!(
             spec.proxy.containers[0].image,
-            "docker.io/ubuntu/squid:latest"
+            "docker.io/library/alpine:3.22"
         );
         assert_eq!(spec.agent.containers[0].name, "demo-agent-instance");
         assert_eq!(
@@ -546,10 +485,8 @@ mod tests {
             "demo-fs-sandbox-instance"
         );
 
-        let proxy_bridge = container(&spec.proxy, "demo-proxy-bridge");
         let proxy = container(&spec.proxy, "demo-proxy-instance");
         assert!(mount_paths(proxy).contains("/opt/config"));
-        assert!(!mount_paths(proxy).contains("/opt/scripts"));
         let agent = container(&spec.agent, "demo-agent-instance");
         let nw = container(
             spec.nw_sandbox.as_ref().expect("nw pod"),
@@ -560,18 +497,6 @@ mod tests {
             "demo-fs-sandbox-instance",
         );
 
-        assert!(
-            proxy_bridge
-                .command
-                .iter()
-                .any(|arg| arg.contains("proxy/agent/proxy.sock"))
-        );
-        assert!(
-            proxy_bridge
-                .command
-                .iter()
-                .any(|arg| arg.contains("proxy/nw-sandbox/proxy.sock"))
-        );
         assert!(
             agent
                 .command
@@ -619,8 +544,40 @@ mod tests {
         assert!(mount_paths(nw).contains("/run/cladding/proxy/nw-sandbox"));
         assert!(mount_paths(nw).contains("/run/cladding/run/nw-sandbox"));
         assert!(mount_paths(fs).contains("/run/cladding/run/fs-sandbox"));
-        assert!(mount_paths(proxy_bridge).contains("/run/cladding/proxy/agent"));
-        assert!(mount_paths(proxy_bridge).contains("/run/cladding/proxy/nw-sandbox"));
+        let proxy_credentials = proxy
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/opt/credentials/baffle")
+            .expect("proxy credentials mount");
+        assert!(proxy_credentials.read_only);
+        assert!(matches!(
+            &proxy_credentials.source,
+            super::super::types::RuntimeMountSource::HostPath { path }
+                if path == &PathBuf::from("/tmp/project/.cladding/credentials/baffle")
+        ));
+        for execution in [agent, nw] {
+            let public_ca = execution
+                .mounts
+                .iter()
+                .find(|mount| mount.mount_path == "/run/cladding/ca/baffle.crt")
+                .expect("public CA mount");
+            assert!(public_ca.read_only);
+            assert!(matches!(
+                &public_ca.source,
+                super::super::types::RuntimeMountSource::HostPath { path }
+                    if path == &PathBuf::from("/tmp/project/.cladding/credentials/baffle/ca.crt")
+            ));
+            assert!(execution.mounts.iter().all(|mount| {
+                !matches!(
+                    &mount.source,
+                    super::super::types::RuntimeMountSource::HostPath { path }
+                        if path.ends_with("credentials/baffle")
+                            || path.ends_with("credentials/baffle/ca-key.pem")
+                            || path.ends_with("credentials/baffle/secrets")
+                )
+            }));
+        }
+        assert!(!mount_paths(fs).contains("/run/cladding/ca/baffle.crt"));
         let fs_mounts = mount_paths(fs);
         assert!(fs_mounts.contains("/opt/config"));
         assert!(fs_mounts.contains("/opt/tools"));
@@ -628,7 +585,7 @@ mod tests {
         assert!(!fs_mounts.contains("/home/user/workspace"));
         assert!(!fs_mounts.contains("/home/user/workspace/.cladding"));
 
-        for container in [&spec.proxy.containers[1], agent, nw, fs] {
+        for container in [proxy, agent, nw, fs] {
             assert!(
                 container
                     .command
@@ -636,7 +593,7 @@ mod tests {
                     .all(|arg| !arg.contains("/run/cladding/sockets"))
             );
         }
-        for container in [&spec.proxy.containers[1], agent, nw, fs] {
+        for container in [proxy, agent, nw, fs] {
             assert!(container.name != "demo-agent-proxy-client");
             assert!(container.name != "demo-agent-nw-sandbox-run-client");
             assert!(container.name != "demo-agent-fs-sandbox-run-client");
@@ -655,6 +612,8 @@ mod tests {
             [
                 PathBuf::from("/tmp/project/.cladding/.."),
                 PathBuf::from("/tmp/project/.cladding/config"),
+                PathBuf::from("/tmp/project/.cladding/credentials/baffle"),
+                PathBuf::from("/tmp/project/.cladding/credentials/baffle/ca.crt"),
                 PathBuf::from("/tmp/project/.cladding/home"),
                 PathBuf::from("/tmp/project/.cladding/tools"),
             ]
@@ -719,7 +678,7 @@ mod tests {
 
         assert!(spec.nw_sandbox.is_some());
         assert!(spec.fs_sandbox.is_none());
-        assert_eq!(spec.proxy.containers.len(), 2);
+        assert_eq!(spec.proxy.containers.len(), 1);
         assert_eq!(spec.agent.containers.len(), 1);
         assert_eq!(
             spec.nw_sandbox.as_ref().expect("nw pod").containers.len(),
@@ -766,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn build_runtime_spec_uses_selected_proxy_image_and_keeps_bridge_sidecar() {
+    fn build_runtime_spec_uses_selected_proxy_image_without_a_bridge_sidecar() {
         let mut config = execution_config(false, false, Vec::new(), false);
         config.proxy = Some(ExecutionProxyConfig {
             image: "localhost/custom-proxy:latest".to_string(),
@@ -775,12 +734,11 @@ mod tests {
 
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
 
-        assert_eq!(spec.proxy.containers.len(), 2);
+        assert_eq!(spec.proxy.containers.len(), 1);
         assert_eq!(
             spec.proxy.containers[0].image,
             "localhost/custom-proxy:latest"
         );
-        assert_eq!(spec.proxy.containers[1].name, "demo-proxy-bridge");
     }
 
     #[test]

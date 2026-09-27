@@ -49,3 +49,29 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked
+
+  baffle-config:
+    runs-on: ubuntu-latest
+    env:
+      BAFFLE_PROXY_VERSION: 0.2.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Baffle build and rootless Podman dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake libclang-dev podman uidmap slirp4netns fuse-overlayfs
+          runner_user="$(id -un)"
+          runner_group="$(id -gn)"
+          if ! grep -q "^${runner_user}:" /etc/subuid; then
+            echo "${runner_user}:100000:65536" | sudo tee -a /etc/subuid
+          fi
+          if ! grep -q "^${runner_group}:" /etc/subgid; then
+            echo "${runner_group}:100000:65536" | sudo tee -a /etc/subgid
+          fi
+      - name: Install pinned Baffle binary
+        run: cargo install --locked --version "$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" baffle-proxy
+      - name: Build Cladding CLI
+        run: cargo build --locked --bin cladding
+      - name: Validate native config with Baffle in rootless Podman
+        run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/bin/baffle"

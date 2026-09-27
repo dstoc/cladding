@@ -2,9 +2,11 @@ Cladding lets you run an agent in a constrained container environment where netw
 
 - The agent runs as a standalone `--network none` container named `<name>-agent-instance`.
 - Optional delegated sandboxes run as standalone `--network none` containers named `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance`.
-- HTTP(S) egress is mediated by the `<name>-proxy` pod. Execution containers reach it through scoped Unix-domain socket mounts and local `socat` loopback bridges.
+- HTTP(S) egress is intended to be mediated by the `<name>-proxy` pod. Execution containers use scoped Unix-domain socket mounts and local `socat` loopback bridges.
 - `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance` each serve [`mcp-run`](crates/mcp-run/README.md) on a mounted Unix socket and execute commands only when allowed by their Rego policy modules under `.cladding/config/`.
 - Proxy rules use native Baffle TOML under `.cladding/config/proxy/`.
+
+The proxy runtime is fail closed until Baffle startup is available: it starts no proxy listener, so execution containers have no network egress. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime.
 
 In short: the agent cannot freely access the network; users can run sandbox commands from the host with [`cladding run-with-scissors`](#useful-commands), while commands running inside the agent can delegate to sandbox containers with `run-in-nw-sandbox` or `run-in-fs-sandbox`.
 
@@ -130,6 +132,27 @@ cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - chec
 
 `init` accepts `--cladding-dir` to choose where it creates the directory. It does not read `--config`. `ps` lists all running projects, so it does not accept either project-specific option. Reading `--config -` consumes stdin as configuration; the same stdin stream is not available to a command run through `cladding run`.
 
+### Project CA and injection credentials
+
+`cladding init` creates one Baffle CA for the project under `.cladding/credentials/baffle/`:
+
+```text
+.cladding/credentials/baffle/
+  ca.crt
+  ca-key.pem
+  secrets/
+```
+
+Cladding reuses a valid CA when the project starts again. If either CA file is missing, malformed, expired, or does not match its partner, Cladding reports an error and leaves the material in place. It does not rotate the CA automatically. The credentials directories use mode `0700`, the private key and secret files use `0600`, and the public certificate uses `0644` on Unix hosts.
+
+Users or external secret managers provision one file per Baffle symbolic secret in `secrets/`. Cladding creates this directory but does not create, copy, read, rewrite, or log secret values. Keep secret names in policy configuration and keep the values in these files. The proxy receives the credentials directory as a read-only mount. The agent and network sandbox receive a separate read-only mount of `ca.crt`; they do not receive the private key or secret files. The filesystem sandbox receives no CA mount.
+
+`cladding down` and `cladding destroy` remove runtime resources but keep the project CA and secrets. `cladding once` creates a separate temporary CA and empty secrets directory, then removes them during cleanup.
+
+To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then start the project to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
+
+New `.cladding` directories contain an internal ignore file. For an existing project layout, confirm that the repository ignores `.cladding/credentials/` before provisioning credentials. Never commit `ca-key.pem` or secret files.
+
 ### Configuring container images
 
 Each component can use an existing image or build one from a Containerfile. The component `image` value is the build output tag when `build` is also set. If `image` is omitted, `cladding build` generates a local tag such as `localhost/cladding-myproject-agent:latest`.
@@ -173,7 +196,7 @@ Each component can use an existing image or build one from a Containerfile. The 
 
 `cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag.
 
-The default proxy image is used when `proxy` is omitted. Set `proxy.image` to use a prebuilt proxy image, or configure `proxy.build` to build a proxy image locally.
+The default proxy image is a minimal Alpine image used for the fail-closed placeholder runtime. Set `proxy.image` to use a prebuilt proxy image, or configure `proxy.build` to build a proxy image locally.
 
 ### Configuring mounts
 
@@ -270,9 +293,7 @@ flowchart TB
   end
 
   subgraph P["pod: <name>-proxy"]
-    PB[proxy bridge sidecar]
-    PX1[Agent proxy listener 127.0.0.1:3128]
-    PX2[Network sandbox proxy listener 127.0.0.1:3129]
+    PX[Alpine placeholder; no proxy listener]
   end
 
   WS --> CA
@@ -285,13 +306,9 @@ flowchart TB
   CA -- run-remote over UDS --> SA
   CA -- run-remote over UDS --> FA
   CA -- HTTP(S) proxy env --> CAP
-  CAP -- proxy/agent/proxy.sock --> PB
-  SAP -- proxy/nw-sandbox/proxy.sock --> PB
-  PB --> PX1
-  PB --> PX2
+  CAP -- missing Baffle socket; fail closed --> PX
+  SAP -- missing Baffle socket; fail closed --> PX
   SA -- HTTP(S) proxy env --> SAP
-  PX1 -- listener identity, allowlisted domains only --> NET[(Internet)]
-  PX2 -- listener identity, allowlisted domains only --> NET
 ```
 
 The filesystem sandbox has no proxy socket mount and no proxy environment by default. It can run allowed commands through `mcp-run`, but it is not given HTTP(S) egress.

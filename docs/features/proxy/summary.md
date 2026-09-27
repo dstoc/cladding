@@ -15,3 +15,7 @@ The network-sandbox session file may exist when the network sandbox is disabled.
 The proxy configuration uses Baffle's `file_only` create mode. Initialization creates directories with mode `0755` and TOML files with mode `0644`, owned by the user who runs `cladding init`. Rootless Podman maps the host user's files to the proxy container's trusted UID. Initialization rejects symlinks on the managed configuration paths because Baffle's file-only mode requires real files and directories.
 
 Cladding mounts `config/` read-only into the agent and network sandbox. They can read the non-secret Baffle TOML by design. Store symbolic secret names in `[secrets].allowed`; do not put secret values, private keys, or control-socket paths with access capabilities in TOML.
+
+## Runtime status
+
+The current proxy runtime is fail closed while Baffle startup is integrated. Its Alpine placeholder starts no proxy listener, and execution containers have no network egress. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime. CI installs the pinned Baffle binary and validates both session files in rootless Podman.
