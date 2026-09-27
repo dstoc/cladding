@@ -329,6 +329,16 @@ create_session() {
         log "created persistent session from $session_file"
     else
         status=$?
+        log "session socket bind context: uid=$proxy_uid socket_dir=$baffle_socket_dir"
+        grep '^socket_dir = ' "$runtime_config" >&2 || true
+        for socket_path in "$private_control_dir" "$baffle_socket_dir" \
+            "$baffle_socket_dir/$component" "$baffle_socket_dir/$component/proxy.sock"; do
+            if [ -e "$socket_path" ]; then
+                ls -ld "$socket_path" >&2 || true
+            else
+                log "session socket bind path is missing: $socket_path"
+            fi
+        done
         fail "failed to create session from $session_file (exit code $status)"
     fi
     if [ "$SOCKET_RELAY" = true ]; then

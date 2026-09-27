@@ -64,7 +64,7 @@ report_failure_output() {
   title=$1
   message=$2
   output_file=$3
-  details=$(tail -n 8 "$output_file" | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
+  details=$(tail -n 20 "$output_file" | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
   echo "::error title=$title::$message output=$details"
 }
 
@@ -174,6 +174,8 @@ run_proxy_startup() {
     --userns keep-id \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
     --env "CLADDING_BAFFLE_SOCKET_RELAY=$socket_relay" \
+    --env RUST_LOG=debug \
+    --env RUST_BACKTRACE=1 \
     --volume "$project_root/tools/bin/baffle:/opt/tools/bin/baffle:ro" \
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
     --volume "$project_root/config:/opt/config:ro" \
