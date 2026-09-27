@@ -588,7 +588,7 @@ fn append_user_namespace_args(cmd: &mut Command, user_namespace: RuntimeUserName
     let mode = match user_namespace {
         RuntimeUserNamespace::Default => return,
         RuntimeUserNamespace::KeepId => "keep-id",
-        RuntimeUserNamespace::KeepIdAsRoot => "keep-id:uid=0,gid=0",
+        RuntimeUserNamespace::KeepIdAsRoot => "keep-id:uid=0",
     };
     cmd.arg("--userns");
     cmd.arg(mode);
@@ -886,7 +886,7 @@ mod tests {
                 "--network",
                 "default",
                 "--userns",
-                "keep-id:uid=0,gid=0",
+                "keep-id:uid=0",
             ]
         );
     }

@@ -167,7 +167,7 @@ run_proxy_startup() {
   start_output_file="$temp_root/proxy-start-$name.log"
   current_phase="create proxy container ($name)"
   if podman run --detach --name "$name" \
-    --userns keep-id:uid=0,gid=0 \
+    --userns keep-id:uid=0 \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
     --volume "$project_root/tools/bin/baffle:/opt/tools/bin/baffle:ro" \
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
