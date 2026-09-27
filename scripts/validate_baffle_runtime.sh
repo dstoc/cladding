@@ -65,7 +65,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$temp_root/workspace" "$temp_root/origin/www/authorized" "$temp_root/origin/events"
+mkdir -p "$temp_root/workspace" "$temp_root/origin/www/authorized"
 phase="initialize fixture"
 (
   cd "$temp_root/workspace"
@@ -420,7 +420,7 @@ body=$(agent_curl --fail https://localhost:8443/replacement/after-invalid-reload
 printf '%s' "$body" | jq -e '.authorization == "new"' >/dev/null
 
 phase="verify request records do not contain fake secret values"
-podman exec "$origin_name" cat /events/events.jsonl > "$temp_root/events.jsonl"
+podman exec "$origin_name" cat /tmp/baffle-integration/events.jsonl > "$temp_root/events.jsonl"
 if grep -F 'cladding-test-old-value' "$temp_root/events.jsonl" \
   || grep -F 'cladding-test-new-value' "$temp_root/events.jsonl"; then
   echo "origin event log contains a credential value" >&2

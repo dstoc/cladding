@@ -9,7 +9,7 @@ import threading
 from urllib.parse import urlsplit
 
 
-EVENTS = "/events/events.jsonl"
+EVENTS = "/tmp/baffle-integration/events.jsonl"
 OLD_TOKEN = "cladding-test-old-value"
 NEW_TOKEN = "cladding-test-new-value"
 event_lock = threading.Lock()
