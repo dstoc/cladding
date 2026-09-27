@@ -25,6 +25,10 @@ socket_relay=false
 if [ "$(uname -s)" = Darwin ]; then
   socket_relay=true
 fi
+relay_volume_names=
+relay_volume_agent=
+relay_volume_nw_sandbox=
+relay_proxy_name=
 current_phase="initialize validation"
 
 cleanup() {
@@ -42,6 +46,9 @@ cleanup() {
     done
   fi
   podman rm -f "$disabled_container" "$enabled_container" >/dev/null 2>&1 || true
+  for volume_name in $relay_volume_names; do
+    podman volume rm "$volume_name" >/dev/null 2>&1 || true
+  done
   rm -rf "$temp_root"
   exit "$status"
 }
@@ -60,6 +67,35 @@ stat_uid() {
     stat -f '%u' "$1"
   else
     stat -c '%u' "$1"
+  fi
+}
+
+container_stat_mode() {
+  podman exec "$1" stat -c '%a' "$2" 2>/dev/null
+}
+
+require_container_mode() {
+  mode_container=$1
+  mode_path=$2
+  expected_mode=$3
+  description=$4
+  observed_mode=$(container_stat_mode "$mode_container" "$mode_path" 2>/dev/null || printf 'unavailable')
+  if [ "$observed_mode" != "$expected_mode" ]; then
+    message="$description path=$mode_path expected_mode=0$expected_mode observed_mode=$observed_mode"
+    echo "$message" >&2
+    annotation_message=$(printf '%s' "$message" | sed 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')
+    echo "::error title=Baffle socket permissions::$annotation_message"
+    exit 1
+  fi
+}
+
+proxy_socket_exists() {
+  proxy_name=$1
+  component=$2
+  if [ "$socket_relay" = true ]; then
+    podman exec "$proxy_name" test -S "/run/cladding/proxy/$component/proxy.sock" >/dev/null 2>&1
+  else
+    [ -S "$3/$component/proxy.sock" ]
   fi
 }
 
@@ -123,8 +159,22 @@ verify_scoped_socket_access() {
   socket_path="$component_dir/proxy.sock"
   current_phase="verify $component socket permissions ($socket_runtime runtime)"
 
-  require_mode "$component_dir" 700 "Baffle $component socket directory mode mismatch"
-  require_mode "$socket_path" 600 "Baffle $component socket mode mismatch"
+  if [ "$socket_relay" = true ]; then
+    require_container_mode "$relay_proxy_name" "/run/cladding/proxy/$component" 700 \
+      "Baffle $component socket directory mode mismatch"
+    require_container_mode "$relay_proxy_name" "/run/cladding/proxy/$component/proxy.sock" 600 \
+      "Baffle $component socket mode mismatch"
+    if [ "$component" = agent ]; then
+      relay_volume=$relay_volume_agent
+    else
+      relay_volume=$relay_volume_nw_sandbox
+    fi
+    component_mount="$relay_volume:/run/cladding/proxy/$component:rw"
+  else
+    require_mode "$component_dir" 700 "Baffle $component socket directory mode mismatch"
+    require_mode "$socket_path" 600 "Baffle $component socket mode mismatch"
+    component_mount="$component_dir:/run/cladding/proxy/$component:rw"
+  fi
   if [ "${BAFFLE_VALIDATION_CHECK_HOST_UID:-true}" = true ] \
     && [ "$(stat_uid "$socket_path")" != "$runner_uid" ]; then
     echo "Baffle $component socket is not owned by the invoking host user" >&2
@@ -145,7 +195,7 @@ verify_scoped_socket_access() {
   output_file="$temp_root/socket-test-$component-$socket_runtime.log"
   if "$@" --rm --network none --userns keep-id \
     --user "$container_uid:$container_gid" \
-    --volume "$component_dir:/run/cladding/proxy/$component:rw" \
+    --volume "$component_mount" \
     --entrypoint /bin/sh "$socket_test_image" -ec '
       socket_path=$1
       test -S "$socket_path"
@@ -172,6 +222,7 @@ run_proxy_startup() {
   name=$1
   sandbox_enabled=$2
   sandbox_state=$3
+  relay_proxy_name=$name
   socket_dir="$temp_root/sockets-$name"
   current_phase="start proxy ($name)"
   mkdir -p "$socket_dir/agent"
@@ -181,6 +232,19 @@ run_proxy_startup() {
   chmod 700 "$socket_dir" "$socket_dir/agent"
   if [ "$sandbox_enabled" = true ]; then
     chmod 700 "$socket_dir/nw-sandbox"
+  fi
+
+  if [ "$socket_relay" = true ]; then
+    relay_volume_agent="$container_prefix-$name-agent-relay"
+    podman volume create "$relay_volume_agent" >/dev/null
+    relay_volume_names="$relay_volume_names $relay_volume_agent"
+    if [ "$sandbox_enabled" = true ]; then
+      relay_volume_nw_sandbox="$container_prefix-$name-nw-sandbox-relay"
+      podman volume create "$relay_volume_nw_sandbox" >/dev/null
+      relay_volume_names="$relay_volume_names $relay_volume_nw_sandbox"
+    else
+      relay_volume_nw_sandbox=
+    fi
   fi
 
   start_output_file="$temp_root/proxy-start-$name.log"
@@ -197,6 +261,14 @@ run_proxy_startup() {
     --volume "$project_root/config:/opt/config:ro" \
     --volume "$project_root/credentials/baffle:/opt/credentials/baffle:ro" \
     --volume "$socket_dir:/run/cladding/proxy:rw"
+  if [ "$socket_relay" = true ]; then
+    set -- "$@" \
+      --volume "$relay_volume_agent:/run/cladding/proxy/agent:U"
+    if [ "$sandbox_enabled" = true ]; then
+      set -- "$@" \
+        --volume "$relay_volume_nw_sandbox:/run/cladding/proxy/nw-sandbox:U"
+    fi
+  fi
   if [ -n "$socket_probe_bin" ]; then
     set -- "$@" \
       --volume "$socket_probe_bin:/opt/tools/bin/baffle-socket-probe:ro" \
@@ -216,8 +288,8 @@ run_proxy_startup() {
   ready=false
   attempt=0
   while [ "$attempt" -lt 60 ]; do
-    if [ -S "$socket_dir/agent/proxy.sock" ]; then
-      if [ "$sandbox_enabled" = false ] || [ -S "$socket_dir/nw-sandbox/proxy.sock" ]; then
+    if proxy_socket_exists "$name" agent "$socket_dir"; then
+      if [ "$sandbox_enabled" = false ] || proxy_socket_exists "$name" nw-sandbox "$socket_dir"; then
         ready=true
         break
       fi
@@ -257,7 +329,7 @@ run_proxy_startup() {
     exit "$status"
   fi
 
-  if [ "$sandbox_enabled" = false ] && [ -S "$socket_dir/nw-sandbox/proxy.sock" ]; then
+  if [ "$sandbox_enabled" = false ] && proxy_socket_exists "$name" nw-sandbox "$socket_dir"; then
     echo "Baffle startup created a network-sandbox session while it was disabled" >&2
     exit 1
   fi
@@ -279,13 +351,36 @@ run_proxy_startup() {
     podman logs "$name" >&2
     exit 1
   fi
-  if [ -S "$socket_dir/agent/proxy.sock" ]; then
-    echo "Baffle left the agent session socket after proxy shutdown" >&2
-    exit 1
-  fi
-  if [ -S "$socket_dir/nw-sandbox/proxy.sock" ]; then
-    echo "Baffle left a network-sandbox session socket after proxy shutdown" >&2
-    exit 1
+  if [ "$socket_relay" = true ]; then
+    for component in agent nw-sandbox; do
+      if [ "$component" = nw-sandbox ] && [ "$sandbox_enabled" = false ]; then
+        continue
+      fi
+      if [ "$component" = agent ]; then
+        relay_volume=$relay_volume_agent
+      else
+        relay_volume=$relay_volume_nw_sandbox
+      fi
+      if podman run --rm --network none --userns keep-id \
+        --user "$container_uid:$container_gid" \
+        --volume "$relay_volume:/run/cladding/proxy/$component:ro" \
+        --entrypoint /bin/sh "$socket_test_image" -ec \
+        "test ! -e /run/cladding/proxy/$component/proxy.sock"; then
+        :
+      else
+        echo "Baffle left a $component relay socket after proxy shutdown" >&2
+        exit 1
+      fi
+    done
+  else
+    if [ -S "$socket_dir/agent/proxy.sock" ]; then
+      echo "Baffle left the agent session socket after proxy shutdown" >&2
+      exit 1
+    fi
+    if [ -S "$socket_dir/nw-sandbox/proxy.sock" ]; then
+      echo "Baffle left a network-sandbox session socket after proxy shutdown" >&2
+      exit 1
+    fi
   fi
 }
 

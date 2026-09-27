@@ -17,6 +17,7 @@ pub(super) fn append_mount_args(cmd: &mut Command, pod_name: &str, mounts: &[Run
             RuntimeMountSource::HostPath { path } => path.display().to_string(),
             RuntimeMountSource::OverlayHostPath { path } => path.display().to_string(),
             RuntimeMountSource::NamedVolume { claim_name } => claim_name.clone(),
+            RuntimeMountSource::NamedVolumeChown { claim_name } => claim_name.clone(),
             RuntimeMountSource::GeneratedEmptyMask { path } => path.display().to_string(),
             RuntimeMountSource::Tmpfs { .. } => unreachable!("tmpfs mounts handled above"),
             RuntimeMountSource::EmptyDir => empty_dir_volume_name(pod_name, &mount.mount_path),
@@ -25,8 +26,13 @@ pub(super) fn append_mount_args(cmd: &mut Command, pod_name: &str, mounts: &[Run
         let mut volume = format!("{source}:{}", mount.mount_path);
         if matches!(&mount.source, RuntimeMountSource::OverlayHostPath { .. }) {
             volume.push_str(":O");
-        } else if mount.read_only {
-            volume.push_str(":ro");
+        } else {
+            if mount.read_only {
+                volume.push_str(":ro");
+            }
+            if matches!(&mount.source, RuntimeMountSource::NamedVolumeChown { .. }) {
+                volume.push_str(":U");
+            }
         }
         cmd.arg("--volume");
         cmd.arg(volume);
@@ -118,6 +124,13 @@ mod tests {
                     },
                 },
                 RuntimeMount {
+                    mount_path: "/run/cladding/proxy/agent".to_string(),
+                    read_only: false,
+                    source: RuntimeMountSource::NamedVolumeChown {
+                        claim_name: "demo-proxy-relay-agent".to_string(),
+                    },
+                },
+                RuntimeMount {
                     mount_path: "/workspace/tmp".to_string(),
                     read_only: false,
                     source: RuntimeMountSource::EmptyDir,
@@ -139,6 +152,8 @@ mod tests {
                 "/tmp/demo/config:/opt/config:ro",
                 "--volume",
                 "demo-cache:/workspace/data",
+                "--volume",
+                "demo-proxy-relay-agent:/run/cladding/proxy/agent:U",
                 "--volume",
                 "cladding-demo-agent-empty-workspace-tmp:/workspace/tmp",
                 "--volume",

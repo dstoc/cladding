@@ -5,15 +5,16 @@ use super::mounts::{
 };
 use super::sockets::{
     RUNTIME_AGENT_INJECT_MOUNT_PATH, RUNTIME_AGENT_INJECT_SOCKET_DIR,
-    RUNTIME_PROXY_AGENT_MOUNT_PATH, RUNTIME_PROXY_AGENT_SOCKET_DIR,
-    RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH, RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
+    RUNTIME_PROXY_AGENT_MOUNT_PATH, RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH,
+    RUNTIME_PROXY_AGENT_SOCKET_DIR, RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
+    RUNTIME_PROXY_NW_SANDBOX_RELAY_MOUNT_PATH, RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
     RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH, RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR,
     RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH, RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR,
-    build_scoped_socket_mount, runtime_socket_mount_path,
+    build_proxy_relay_volume_mount, build_scoped_socket_mount, runtime_socket_mount_path,
 };
 use super::types::{
-    RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeNames, RuntimePlacement,
-    RuntimePod, RuntimeSpec, RuntimeUserNamespace,
+    RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeMount, RuntimeNames,
+    RuntimePlacement, RuntimePod, RuntimeSpec, RuntimeUserNamespace,
 };
 use crate::config::{ExecutionConfig, MountTarget};
 use std::collections::BTreeMap;
@@ -84,7 +85,23 @@ fn build_proxy_pod(
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
-    let mounts = build_proxy_mounts(project_root, custom_mounts);
+    let mut mounts = build_proxy_mounts(project_root, custom_mounts);
+    if cfg!(target_os = "macos") {
+        mounts.push(build_proxy_relay_volume_mount(
+            &config.name,
+            "agent",
+            RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH,
+            true,
+        ));
+        if config.nw_sandbox_enabled() {
+            mounts.push(build_proxy_relay_volume_mount(
+                &config.name,
+                "nw-sandbox",
+                RUNTIME_PROXY_NW_SANDBOX_RELAY_MOUNT_PATH,
+                true,
+            ));
+        }
+    }
     let containers = vec![RuntimeContainer {
         name: runtime_container_name(&names.proxy_name),
         image: config.proxy_image().to_string(),
@@ -137,8 +154,10 @@ fn build_agent_pod(
         RUNTIME_AGENT_INJECT_SOCKET_DIR,
         RUNTIME_AGENT_INJECT_MOUNT_PATH,
     ));
-    mounts.extend(build_scoped_socket_mount(
+    mounts.extend(build_proxy_data_socket_mount(
         project_root,
+        &config.name,
+        "agent",
         RUNTIME_PROXY_AGENT_SOCKET_DIR,
         RUNTIME_PROXY_AGENT_MOUNT_PATH,
     ));
@@ -237,8 +256,10 @@ fn build_nw_sandbox_pod(
         custom_mounts,
         MountTarget::NwSandbox,
     );
-    mounts.extend(build_scoped_socket_mount(
+    mounts.extend(build_proxy_data_socket_mount(
         project_root,
+        &config.name,
+        "nw-sandbox",
         RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
         RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
     ));
@@ -310,6 +331,25 @@ fn build_nw_sandbox_pod(
             tty: false,
         }],
         user_namespace: RuntimeUserNamespace::KeepId,
+    }
+}
+
+fn build_proxy_data_socket_mount(
+    project_root: &Path,
+    project_name: &str,
+    component: &str,
+    socket_dir: &str,
+    mount_path: &str,
+) -> Vec<RuntimeMount> {
+    if cfg!(target_os = "macos") {
+        vec![build_proxy_relay_volume_mount(
+            project_name,
+            component,
+            mount_path,
+            false,
+        )]
+    } else {
+        build_scoped_socket_mount(project_root, socket_dir, mount_path)
     }
 }
 
@@ -849,18 +889,51 @@ mod tests {
             host_mount_path(proxy, "/run/cladding/proxy"),
             Some(Path::new("/tmp/project/.cladding/runtime/sockets/proxy"))
         );
-        assert_eq!(
-            host_mount_path(agent, "/run/cladding/proxy/agent"),
-            Some(Path::new(
-                "/tmp/project/.cladding/runtime/sockets/proxy/agent"
-            ))
-        );
-        assert_eq!(
-            host_mount_path(nw, "/run/cladding/proxy/nw-sandbox"),
-            Some(Path::new(
-                "/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"
-            ))
-        );
+        if cfg!(target_os = "macos") {
+            for (component, container, mount_path) in [
+                ("agent", agent, "/run/cladding/proxy/agent"),
+                ("nw-sandbox", nw, "/run/cladding/proxy/nw-sandbox"),
+            ] {
+                let scoped_mount = container
+                    .mounts
+                    .iter()
+                    .find(|mount| mount.mount_path == mount_path)
+                    .expect("scoped relay volume mount");
+                assert!(matches!(
+                    &scoped_mount.source,
+                    super::super::types::RuntimeMountSource::NamedVolume { claim_name }
+                        if claim_name == &format!("cladding-demo-baffle-relay-{component}")
+                ));
+            }
+            for (component, mount_path) in [
+                ("agent", "/run/cladding/proxy/agent"),
+                ("nw-sandbox", "/run/cladding/proxy/nw-sandbox"),
+            ] {
+                let relay_mount = proxy
+                    .mounts
+                    .iter()
+                    .find(|mount| mount.mount_path == mount_path)
+                    .expect("proxy relay volume mount");
+                assert!(matches!(
+                    &relay_mount.source,
+                    super::super::types::RuntimeMountSource::NamedVolumeChown { claim_name }
+                        if claim_name == &format!("cladding-demo-baffle-relay-{component}")
+                ));
+            }
+        } else {
+            assert_eq!(
+                host_mount_path(agent, "/run/cladding/proxy/agent"),
+                Some(Path::new(
+                    "/tmp/project/.cladding/runtime/sockets/proxy/agent"
+                ))
+            );
+            assert_eq!(
+                host_mount_path(nw, "/run/cladding/proxy/nw-sandbox"),
+                Some(Path::new(
+                    "/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"
+                ))
+            );
+        }
 
         for (pod, container, own_socket, other_socket) in [
             (

@@ -306,7 +306,8 @@ fi
 start_socket_relay() {
     component=$1
     private_socket="$private_data_dir/$component/proxy.sock"
-    public_socket="$SOCKET_DIR/$component/proxy.sock"
+    relay_dir="$SOCKET_DIR/$component"
+    public_socket="$relay_dir/proxy.sock"
     attempt=0
     while [ "$attempt" -lt 300 ] && [ ! -S "$private_socket" ]; do
         if [ ! -d "/proc/$daemon_pid" ]; then
@@ -319,7 +320,7 @@ start_socket_relay() {
         fail "timed out waiting for Baffle $component data socket: $private_socket"
     fi
 
-    ensure_mode "$SOCKET_DIR/$component" 700 \
+    ensure_mode "$relay_dir" 700 \
         "Baffle $component relay directory mode"
     if [ -S "$public_socket" ]; then
         rm -f "$public_socket" || fail "failed to remove stale proxy relay socket: $public_socket"
