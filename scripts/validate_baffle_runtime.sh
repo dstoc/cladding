@@ -125,13 +125,21 @@ git -C "$temp_root/repo" remote add origin "$temp_root/origin/www/authorized/rep
 git -C "$temp_root/repo" push origin main >/dev/null 2>&1
 git --git-dir="$temp_root/origin/www/authorized/repo.git" update-server-info
 
-phase="build fixture images"
+phase="build integration client image"
 podman build --quiet -t "$client_image" \
   -f "$script_dir/Containerfile.baffle-integration-client" "$script_dir"
+
+phase="build local TLS origin image"
 podman build --quiet -t "$origin_image" \
   -f "$script_dir/Containerfile.baffle-integration-origin" "$temp_root/origin"
+
+phase="build Cladding proxy image"
 "$cladding_bin" --cladding-dir "$project_root" build
+
+phase="copy TLS origin CA into proxy build context"
 cp "$temp_root/origin/origin-ca.crt" "$temp_root/origin-ca.crt"
+
+phase="build proxy image with local origin trust"
 podman build --quiet -t "$proxy_image" \
   --build-arg BASE_IMAGE=localhost/cladding-proxy:latest \
   -f "$script_dir/Containerfile.baffle-integration-proxy" "$temp_root"
