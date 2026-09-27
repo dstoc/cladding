@@ -58,7 +58,7 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 
   Generated proxy scripts and Squid runtime config are refreshed under `.cladding/runtime/scripts/` by `cladding up`; they are not user-editable config.
 
-* Build images and refresh host-mounted binaries (`mcp-run`, `run-remote`, and sandbox helper wrappers) in `.cladding/tools/bin`:
+* Build images and refresh host-mounted binaries (`mcp-run`, `run-remote`, `baffle`, and sandbox helper wrappers) in `.cladding/tools/bin`. See the [embedded Baffle build and update procedure](docs/features/baffle-integration/embedded-baffle.md): Baffle builds need Rust 1.96 or newer and native build tools; cross-build hosts can provide `CLADDING_BAFFLE_BIN`.
 
   ```bash
   cladding build
