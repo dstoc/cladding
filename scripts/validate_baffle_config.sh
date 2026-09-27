@@ -37,7 +37,7 @@ podman run --pull=always --detach --name "$container_name" \
   --volume "$control_dir:/run/baffle:rw" \
   --entrypoint /bin/sh \
   docker.io/library/ubuntu:24.04 \
-  -ec 'apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libssl3t64; rm -rf /var/lib/apt/lists/*; exec baffle daemon --config /opt/config/proxy/daemon.toml' >/dev/null
+  -ec 'exec baffle daemon --config /opt/config/proxy/daemon.toml' >/dev/null
 
 ready=false
 for _ in $(seq 1 60); do
