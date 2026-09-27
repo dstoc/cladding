@@ -258,9 +258,7 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
         println!("initialized: {}", empty_mask_dir.display());
     }
 
-    write_proxy_startup_script(&runtime_dir.join("scripts/proxy_startup.sh"))?;
-
-    cladding::credentials::ensure_baffle_credentials(project_root)?;
+    prepare_baffle_runtime(project_root)?;
 
     if cladding_config_preexisting {
         println!(
@@ -339,12 +337,7 @@ fn cmd_up_inner(
     check_runsc_runtime(&config, verbose)?;
     check_required_images(&config, verbose)?;
     check_required_config_files(context, &config)?;
-    cladding::credentials::ensure_baffle_credentials(&context.project_root)?;
-    write_proxy_startup_script(
-        &context
-            .project_root
-            .join("runtime/scripts/proxy_startup.sh"),
-    )?;
+    prepare_baffle_runtime(&context.project_root)?;
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;
@@ -372,8 +365,13 @@ pub(super) fn prepare_once_runtime_root(project_root: &std::path::Path) -> Resul
     fs::create_dir_all(&tools_bin_dir)
         .with_context(|| "failed to create one-off tools directory")?;
     write_embedded_tools(&tools_bin_dir)?;
+    prepare_baffle_runtime(project_root)
+}
+
+fn prepare_baffle_runtime(project_root: &std::path::Path) -> Result<()> {
+    cladding::credentials::ensure_baffle_credentials(project_root)?;
     write_proxy_startup_script(&project_root.join("runtime/scripts/proxy_startup.sh"))?;
-    cladding::credentials::ensure_baffle_credentials(project_root)
+    Ok(())
 }
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
@@ -586,6 +584,40 @@ mod tests {
                 .next()
                 .is_none()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn baffle_runtime_preparation_preserves_persistent_credentials() {
+        let root = std::env::temp_dir().join(format!(
+            "cladding-baffle-runtime-preparation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        prepare_baffle_runtime(&root).unwrap();
+        let credential_dir = root.join("credentials/baffle");
+        let certificate_before = fs::read(credential_dir.join("ca.crt")).unwrap();
+        let private_key_before = fs::read(credential_dir.join("ca-key.pem")).unwrap();
+        let secret_path = credential_dir.join("secrets/api-token");
+        fs::write(&secret_path, "persistent-secret").unwrap();
+
+        prepare_baffle_runtime(&root).unwrap();
+
+        assert_eq!(
+            fs::read(credential_dir.join("ca.crt")).unwrap(),
+            certificate_before
+        );
+        assert_eq!(
+            fs::read(credential_dir.join("ca-key.pem")).unwrap(),
+            private_key_before
+        );
+        assert_eq!(
+            fs::read_to_string(secret_path).unwrap(),
+            "persistent-secret"
+        );
+        assert!(root.join("runtime/scripts/proxy_startup.sh").is_file());
         fs::remove_dir_all(root).unwrap();
     }
 
