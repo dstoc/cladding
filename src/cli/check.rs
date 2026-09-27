@@ -37,7 +37,7 @@ pub(super) fn check_required_binaries(context: &Context, config: &ExecutionConfi
     let mut missing = false;
     let bin_dir = context.project_root.join("tools/bin");
 
-    let mut required = vec!["mcp-run", "run-remote"];
+    let mut required = vec!["mcp-run", "run-remote", "baffle"];
     if config.nw_sandbox_enabled() {
         required.push("run-in-nw-sandbox");
     }
@@ -409,7 +409,7 @@ mod tests {
 
         assert!(check_required_binaries(&context, &config).is_ok());
 
-        fs::write(bin_dir.join("mcp-run"), b"stale").expect("stale tool");
+        fs::write(bin_dir.join("baffle"), b"stale").expect("stale tool");
         assert!(check_required_binaries(&context, &config).is_err());
     }
 
