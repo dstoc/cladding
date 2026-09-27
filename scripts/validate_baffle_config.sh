@@ -63,6 +63,20 @@ stat_uid() {
   fi
 }
 
+require_mode() {
+  mode_path=$1
+  expected_mode=$2
+  description=$3
+  observed_mode=$(stat_mode "$mode_path" 2>/dev/null || printf 'unavailable')
+  if [ "$observed_mode" != "$expected_mode" ]; then
+    message="$description path=$mode_path expected_mode=0$expected_mode observed_mode=$observed_mode"
+    echo "$message" >&2
+    annotation_message=$(printf '%s' "$message" | sed 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')
+    echo "::error title=Baffle socket permissions::$annotation_message"
+    exit 1
+  fi
+}
+
 report_failure_output() {
   title=$1
   message=$2
@@ -109,14 +123,8 @@ verify_scoped_socket_access() {
   socket_path="$component_dir/proxy.sock"
   current_phase="verify $component socket permissions ($socket_runtime runtime)"
 
-  if [ "$(stat_mode "$component_dir")" != 700 ]; then
-    echo "Baffle $component socket directory is not mode 0700" >&2
-    exit 1
-  fi
-  if [ "$(stat_mode "$socket_path")" != 600 ]; then
-    echo "Baffle $component socket is not mode 0600" >&2
-    exit 1
-  fi
+  require_mode "$component_dir" 700 "Baffle $component socket directory mode mismatch"
+  require_mode "$socket_path" 600 "Baffle $component socket mode mismatch"
   if [ "${BAFFLE_VALIDATION_CHECK_HOST_UID:-true}" = true ] \
     && [ "$(stat_uid "$socket_path")" != "$runner_uid" ]; then
     echo "Baffle $component socket is not owned by the invoking host user" >&2

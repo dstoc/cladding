@@ -21,6 +21,22 @@ log() {
     printf '[baffle-startup] %s\n' "$*" >&2
 }
 
+ensure_mode() {
+    mode_path=$1
+    expected_mode=$2
+    description=$3
+    observed_mode=$(stat -c '%a' "$mode_path" 2>/dev/null || printf 'unavailable')
+    if [ "$observed_mode" != "$expected_mode" ]; then
+        if ! chmod "$expected_mode" "$mode_path"; then
+            fail "$description: failed to set path=$mode_path expected_mode=0$expected_mode observed_mode=$observed_mode"
+        fi
+        observed_mode=$(stat -c '%a' "$mode_path" 2>/dev/null || printf 'unavailable')
+    fi
+    if [ "$observed_mode" != "$expected_mode" ]; then
+        fail "$description: mode mismatch path=$mode_path expected_mode=0$expected_mode observed_mode=$observed_mode"
+    fi
+}
+
 fail() {
     log "error: $*"
     exit 1
@@ -303,6 +319,8 @@ start_socket_relay() {
         fail "timed out waiting for Baffle $component data socket: $private_socket"
     fi
 
+    ensure_mode "$SOCKET_DIR/$component" 700 \
+        "Baffle $component relay directory mode"
     if [ -S "$public_socket" ]; then
         rm -f "$public_socket" || fail "failed to remove stale proxy relay socket: $public_socket"
     elif [ -e "$public_socket" ]; then
@@ -329,6 +347,7 @@ start_socket_relay() {
     if [ ! -S "$public_socket" ]; then
         fail "timed out waiting for the $component proxy relay socket: $public_socket"
     fi
+    ensure_mode "$public_socket" 600 "Baffle $component relay socket mode"
     log "started trusted $component data-socket relay"
 }
 
