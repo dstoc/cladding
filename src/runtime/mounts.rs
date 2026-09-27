@@ -41,6 +41,13 @@ pub(super) fn build_proxy_mounts(
                 path: project_root.join("runtime/scripts"),
             },
         },
+        RuntimeMount {
+            mount_path: "/opt/credentials/baffle".to_string(),
+            read_only: true,
+            source: RuntimeMountSource::HostPath {
+                path: project_root.join("credentials/baffle"),
+            },
+        },
     ]
 }
 
@@ -62,6 +69,13 @@ pub(super) fn build_agent_mounts(
             read_only: true,
             source: RuntimeMountSource::HostPath {
                 path: project_root.join("tools"),
+            },
+        },
+        RuntimeMount {
+            mount_path: "/run/cladding/ca/baffle.crt".to_string(),
+            read_only: true,
+            source: RuntimeMountSource::HostPath {
+                path: project_root.join("credentials/baffle/ca.crt"),
             },
         },
         RuntimeMount {
@@ -106,6 +120,13 @@ pub(super) fn build_sandbox_mounts(
             read_only: true,
             source: RuntimeMountSource::HostPath {
                 path: project_root.join("tools"),
+            },
+        },
+        RuntimeMount {
+            mount_path: "/run/cladding/ca/baffle.crt".to_string(),
+            read_only: true,
+            source: RuntimeMountSource::HostPath {
+                path: project_root.join("credentials/baffle/ca.crt"),
             },
         },
         RuntimeMount {
@@ -349,6 +370,10 @@ mod tests {
         let required = spec.required_host_paths();
 
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/config")));
+        assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/credentials/baffle")));
+        assert!(required.contains(&PathBuf::from(
+            "/tmp/project/.cladding/credentials/baffle/ca.crt"
+        )));
         assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/scripts")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/tools")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/home")));

@@ -670,6 +670,40 @@ mod tests {
         assert!(mount_paths(fs).contains("/run/cladding/run/fs-sandbox"));
         assert!(mount_paths(proxy_bridge).contains("/run/cladding/proxy/agent"));
         assert!(mount_paths(proxy_bridge).contains("/run/cladding/proxy/nw-sandbox"));
+        let proxy_credentials = proxy
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/opt/credentials/baffle")
+            .expect("proxy credentials mount");
+        assert!(proxy_credentials.read_only);
+        assert!(matches!(
+            &proxy_credentials.source,
+            super::super::types::RuntimeMountSource::HostPath { path }
+                if path == &PathBuf::from("/tmp/project/.cladding/credentials/baffle")
+        ));
+        for execution in [agent, nw] {
+            let public_ca = execution
+                .mounts
+                .iter()
+                .find(|mount| mount.mount_path == "/run/cladding/ca/baffle.crt")
+                .expect("public CA mount");
+            assert!(public_ca.read_only);
+            assert!(matches!(
+                &public_ca.source,
+                super::super::types::RuntimeMountSource::HostPath { path }
+                    if path == &PathBuf::from("/tmp/project/.cladding/credentials/baffle/ca.crt")
+            ));
+            assert!(execution.mounts.iter().all(|mount| {
+                !matches!(
+                    &mount.source,
+                    super::super::types::RuntimeMountSource::HostPath { path }
+                        if path.ends_with("credentials/baffle")
+                            || path.ends_with("credentials/baffle/ca-key.pem")
+                            || path.ends_with("credentials/baffle/secrets")
+                )
+            }));
+        }
+        assert!(!mount_paths(fs).contains("/run/cladding/ca/baffle.crt"));
         let fs_mounts = mount_paths(fs);
         assert!(fs_mounts.contains("/opt/config"));
         assert!(fs_mounts.contains("/opt/tools"));
@@ -704,6 +738,8 @@ mod tests {
             [
                 PathBuf::from("/tmp/project/.cladding/.."),
                 PathBuf::from("/tmp/project/.cladding/config"),
+                PathBuf::from("/tmp/project/.cladding/credentials/baffle"),
+                PathBuf::from("/tmp/project/.cladding/credentials/baffle/ca.crt"),
                 PathBuf::from("/tmp/project/.cladding/home"),
                 PathBuf::from("/tmp/project/.cladding/tools"),
             ]
