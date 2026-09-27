@@ -256,7 +256,7 @@ run_proxy_startup() {
     test -L /run/baffle/control.sock
     test "$(readlink /run/baffle/control.sock)" = "$private_dir/control.sock"
     grep -q "^trusted_operator_uid = $expected_uid$" "$private_dir/daemon.toml"
-    grep -q "^control_socket = \"$private_dir/control.sock\"$" "$private_dir/daemon.toml"
+    grep -Fqx "control_socket = \"$private_dir/control.sock\"" "$private_dir/daemon.toml"
     if [ "${CLADDING_BAFFLE_SOCKET_RELAY:-false}" = true ]; then
       data_dir=$(sed -n 's/^socket_dir = "\(.*\)"$/\1/p' "$private_dir/daemon.toml")
       case "$data_dir" in
