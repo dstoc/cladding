@@ -212,15 +212,22 @@ jq --arg image "$proxy_image" '.proxy = {image: $image}' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
-phase="start actual Cladding runtime"
+phase="start Cladding runtime"
 "$cladding_bin" --cladding-dir "$project_root" up
-test "$(stat -c '%a' "$project_root/credentials/baffle/secrets/test-token-old")" = 600
+phase="verify injected secret permissions"
+secret_mode=$(stat -c '%a' "$project_root/credentials/baffle/secrets/test-token-old")
+if [ "$secret_mode" != 600 ]; then
+  echo "expected test-token-old mode 600 after startup, got $secret_mode" >&2
+  exit 1
+fi
+phase="start local TLS origin container"
 podman run --detach --name "$origin_name" --pod "$project_name-proxy" "$origin_image" >/dev/null
 agent="$project_name-agent-instance"
 sandbox="$project_name-nw-sandbox-instance"
 proxy="$project_name-proxy-instance"
 ready=false
 attempt=0
+phase="wait for Baffle daemon readiness"
 while [ "$attempt" -lt 60 ]; do
   if podman exec "$proxy" baffle list >/dev/null 2>&1; then
     ready=true
@@ -234,6 +241,7 @@ if [ "$ready" != true ]; then
   exit 1
 fi
 attempt=0
+phase="wait for local TLS origin readiness"
 while [ "$attempt" -lt 60 ]; do
   if podman exec "$origin_name" python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8443), 1).close()' >/dev/null 2>&1; then
     break
