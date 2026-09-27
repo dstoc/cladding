@@ -83,13 +83,13 @@ cleanup() {
     fi
     if [ -n "$private_control_dir" ]; then
         rm -f "$private_control_dir/daemon.toml" "$private_control_dir/control.sock" || true
-        if [ -n "$private_data_dir" ]; then
-            rm -f "$private_data_dir/agent/proxy.sock" \
-                "$private_data_dir/nw-sandbox/proxy.sock" || true
-            rmdir "$private_data_dir/agent" "$private_data_dir/nw-sandbox" \
-                "$private_data_dir" 2>/dev/null || true
-        fi
         rmdir "$private_control_dir" 2>/dev/null || true
+    fi
+    if [ -n "$private_data_dir" ]; then
+        rm -f "$private_data_dir/agent/proxy.sock" \
+            "$private_data_dir/nw-sandbox/proxy.sock" || true
+        rmdir "$private_data_dir/agent" "$private_data_dir/nw-sandbox" \
+            "$private_data_dir" 2>/dev/null || true
     fi
     exit "$status"
 }
@@ -160,7 +160,11 @@ rm -f "$private_control_dir/daemon.toml" "$runtime_control_socket"
 
 baffle_socket_dir="$SOCKET_DIR"
 if [ "$SOCKET_RELAY" = true ]; then
-    private_data_dir="$private_control_dir/data"
+    private_data_dir=$(mktemp -d /tmp/cladding-baffle-data.XXXXXX) \
+        || fail "failed to create private Baffle data-socket directory"
+    if ! chmod 0700 "$private_data_dir"; then
+        fail "failed to secure private Baffle data-socket directory"
+    fi
     if ! mkdir -p "$private_data_dir/agent"; then
         fail "failed to create private Baffle agent socket directory"
     fi

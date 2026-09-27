@@ -76,6 +76,8 @@ The existing client-side `socat` commands and `http_proxy`/`https_proxy` values 
 
 The intended result removes the proxy bridge sidecar. Validate that Baffle's mode-`0600` data sockets and mode-`0700` parent directories work with rootless Podman UID mappings, macOS Podman-machine mounts, and optional `runsc` before treating that removal as complete. If direct access cannot satisfy those constraints, retain a *minimal trusted bridge in the proxy container* rather than broadening socket permissions or exposing the control socket. Do not add a second proxy engine.
 
+When the trusted relay is required, keep its Baffle-owned sockets in a fresh mode-`0700` directory under `/tmp`, outside the mode-`1733` control-socket parent. Baffle 0.2.0 opens every data-socket path parent with `O_RDONLY | O_DIRECTORY`; it cannot traverse a mode-`1733` parent as a non-owner even when search access is allowed. Keep the control socket under `/run/baffle` and expose only the relay sockets through the scoped runtime mounts.
+
 ## User-editable configuration
 
 Use these native files, materialized by `cladding init` and editable thereafter:
