@@ -57,7 +57,8 @@ static int open_parent(const char *path, char *name, size_t name_size) {
     *last_slash = '\0';
     const char *parent_path = absolute[0] == '\0' ? "/" : absolute;
 
-    int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    /* O_PATH needs search permission on parents, but not read permission. */
+    int current = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (current == -1) {
         fail("open root directory", "/");
         return -1;
@@ -69,7 +70,7 @@ static int open_parent(const char *path, char *name, size_t name_size) {
         if (end != NULL) *end = '\0';
         if (*cursor != '\0' && strcmp(cursor, ".") != 0) {
             int next = openat(current, cursor,
-                              O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                              O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
             if (next == -1) {
                 fail("openat parent component", cursor);
                 close(current);
