@@ -157,6 +157,12 @@ To rotate a CA, stop the project, move the full `credentials/baffle` directory t
 
 New `.cladding` directories contain an internal ignore file. For an existing project layout, confirm that the repository ignores `.cladding/credentials/` before provisioning credentials. Never commit `ca-key.pem` or secret files.
 
+### Reloading proxy policy
+
+After editing `.cladding/config/proxy/sessions/agent.toml` or `nw-sandbox.toml`, run `cladding reload-proxy`. Baffle reads those existing files and reports each active session as `reloaded`, `unchanged`, or `failed`. It reports all session results, even when one reload fails, and the command exits unsuccessfully if any session fails. Invalid updates leave the prior effective session in place.
+
+Changed policy, injection credentials, and socket paths apply to new connections. Existing connections keep their prior policy and credentials until they close, so a credential change does not revoke access on an already-open connection. A reload can fail when an old policy generation or listener is still in use; inspect `cladding logs proxy` to diagnose it. Changes to daemon settings, the CA, or the Baffle binary require a proxy container restart.
+
 ### Configuring container images
 
 Each component can use an existing image or build one from a Containerfile. The component `image` value is the build output tag when `build` is also set. If `image` is omitted, `cladding build` generates a local tag such as `localhost/cladding-myproject-agent:latest`.

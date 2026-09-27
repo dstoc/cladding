@@ -77,7 +77,7 @@ pub(super) enum CommandSpec {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Reload all Baffle proxy sessions
+    /// Reload active file-backed Baffle sessions from their native TOML files
     ReloadProxy,
     /// Show running cladding projects
     Ps,
