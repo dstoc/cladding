@@ -130,7 +130,8 @@ podman build --quiet -t "$client_image" \
   -f "$script_dir/Containerfile.baffle-integration-client" "$script_dir"
 
 phase="build local TLS origin image"
-podman build --quiet -t "$origin_image" \
+podman build --pull=never -t "$origin_image" \
+  --build-arg BASE_IMAGE="$client_image" \
   -f "$script_dir/Containerfile.baffle-integration-origin" "$temp_root/origin"
 
 phase="build Cladding proxy image"

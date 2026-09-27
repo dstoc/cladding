@@ -1,4 +1,5 @@
-FROM python:3.13-slim
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
 
 COPY baffle_test_origin.py /usr/local/bin/baffle_test_origin.py
 COPY www /fixtures/www
