@@ -132,6 +132,27 @@ cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - chec
 
 `init` accepts `--cladding-dir` to choose where it creates the directory. It does not read `--config`. `ps` lists all running projects, so it does not accept either project-specific option. Reading `--config -` consumes stdin as configuration; the same stdin stream is not available to a command run through `cladding run`.
 
+### Project CA and injection credentials
+
+`cladding init` creates one Baffle CA for the project under `.cladding/credentials/baffle/`:
+
+```text
+.cladding/credentials/baffle/
+  ca.crt
+  ca-key.pem
+  secrets/
+```
+
+Cladding reuses a valid CA when the project starts again. If either CA file is missing, malformed, expired, or does not match its partner, Cladding reports an error and leaves the material in place. It does not rotate the CA automatically. The credentials directories use mode `0700`, the private key and secret files use `0600`, and the public certificate uses `0644` on Unix hosts.
+
+Users or external secret managers provision one file per Baffle symbolic secret in `secrets/`. Cladding creates this directory but does not create, copy, read, rewrite, or log secret values. Keep secret names in policy configuration and keep the values in these files. The proxy receives the credentials directory as a read-only mount. The agent and network sandbox receive a separate read-only mount of `ca.crt`; they do not receive the private key or secret files. The filesystem sandbox receives no CA mount.
+
+`cladding down` and `cladding destroy` remove runtime resources but keep the project CA and secrets. `cladding once` creates a separate temporary CA and empty secrets directory, then removes them during cleanup.
+
+To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then start the project to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
+
+New `.cladding` directories contain an internal ignore file. For an existing project layout, confirm that the repository ignores `.cladding/credentials/` before provisioning credentials. Never commit `ca-key.pem` or secret files.
+
 ### Configuring container images
 
 Each component can use an existing image or build one from a Containerfile. The component `image` value is the build output tag when `build` is also set. If `image` is omitted, `cladding build` generates a local tag such as `localhost/cladding-myproject-agent:latest`.

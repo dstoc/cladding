@@ -223,6 +223,8 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
         println!("initialized: {}", empty_mask_dir.display());
     }
 
+    cladding::credentials::ensure_baffle_credentials(project_root)?;
+
     if cladding_config_preexisting {
         println!(
             "cladding config already exists: {}",
@@ -301,6 +303,7 @@ fn cmd_up_inner(
     check_runsc_runtime(&config, verbose)?;
     check_required_images(&config, verbose)?;
     check_required_config_files(context, &config)?;
+    cladding::credentials::ensure_baffle_credentials(&context.project_root)?;
     warn_obsolete_generated_paths(context);
     let _ = report_runtime_script_mismatch(context, "warning")?;
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
@@ -320,7 +323,8 @@ pub(super) fn prepare_once_runtime_root(project_root: &std::path::Path) -> Resul
     fs::create_dir_all(&home_dir).with_context(|| "failed to create one-off home directory")?;
     fs::create_dir_all(&tools_bin_dir)
         .with_context(|| "failed to create one-off tools directory")?;
-    write_embedded_tools(&tools_bin_dir)
+    write_embedded_tools(&tools_bin_dir)?;
+    cladding::credentials::ensure_baffle_credentials(project_root)
 }
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
@@ -485,5 +489,49 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].image, "localhost/proxy:latest");
         assert!(matches!(plan[0].build, BuildDefinition::Custom(_)));
+    }
+
+    #[test]
+    fn once_prepares_an_isolated_ca_and_empty_secrets_directory() {
+        let root =
+            std::env::temp_dir().join(format!("cladding-once-credentials-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let persistent_root = root.join("persistent/.cladding");
+        let once_root = root.join("once/.cladding");
+        fs::create_dir_all(&persistent_root).unwrap();
+        fs::create_dir_all(&once_root).unwrap();
+        cladding::credentials::ensure_baffle_credentials(&persistent_root).unwrap();
+
+        prepare_once_runtime_root(&once_root).unwrap();
+
+        let persistent_ca = fs::read(persistent_root.join("credentials/baffle/ca.crt")).unwrap();
+        let once_ca = fs::read(once_root.join("credentials/baffle/ca.crt")).unwrap();
+        assert_ne!(once_ca, persistent_ca);
+        assert!(
+            fs::read_dir(once_root.join("credentials/baffle/secrets"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn init_creates_and_reuses_persistent_baffle_credentials() {
+        let root =
+            std::env::temp_dir().join(format!("cladding-init-credentials-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let project_root = root.join(".cladding");
+        let context = super::super::context::Context::default_for_project(project_root.clone());
+
+        cmd_init(&context, Some("demo")).unwrap();
+        let cert_path = project_root.join("credentials/baffle/ca.crt");
+        let cert = fs::read(&cert_path).unwrap();
+        cmd_init(&context, Some("demo")).unwrap();
+
+        assert_eq!(fs::read(cert_path).unwrap(), cert);
+        assert!(project_root.join("credentials/baffle/ca-key.pem").is_file());
+        assert!(project_root.join("credentials/baffle/secrets").is_dir());
+        fs::remove_dir_all(root).unwrap();
     }
 }
