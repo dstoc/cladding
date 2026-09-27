@@ -56,6 +56,14 @@ stat_uid() {
   fi
 }
 
+report_failure_output() {
+  title=$1
+  message=$2
+  output_file=$3
+  details=$(tail -n 8 "$output_file" | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
+  echo "::error title=$title::$message output=$details"
+}
+
 rootless=$(podman info --format '{{.Host.Security.Rootless}}')
 if [ "$rootless" != true ]; then
   echo "Baffle config validation requires rootless Podman" >&2
@@ -134,8 +142,8 @@ verify_scoped_socket_access() {
   else
     status=$?
     cat "$output_file" >&2
-    details=$(tail -n 8 "$output_file" | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
-    echo "::error title=Baffle socket access failed::component=$component runtime=$socket_runtime exit=$status output=$details"
+    report_failure_output "Baffle socket access failed" \
+      "component=$component runtime=$socket_runtime exit=$status" "$output_file"
     exit "$status"
   fi
   echo "Rootless keep-id socket access passed for the $component proxy endpoint ($socket_runtime runtime)"
@@ -156,7 +164,9 @@ run_proxy_startup() {
     chmod 700 "$socket_dir/nw-sandbox"
   fi
 
-  podman run --detach --name "$name" \
+  start_output_file="$temp_root/proxy-start-$name.log"
+  current_phase="create proxy container ($name)"
+  if podman run --detach --name "$name" \
     --userns keep-id:uid=0,gid=0 \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
     --volume "$project_root/tools/bin/baffle:/opt/tools/bin/baffle:ro" \
@@ -165,7 +175,15 @@ run_proxy_startup() {
     --volume "$project_root/credentials/baffle:/opt/credentials/baffle:ro" \
     --volume "$socket_dir:/run/cladding/proxy:rw" \
     --entrypoint /bin/sh \
-    localhost/cladding-proxy:latest /opt/scripts/proxy_startup.sh >/dev/null
+    localhost/cladding-proxy:latest /opt/scripts/proxy_startup.sh >"$start_output_file" 2>&1; then
+    :
+  else
+    status=$?
+    cat "$start_output_file" >&2
+    report_failure_output "Baffle proxy container failed to start" \
+      "container=$name exit=$status" "$start_output_file"
+    exit "$status"
+  fi
 
   ready=false
   attempt=0
@@ -177,14 +195,22 @@ run_proxy_startup() {
       fi
     fi
     if [ "$(podman inspect --format '{{.State.Running}}' "$name")" != true ]; then
-      podman logs "$name" >&2
+      if podman logs "$name" >"$start_output_file" 2>&1; then
+        cat "$start_output_file" >&2
+        report_failure_output "Baffle proxy startup exited" \
+          "container=$name state=not-running" "$start_output_file"
+      fi
       exit 1
     fi
     attempt=$((attempt + 1))
     sleep 1
   done
   if [ "$ready" != true ]; then
-    podman logs "$name" >&2
+    if podman logs "$name" >"$start_output_file" 2>&1; then
+      cat "$start_output_file" >&2
+      report_failure_output "Baffle proxy startup timed out" \
+        "container=$name expected=$sandbox_state" "$start_output_file"
+    fi
     echo "Baffle startup did not create the expected $sandbox_state session socket" >&2
     exit 1
   fi
