@@ -35,13 +35,6 @@ pub(super) fn build_proxy_mounts(
             },
         },
         RuntimeMount {
-            mount_path: "/opt/scripts".to_string(),
-            read_only: true,
-            source: RuntimeMountSource::HostPath {
-                path: project_root.join("runtime/scripts"),
-            },
-        },
-        RuntimeMount {
             mount_path: "/opt/credentials/baffle".to_string(),
             read_only: true,
             source: RuntimeMountSource::HostPath {

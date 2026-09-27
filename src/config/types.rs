@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub const DEFAULT_COMPONENT_IMAGE: &str = "localhost/cladding-default:latest";
-pub const DEFAULT_PROXY_IMAGE: &str = "docker.io/ubuntu/squid:latest";
+pub const DEFAULT_PROXY_IMAGE: &str = "docker.io/library/alpine:3.22";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageBuildConfig {

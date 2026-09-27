@@ -1,0 +1,11 @@
+version = 1
+operation = "create"
+
+[session]
+persistent = true
+socket_name = "agent/proxy.sock"
+
+[[rules]]
+host = "example.com"
+mode = "tunnel"
+ports = [443]

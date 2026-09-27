@@ -21,6 +21,9 @@ thiserror = "2.0.18"
 time = "0.3.55"
 x509-parser = { version = "0.18.1", features = ["verify"] }
 
+[dev-dependencies]
+toml = "1.1.6"
+
 [workspace]
 members = ["crates/mcp-run"]
 default-members = [".", "crates/mcp-run"]

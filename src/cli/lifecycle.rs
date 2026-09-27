@@ -1,12 +1,11 @@
 use super::check::{
     check_required_binaries, check_required_config_files, check_required_host_paths,
-    check_required_images, check_runsc_runtime, report_runtime_script_mismatch,
-    warn_obsolete_generated_paths,
+    check_required_images, check_runsc_runtime,
 };
 use super::context::{Context, project_runtime_status};
 use super::{DEFAULT_CLADDING_BUILD_IMAGE, DEFAULT_CLI_BUILD_IMAGE, DEFAULT_SANDBOX_BUILD_IMAGE};
 use anyhow::Context as _;
-use cladding::assets::{materialize_config, materialize_runtime_scripts, write_embedded_tools};
+use cladding::assets::{materialize_config, write_embedded_tools};
 use cladding::config::{ExecutionConfig, ImageBuildConfig, write_default_cladding_config};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
@@ -262,7 +261,6 @@ fn cmd_up_inner(
     runtime_create_attempted: &mut bool,
 ) -> Result<()> {
     let config = context.load_config()?;
-    materialize_runtime_scripts(&context.project_root)?;
     let status = project_runtime_status(context, &config, verbose)?;
     let spec = RuntimeSpec::build_with_workspace_root(
         &context.project_root,
@@ -304,8 +302,6 @@ fn cmd_up_inner(
     check_required_images(&config, verbose)?;
     check_required_config_files(context, &config)?;
     cladding::credentials::ensure_baffle_credentials(&context.project_root)?;
-    warn_obsolete_generated_paths(context);
-    let _ = report_runtime_script_mismatch(context, "warning")?;
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;

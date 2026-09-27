@@ -77,7 +77,7 @@ pub(super) enum CommandSpec {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Reload the squid proxy configuration
+    /// Reload all Baffle proxy sessions
     ReloadProxy,
     /// Show running cladding projects
     Ps,
