@@ -113,6 +113,8 @@ openssl x509 -req -days 2 -in "$temp_root/origin/server.csr" \
   -CAkey "$temp_root/origin/origin-ca.key" -CAcreateserial \
   -extfile "$temp_root/origin/server.ext" \
   -out "$temp_root/origin/server.crt" >/dev/null 2>&1
+# The origin runs as an unprivileged user. This per-run fixture key has no production secret.
+chmod 0444 "$temp_root/origin/server.key"
 
 git init --bare --initial-branch=main "$temp_root/origin/www/authorized/repo.git" >/dev/null
 git init --initial-branch=main "$temp_root/repo" >/dev/null
