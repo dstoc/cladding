@@ -90,8 +90,8 @@ umask 077
 if ! mkdir -p "$(dirname "$CONTROL_SOCKET")"; then
     fail "failed to create private Baffle control-socket directory"
 fi
-if ! chmod 0700 "$(dirname "$CONTROL_SOCKET")"; then
-    fail "failed to secure private Baffle control-socket directory"
+if [ ! -w "$(dirname "$CONTROL_SOCKET")" ]; then
+    fail "Baffle control-socket directory is not writable: $(dirname "$CONTROL_SOCKET")"
 fi
 proxy_uid=$(id -u)
 runtime_config="$(dirname "$CONTROL_SOCKET")/daemon.toml"

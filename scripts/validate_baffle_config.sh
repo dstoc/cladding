@@ -218,7 +218,7 @@ run_proxy_startup() {
   current_phase="verify private proxy control socket ($name)"
   if ! podman exec "$name" /bin/sh -ec '
     expected_uid=$(id -u)
-    test "$(stat -c %a /run/baffle)" = 700
+    test "$(stat -c %a /run/baffle)" = 1733
     test -f /run/baffle/daemon.toml
     test "$(stat -c %a /run/baffle/daemon.toml)" = 600
     test -S /run/baffle/control.sock
