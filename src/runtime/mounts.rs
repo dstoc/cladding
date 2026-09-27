@@ -1,7 +1,5 @@
 use super::sockets::is_generated_runtime_mount_path;
-use super::sockets::{
-    RUNTIME_PROXY_CONTROL_SOCKET_DIR, RUNTIME_PROXY_MOUNT_PATH, RUNTIME_PROXY_SOCKET_DIR,
-};
+use super::sockets::{RUNTIME_PROXY_MOUNT_PATH, RUNTIME_PROXY_SOCKET_DIR};
 use super::types::{RuntimeCustomMount, RuntimeMount, RuntimeMountSource, RuntimePod, RuntimeSpec};
 use crate::config::{MountTarget, MountType, ResolvedMountConfig};
 use std::collections::BTreeSet;
@@ -65,15 +63,6 @@ pub(super) fn build_proxy_mounts(
                 path: project_root
                     .join("runtime/sockets")
                     .join(RUNTIME_PROXY_SOCKET_DIR),
-            },
-        },
-        RuntimeMount {
-            mount_path: "/run/baffle".to_string(),
-            read_only: false,
-            source: RuntimeMountSource::HostPath {
-                path: project_root
-                    .join("runtime/sockets")
-                    .join(RUNTIME_PROXY_CONTROL_SOCKET_DIR),
             },
         },
     ];

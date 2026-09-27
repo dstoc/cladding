@@ -6,7 +6,6 @@ pub(super) const RUNTIME_SOCKET_DIR: &str = "runtime/sockets";
 pub(super) const RUNTIME_AGENT_INJECT_SOCKET_DIR: &str = "agent/inject";
 pub(super) const RUNTIME_PROXY_AGENT_SOCKET_DIR: &str = "proxy/agent";
 pub(super) const RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR: &str = "proxy/nw-sandbox";
-pub(super) const RUNTIME_PROXY_CONTROL_SOCKET_DIR: &str = "proxy/control";
 pub(super) const RUNTIME_PROXY_SOCKET_DIR: &str = "proxy";
 pub(super) const RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR: &str = "run/nw-sandbox";
 pub(super) const RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR: &str = "run/fs-sandbox";
@@ -147,7 +146,6 @@ mod tests {
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/agent/inject"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/agent"),
-                PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/control"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/run/nw-sandbox"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/run/fs-sandbox"),

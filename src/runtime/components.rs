@@ -510,13 +510,7 @@ mod tests {
         assert!(mount_paths(proxy).contains("/opt/tools/bin/baffle"));
         assert!(mount_paths(proxy).contains("/opt/scripts/proxy_startup.sh"));
         assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
-        assert!(mount_paths(proxy).contains("/run/baffle"));
-        let control_socket_dir =
-            host_mount_path(proxy, "/run/baffle").expect("proxy control socket directory mount");
-        assert_eq!(
-            control_socket_dir,
-            Path::new("/tmp/project/.cladding/runtime/sockets/proxy/control")
-        );
+        assert!(!mount_paths(proxy).contains("/run/baffle"));
         let baffle_binary = proxy
             .mounts
             .iter()
