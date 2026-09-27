@@ -6,11 +6,13 @@ pub(super) const RUNTIME_SOCKET_DIR: &str = "runtime/sockets";
 pub(super) const RUNTIME_AGENT_INJECT_SOCKET_DIR: &str = "agent/inject";
 pub(super) const RUNTIME_PROXY_AGENT_SOCKET_DIR: &str = "proxy/agent";
 pub(super) const RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR: &str = "proxy/nw-sandbox";
+pub(super) const RUNTIME_PROXY_SOCKET_DIR: &str = "proxy";
 pub(super) const RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR: &str = "run/nw-sandbox";
 pub(super) const RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR: &str = "run/fs-sandbox";
 pub(super) const RUNTIME_AGENT_INJECT_MOUNT_PATH: &str = "/run/cladding/agent/inject";
 pub(super) const RUNTIME_PROXY_AGENT_MOUNT_PATH: &str = "/run/cladding/proxy/agent";
 pub(super) const RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/proxy/nw-sandbox";
+pub(super) const RUNTIME_PROXY_MOUNT_PATH: &str = "/run/cladding/proxy";
 pub(super) const RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/nw-sandbox";
 pub(super) const RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/fs-sandbox";
 
@@ -18,6 +20,10 @@ impl RuntimeSpec {
     pub fn generated_runtime_socket_dirs(&self) -> Vec<PathBuf> {
         let mut paths = BTreeSet::new();
         paths.insert(self.project_root.join(RUNTIME_SOCKET_DIR));
+        paths.insert(runtime_scoped_socket_dir(
+            &self.project_root,
+            RUNTIME_PROXY_SOCKET_DIR,
+        ));
 
         collect_generated_runtime_socket_dirs(&self.proxy, &mut paths);
         collect_generated_runtime_socket_dirs(&self.agent, &mut paths);
@@ -137,6 +143,7 @@ mod tests {
             generated.into_iter().collect::<BTreeSet<_>>(),
             [
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets"),
+                PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/agent/inject"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/agent"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"),

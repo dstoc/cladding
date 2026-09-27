@@ -5,13 +5,15 @@ use super::check::{
 use super::context::{Context, project_runtime_status};
 use super::{DEFAULT_CLADDING_BUILD_IMAGE, DEFAULT_CLI_BUILD_IMAGE, DEFAULT_SANDBOX_BUILD_IMAGE};
 use anyhow::Context as _;
-use cladding::assets::{materialize_config, write_embedded_tools};
-use cladding::config::{ExecutionConfig, ImageBuildConfig, write_default_cladding_config};
+use cladding::assets::{materialize_config, write_embedded_tools, write_proxy_startup_script};
+use cladding::config::{
+    DEFAULT_PROXY_IMAGE, ExecutionConfig, ImageBuildConfig, write_default_cladding_config,
+};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::podman::{
-    list_running_projects, podman_build_image, podman_required, runtime_cleanup,
-    runtime_cleanup_owned, runtime_create, runtime_inventory,
+    list_running_projects, podman_build_image, podman_build_proxy_image, podman_required,
+    runtime_cleanup, runtime_cleanup_owned, runtime_create, runtime_inventory,
 };
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashMap;
@@ -35,6 +37,11 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
     fs::create_dir_all(&tools_bin_dir).with_context(|| "failed to create tools directory")?;
 
     write_embedded_tools(&tools_bin_dir)?;
+    write_proxy_startup_script(
+        &context
+            .project_root
+            .join("runtime/scripts/proxy_startup.sh"),
+    )?;
 
     let default_context = &context.workspace_root;
     for target in build_plan {
@@ -53,6 +60,9 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
                 &build.args,
                 None,
             )?,
+            BuildDefinition::EmbeddedProxy => {
+                podman_build_proxy_image(&target.image, default_context)?
+            }
         }
     }
 
@@ -62,6 +72,7 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BuildDefinition {
     Embedded,
+    EmbeddedProxy,
     Custom(ImageBuildConfig),
 }
 
@@ -108,15 +119,16 @@ fn plan_image_builds(config: &ExecutionConfig) -> Result<Vec<PlannedImageBuild>>
             component.build.as_ref(),
         )?;
     }
-    if let Some(proxy) = &config.proxy {
-        add_image_build(
-            &mut plan,
-            &mut builds_by_image,
-            "proxy",
-            &proxy.image,
-            proxy.build.as_ref(),
-        )?;
-    }
+    let proxy = config.proxy.as_ref();
+    let proxy_image = proxy
+        .map(|proxy| proxy.image.as_str())
+        .unwrap_or(DEFAULT_PROXY_IMAGE);
+    add_proxy_image_build(
+        &mut plan,
+        &mut builds_by_image,
+        proxy_image,
+        proxy.and_then(|proxy| proxy.build.as_ref()),
+    )?;
 
     Ok(plan)
 }
@@ -134,6 +146,30 @@ fn add_image_build(
         None => return Ok(()),
     };
 
+    add_planned_image_build(plan, builds_by_image, component, image, build)
+}
+
+fn add_proxy_image_build(
+    plan: &mut Vec<PlannedImageBuild>,
+    builds_by_image: &mut HashMap<String, BuildDefinition>,
+    image: &str,
+    custom_build: Option<&ImageBuildConfig>,
+) -> Result<()> {
+    let build = match custom_build {
+        Some(build) => BuildDefinition::Custom(build.clone()),
+        None if image == DEFAULT_PROXY_IMAGE => BuildDefinition::EmbeddedProxy,
+        None => return Ok(()),
+    };
+    add_planned_image_build(plan, builds_by_image, "proxy", image, build)
+}
+
+fn add_planned_image_build(
+    plan: &mut Vec<PlannedImageBuild>,
+    builds_by_image: &mut HashMap<String, BuildDefinition>,
+    component: &str,
+    image: &str,
+    build: BuildDefinition,
+) -> Result<()> {
     if let Some(existing) = builds_by_image.get(image) {
         if existing != &build {
             eprintln!(
@@ -222,6 +258,8 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
         println!("initialized: {}", empty_mask_dir.display());
     }
 
+    write_proxy_startup_script(&runtime_dir.join("scripts/proxy_startup.sh"))?;
+
     cladding::credentials::ensure_baffle_credentials(project_root)?;
 
     if cladding_config_preexisting {
@@ -302,6 +340,11 @@ fn cmd_up_inner(
     check_required_images(&config, verbose)?;
     check_required_config_files(context, &config)?;
     cladding::credentials::ensure_baffle_credentials(&context.project_root)?;
+    write_proxy_startup_script(
+        &context
+            .project_root
+            .join("runtime/scripts/proxy_startup.sh"),
+    )?;
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;
@@ -329,6 +372,7 @@ pub(super) fn prepare_once_runtime_root(project_root: &std::path::Path) -> Resul
     fs::create_dir_all(&tools_bin_dir)
         .with_context(|| "failed to create one-off tools directory")?;
     write_embedded_tools(&tools_bin_dir)?;
+    write_proxy_startup_script(&project_root.join("runtime/scripts/proxy_startup.sh"))?;
     cladding::credentials::ensure_baffle_credentials(project_root)
 }
 
@@ -439,9 +483,11 @@ mod tests {
     #[test]
     fn build_plan_reuses_embedded_default_image_across_components() {
         let plan = plan_image_builds(&config()).unwrap();
-        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].image, DEFAULT_CLADDING_BUILD_IMAGE);
         assert_eq!(plan[0].build, BuildDefinition::Embedded);
+        assert_eq!(plan[1].image, DEFAULT_PROXY_IMAGE);
+        assert_eq!(plan[1].build, BuildDefinition::EmbeddedProxy);
     }
 
     #[test]
@@ -453,8 +499,14 @@ mod tests {
         config.nw_sandbox.as_mut().unwrap().build = Some(build("/tmp/context", "enabled"));
 
         let plan = plan_image_builds(&config).unwrap();
-        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].image, "localhost/shared:latest");
+        assert_eq!(
+            plan[0].build,
+            BuildDefinition::Custom(build("/tmp/context", "enabled"))
+        );
+        assert_eq!(plan[1].image, DEFAULT_PROXY_IMAGE);
+        assert_eq!(plan[1].build, BuildDefinition::EmbeddedProxy);
     }
 
     #[test]
@@ -476,7 +528,10 @@ mod tests {
         config.nw_sandbox.as_mut().unwrap().image = "localhost/sandbox:latest".to_string();
         config.nw_sandbox.as_mut().unwrap().build = Some(build("/tmp/sandbox", "enabled"));
 
-        assert!(plan_image_builds(&config).unwrap().is_empty());
+        let plan = plan_image_builds(&config).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].image, DEFAULT_PROXY_IMAGE);
+        assert_eq!(plan[0].build, BuildDefinition::EmbeddedProxy);
     }
 
     #[test]
@@ -494,6 +549,19 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].image, "localhost/proxy:latest");
         assert!(matches!(plan[0].build, BuildDefinition::Custom(_)));
+    }
+
+    #[test]
+    fn build_plan_keeps_a_prebuilt_proxy_image_override() {
+        let mut config = config();
+        config.agent.image = "agent:prebuilt".to_string();
+        config.nw_sandbox = None;
+        config.proxy = Some(ExecutionProxyConfig {
+            image: "localhost/custom-proxy:latest".to_string(),
+            build: None,
+        });
+
+        assert!(plan_image_builds(&config).unwrap().is_empty());
     }
 
     #[test]
@@ -537,6 +605,11 @@ mod tests {
         assert_eq!(fs::read(cert_path).unwrap(), cert);
         assert!(project_root.join("credentials/baffle/ca-key.pem").is_file());
         assert!(project_root.join("credentials/baffle/secrets").is_dir());
+        assert!(
+            project_root
+                .join("runtime/scripts/proxy_startup.sh")
+                .is_file()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

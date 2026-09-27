@@ -7,6 +7,8 @@ use std::io::Write as _;
 use std::path::Path;
 
 const CONTAINERFILE_CLADDING: &str = include_str!("../Containerfile.cladding");
+const CONTAINERFILE_PROXY: &str = include_str!("../Containerfile.proxy");
+const PROXY_STARTUP_SCRIPT: &str = include_str!("../scripts/proxy_startup.sh");
 
 static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/config-template");
 
@@ -61,6 +63,67 @@ pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
         set_permissions(&path, 0o755)?;
     }
 
+    Ok(())
+}
+
+pub fn proxy_containerfile() -> &'static str {
+    CONTAINERFILE_PROXY
+}
+
+pub fn write_proxy_startup_script(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(anyhow::anyhow!(
+                    "refusing to write proxy startup script through symbolic link {}",
+                    parent.display()
+                )
+                .into());
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(anyhow::anyhow!(
+                    "proxy startup script parent is not a directory: {}",
+                    parent.display()
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("failed to inspect {}", parent.display()))
+                    .into());
+            }
+        }
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(anyhow::anyhow!(
+                "refusing to replace proxy startup script symbolic link {}",
+                path.display()
+            )
+            .into());
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(anyhow::anyhow!(
+                "proxy startup script path is not a regular file: {}",
+                path.display()
+            )
+            .into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!("failed to inspect {}", path.display()))
+                .into());
+        }
+    }
+    fs::write(path, PROXY_STARTUP_SCRIPT)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    set_permissions(path, 0o755)?;
     Ok(())
 }
 
@@ -420,5 +483,83 @@ mod tests {
             arch => panic!("unsupported Cladding target architecture: {arch}"),
         };
         assert_eq!(machine, expected, "Baffle architecture must match Cladding");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_startup_script_is_materialized_executable_and_parses_as_shell() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::Command;
+
+        let temp = create_temp_dir("proxy-startup");
+        let script = temp.join("runtime/scripts/proxy_startup.sh");
+        write_proxy_startup_script(&script).expect("write proxy startup script");
+
+        assert_eq!(
+            fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(
+            Command::new("sh")
+                .arg("-n")
+                .arg(&script)
+                .status()
+                .expect("check shell syntax")
+                .success()
+        );
+        fs::remove_dir_all(temp).expect("remove temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_startup_reports_missing_ca_before_starting_baffle() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::Command;
+
+        let temp = create_temp_dir("proxy-startup-missing-ca");
+        let config_dir = temp.join("config/proxy");
+        let credentials_dir = temp.join("credentials/baffle");
+        let socket_dir = temp.join("sockets/proxy");
+        fs::create_dir_all(config_dir.join("sessions")).unwrap();
+        fs::create_dir_all(credentials_dir.join("secrets")).unwrap();
+        fs::create_dir_all(socket_dir.join("agent")).unwrap();
+        fs::write(config_dir.join("daemon.toml"), "[daemon]\n").unwrap();
+        fs::write(
+            config_dir.join("sessions/agent.toml"),
+            "operation = 'create'\n",
+        )
+        .unwrap();
+        fs::write(credentials_dir.join("ca-key.pem"), "test-key").unwrap();
+        let baffle = temp.join("baffle");
+        fs::write(&baffle, "#!/bin/sh\nexit 99\n").unwrap();
+        fs::set_permissions(&baffle, fs::Permissions::from_mode(0o755)).unwrap();
+        let script = temp.join("runtime/scripts/proxy_startup.sh");
+        write_proxy_startup_script(&script).unwrap();
+
+        let output = Command::new("sh")
+            .arg(&script)
+            .env("BAFFLE_BIN", &baffle)
+            .env("BAFFLE_CONFIG_DIR", &config_dir)
+            .env("BAFFLE_CREDENTIALS_DIR", &credentials_dir)
+            .env("BAFFLE_SOCKET_DIR", &socket_dir)
+            .env("BAFFLE_CONTROL_SOCKET", temp.join("run/control.sock"))
+            .output()
+            .expect("run proxy startup script");
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("required file is missing or unreadable"));
+        assert!(stderr.contains("ca.crt"));
+        fs::remove_dir_all(temp).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn proxy_image_uses_small_glibc_runtime_without_a_rust_toolchain() {
+        assert!(CONTAINERFILE_PROXY.contains("debian:trixie-slim"));
+        assert!(CONTAINERFILE_PROXY.contains("ca-certificates"));
+        assert!(CONTAINERFILE_PROXY.contains("dash"));
+        assert!(CONTAINERFILE_PROXY.contains("libgcc-s1"));
+        assert!(!CONTAINERFILE_PROXY.to_ascii_lowercase().contains("cargo"));
+        assert!(!CONTAINERFILE_PROXY.to_ascii_lowercase().contains("rustup"));
     }
 }

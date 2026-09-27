@@ -461,6 +461,7 @@ fn prepare_runtime_socket_dirs(spec: &RuntimeSpec) -> Result<()> {
                 socket_dir.display()
             )
         })?;
+        set_restrictive_dir_permissions(&socket_dir)?;
     }
     Ok(())
 }
@@ -630,6 +631,7 @@ fn append_entrypoint_arg(cmd: &mut Command, command: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ExecutionComponentConfig, ExecutionConfig};
     use crate::runtime::{
         RuntimeContainer, RuntimeEnvVar, RuntimeMount, RuntimeMountSource, RuntimePlacement,
         RuntimePod,
@@ -639,6 +641,50 @@ mod tests {
         cmd.get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_socket_tree_has_existing_private_proxy_and_session_directories() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let project_root =
+            std::env::temp_dir().join(format!("cladding-runtime-sockets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&project_root);
+        fs::create_dir_all(&project_root).expect("create temporary project root");
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+                build: None,
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            proxy: None,
+            mounts: Vec::new(),
+        };
+        let spec = RuntimeSpec::build(&project_root, &config);
+
+        prepare_runtime_socket_dirs(&spec).expect("prepare socket directories");
+
+        for path in spec.generated_runtime_socket_dirs() {
+            let metadata = fs::metadata(&path).expect("generated socket directory exists");
+            assert_eq!(
+                metadata.permissions().mode() & 0o777,
+                0o700,
+                "{}",
+                path.display()
+            );
+        }
+        assert!(project_root.join("runtime/sockets/proxy/agent").is_dir());
+        assert!(
+            !project_root
+                .join("runtime/sockets/proxy/nw-sandbox")
+                .exists()
+        );
+        fs::remove_dir_all(project_root).expect("remove temporary project root");
     }
 
     #[test]

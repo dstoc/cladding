@@ -4,7 +4,7 @@ mod discovery;
 mod mounts;
 mod runtime;
 
-pub use build::podman_build_image;
+pub use build::{podman_build_image, podman_build_proxy_image};
 pub use command::{ensure_success, ensure_success_output, trace_command};
 pub use discovery::{
     RunningProject, list_running_projects, podman_container_exists, podman_required,

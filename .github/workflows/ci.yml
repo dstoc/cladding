@@ -61,22 +61,6 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      - name: Extract Baffle and run it in the proxy image
-        run: |
-          project="$RUNNER_TEMP/embedded-baffle-smoke"
-          cladding_bin="$GITHUB_WORKSPACE/target/debug/cladding"
-          mkdir -p "$project"
-          "$cladding_bin" init --cladding-dir "$project/.cladding" baffleci
-          jq '.agent.image = "docker.io/library/debian:bookworm-slim" | .nw_sandbox.image = "docker.io/library/debian:bookworm-slim"' \
-            "$project/.cladding/cladding.json" > "$project/cladding.json.tmp"
-          mv "$project/cladding.json.tmp" "$project/.cladding/cladding.json"
-          "$cladding_bin" --cladding-dir "$project/.cladding" build
-          test -x "$project/.cladding/tools/bin/baffle"
-          docker run --rm \
-            -v "$project/.cladding/tools/bin/baffle:/usr/local/bin/baffle:ro" \
-            --entrypoint /usr/local/bin/baffle \
-            docker.io/ubuntu/squid:latest --help
-
   baffle-config:
     runs-on: ubuntu-latest
     env:
@@ -102,5 +86,5 @@ jobs:
         run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/bin/baffle" >> "$GITHUB_ENV"
       - name: Build Cladding CLI
         run: cargo build --locked --bin cladding
-      - name: Validate native config with Baffle in rootless Podman
+      - name: Validate Baffle startup with the default proxy image under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/bin/baffle"
