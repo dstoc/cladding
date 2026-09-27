@@ -5,7 +5,7 @@ This file is the quick reference for the current Cladding runtime.
 ## Managed resources
 - One proxy Podman pod per project: `<name>-proxy`.
 - One proxy instance container inside that pod: `<name>-proxy-instance`.
-- One proxy bridge sidecar inside that pod: `<name>-proxy-bridge`.
+- The proxy instance runs one Baffle daemon and creates the persistent agent session and, when enabled, the network-sandbox session.
 - Standalone execution containers for `<name>-agent`, `<name>-nw-sandbox`, and `<name>-fs-sandbox` when those components are enabled.
 - Container names follow the `<pod-name>-instance` pattern for the execution containers.
 
@@ -17,21 +17,22 @@ This file is the quick reference for the current Cladding runtime.
 - Execution containers communicate through scoped Unix-domain socket mounts under `.cladding/runtime/sockets`.
 
 ## Socket directories
-Cladding creates one root runtime socket directory and per-component subdirectories:
+Cladding creates a private runtime socket root and per-component subdirectories:
 
 - `.cladding/runtime/sockets`
+- `.cladding/runtime/sockets/proxy`
 - `.cladding/runtime/sockets/agent/inject`
 - `.cladding/runtime/sockets/proxy/agent`
 - `.cladding/runtime/sockets/proxy/nw-sandbox`
 - `.cladding/runtime/sockets/run/nw-sandbox`
 - `.cladding/runtime/sockets/run/fs-sandbox`
 
-The proxy bridge sidecar uses the proxy socket directories. The agent uses the proxy socket for outbound HTTP proxying and the sandbox run sockets when the corresponding sandboxes are enabled. The nw-sandbox and fs-sandbox containers bind their own run sockets via `MCP_BIND_UDS`.
+The proxy container mounts `.cladding/runtime/sockets/proxy` read/write. The agent and network sandbox mount only their own proxy session socket directories. The agent uses its proxy socket for outbound HTTP proxying and the sandbox run sockets when the corresponding sandboxes are enabled. The nw-sandbox and fs-sandbox containers bind their own run sockets via `MCP_BIND_UDS`.
 `cladding inject` binds the agent inject socket under `/run/cladding/agent/inject` so a foreground command can reach one host endpoint for its duration.
 
 ## `use_runsc`
 - `use_runsc` applies only to the standalone execution containers.
-- The proxy pod and proxy bridge stay on the default runtime.
+- The proxy pod stays on Podman's default runtime.
 - Optional `use_runsc` design details live in `docs/features/cladding-gvisor-runtime/prd.md`.
 - When `use_runsc` is enabled, Cladding passes `--runtime runsc`, `--runtime-flag ignore-cgroups`, `--runtime-flag host-uds=all`, and `--runtime-flag network=none` to the execution container startup command.
 - `cladding expose` does not receive Podman runtime flags; it is a host-side `socat` forwarder that delegates through `cladding run`.
@@ -55,16 +56,23 @@ The proxy bridge sidecar uses the proxy socket directories. The agent uses the p
 - `runtime/`
 - `runtime/empty-mask/`
 
-The embedded config templates are copied into `config/`. Generated runtime
-scripts are refreshed under `runtime/scripts/` by `cladding up`, and embedded
-binaries are written into `tools/bin/` by `cladding build`.
+The embedded config templates are copied into `config/`. The proxy startup
+script is refreshed at `runtime/scripts/proxy_startup.sh` by `cladding init`,
+`cladding build`, and `cladding up`. Embedded binaries are written into
+`tools/bin/` by `cladding build`.
 
 ## Mounts
+The proxy container receives read-only mounts for `/opt/config`,
+`/opt/credentials/baffle`, `/opt/tools/bin/baffle`, and
+`/opt/scripts/proxy_startup.sh`. It receives the scoped proxy socket root at
+`/run/cladding/proxy` as a read/write mount. The Baffle control socket remains
+inside the proxy container.
+
 The current runtime mounts the following built-in paths for the agent and
 `nw-sandbox` where applicable:
 
 - `/opt/config`
-- `/opt/scripts` on the proxy pod, sourced from `.cladding/runtime/scripts`
+- `/run/cladding/ca/baffle.crt`
 - `/opt/tools`
 - `/home/user`
 - `/home/user/workspace`

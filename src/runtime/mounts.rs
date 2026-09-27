@@ -1,4 +1,5 @@
 use super::sockets::is_generated_runtime_mount_path;
+use super::sockets::{RUNTIME_PROXY_MOUNT_PATH, RUNTIME_PROXY_SOCKET_DIR};
 use super::types::{RuntimeCustomMount, RuntimeMount, RuntimeMountSource, RuntimePod, RuntimeSpec};
 use crate::config::{MountTarget, MountType, ResolvedMountConfig};
 use std::collections::BTreeSet;
@@ -26,7 +27,7 @@ pub(super) fn build_proxy_mounts(
     project_root: &Path,
     _custom_mounts: &[RuntimeCustomMount],
 ) -> Vec<RuntimeMount> {
-    vec![
+    let mounts = vec![
         RuntimeMount {
             mount_path: "/opt/config".to_string(),
             read_only: true,
@@ -41,7 +42,31 @@ pub(super) fn build_proxy_mounts(
                 path: project_root.join("credentials/baffle"),
             },
         },
-    ]
+        RuntimeMount {
+            mount_path: "/opt/tools/bin/baffle".to_string(),
+            read_only: true,
+            source: RuntimeMountSource::HostPath {
+                path: project_root.join("tools/bin/baffle"),
+            },
+        },
+        RuntimeMount {
+            mount_path: "/opt/scripts/proxy_startup.sh".to_string(),
+            read_only: true,
+            source: RuntimeMountSource::HostPath {
+                path: project_root.join("runtime/scripts/proxy_startup.sh"),
+            },
+        },
+        RuntimeMount {
+            mount_path: RUNTIME_PROXY_MOUNT_PATH.to_string(),
+            read_only: false,
+            source: RuntimeMountSource::HostPath {
+                path: project_root
+                    .join("runtime/sockets")
+                    .join(RUNTIME_PROXY_SOCKET_DIR),
+            },
+        },
+    ];
+    mounts
 }
 
 pub(super) fn build_agent_mounts(
@@ -369,6 +394,7 @@ mod tests {
         )));
         assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/scripts")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/tools")));
+        assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/tools/bin/baffle")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/home")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/..")));
         assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/empty-mask")));

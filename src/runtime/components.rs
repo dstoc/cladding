@@ -90,11 +90,13 @@ fn build_proxy_pod(
         image: config.proxy_image().to_string(),
         command: vec![
             "/bin/sh".to_string(),
-            "-ec".to_string(),
-            "echo 'Baffle runtime is not installed; proxy egress is disabled.' >&2; exec sleep infinity".to_string(),
+            "/opt/scripts/proxy_startup.sh".to_string(),
         ],
         workdir: None,
-        env: Vec::new(),
+        env: vec![RuntimeEnvVar {
+            name: "CLADDING_NW_SANDBOX_ENABLED".to_string(),
+            value: config.nw_sandbox_enabled().to_string(),
+        }],
         mounts,
         ports: Vec::new(),
         stdin: false,
@@ -467,13 +469,18 @@ mod tests {
             1
         );
         assert_eq!(spec.proxy.containers[0].name, "demo-proxy-instance");
-        assert_eq!(spec.proxy.containers[0].command[0], "/bin/sh");
-        assert_eq!(spec.proxy.containers[0].command[1], "-ec");
-        assert!(spec.proxy.containers[0].command[2].contains("proxy egress is disabled"));
+        assert_eq!(
+            spec.proxy.containers[0].command,
+            ["/bin/sh", "/opt/scripts/proxy_startup.sh"]
+        );
+        assert_eq!(
+            env_value(&spec.proxy.containers[0], "CLADDING_NW_SANDBOX_ENABLED"),
+            Some("true")
+        );
         assert!(spec.proxy.containers[0].ports.is_empty());
         assert_eq!(
             spec.proxy.containers[0].image,
-            "docker.io/library/alpine:3.22"
+            "localhost/cladding-proxy:latest"
         );
         assert_eq!(spec.agent.containers[0].name, "demo-agent-instance");
         assert_eq!(
@@ -487,6 +494,28 @@ mod tests {
 
         let proxy = container(&spec.proxy, "demo-proxy-instance");
         assert!(mount_paths(proxy).contains("/opt/config"));
+        assert!(mount_paths(proxy).contains("/opt/credentials/baffle"));
+        assert!(mount_paths(proxy).contains("/opt/tools/bin/baffle"));
+        assert!(mount_paths(proxy).contains("/opt/scripts/proxy_startup.sh"));
+        assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert!(!mount_paths(proxy).contains("/run/baffle/control.sock"));
+        let baffle_binary = proxy
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/opt/tools/bin/baffle")
+            .expect("Baffle executable mount");
+        assert!(baffle_binary.read_only);
+        let proxy_sockets = proxy
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/run/cladding/proxy")
+            .expect("proxy socket mount");
+        assert!(!proxy_sockets.read_only);
+        assert!(matches!(
+            &proxy_sockets.source,
+            super::super::types::RuntimeMountSource::HostPath { path }
+                if path == &PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy")
+        ));
         let agent = container(&spec.agent, "demo-agent-instance");
         let nw = container(
             spec.nw_sandbox.as_ref().expect("nw pod"),
@@ -616,6 +645,7 @@ mod tests {
                 PathBuf::from("/tmp/project/.cladding/credentials/baffle/ca.crt"),
                 PathBuf::from("/tmp/project/.cladding/home"),
                 PathBuf::from("/tmp/project/.cladding/tools"),
+                PathBuf::from("/tmp/project/.cladding/tools/bin/baffle"),
             ]
             .into_iter()
             .collect()
@@ -739,6 +769,20 @@ mod tests {
             spec.proxy.containers[0].image,
             "localhost/custom-proxy:latest"
         );
+    }
+
+    #[test]
+    fn proxy_only_mounts_the_agent_socket_when_network_sandbox_is_disabled() {
+        let config = execution_config(false, false, Vec::new(), false);
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+        let proxy = container(&spec.proxy, "demo-proxy-instance");
+
+        assert_eq!(
+            env_value(proxy, "CLADDING_NW_SANDBOX_ENABLED"),
+            Some("false")
+        );
+        assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert!(spec.nw_sandbox.is_none());
     }
 
     #[test]

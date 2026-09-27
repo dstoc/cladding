@@ -1,7 +1,7 @@
 use super::DEFAULT_CLADDING_BUILD_IMAGE;
 use super::context::Context;
 use cladding::assets::tool_files;
-use cladding::config::ExecutionConfig;
+use cladding::config::{DEFAULT_PROXY_IMAGE, ExecutionConfig};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::is_executable;
 use cladding::podman::runsc_available;
@@ -245,6 +245,7 @@ pub(super) fn check_runsc_runtime(config: &ExecutionConfig, verbose: bool) -> Re
 
 fn image_is_buildable_by_cladding(config: &ExecutionConfig, image: &str) -> bool {
     image == DEFAULT_CLADDING_BUILD_IMAGE
+        || image == DEFAULT_PROXY_IMAGE
         || (config.agent.image == image && config.agent.build.is_some())
         || config
             .nw_sandbox
@@ -282,6 +283,12 @@ mod tests {
                 "proxy/sessions/nw-sandbox.toml",
             ]
         );
+    }
+
+    #[test]
+    fn default_proxy_image_is_buildable_by_cladding() {
+        let config = execution_config(false, false, Vec::new());
+        assert!(image_is_buildable_by_cladding(&config, DEFAULT_PROXY_IMAGE));
     }
 
     #[test]

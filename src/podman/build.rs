@@ -1,4 +1,5 @@
 use crate::assets::containerfile as embedded_containerfile;
+use crate::assets::proxy_containerfile as embedded_proxy_containerfile;
 use crate::error::{Error, Result};
 use anyhow::Context as _;
 use std::collections::BTreeMap;
@@ -12,6 +13,36 @@ use super::command::ensure_success;
 pub fn podman_build_image(
     image: &str,
     containerfile: Option<&Path>,
+    context: &Path,
+    build_args: &BTreeMap<String, String>,
+    host_ids: Option<(u32, u32)>,
+) -> Result<()> {
+    let contents = containerfile.is_none().then(embedded_containerfile);
+    podman_build_image_with_contents(
+        image,
+        containerfile,
+        contents,
+        context,
+        build_args,
+        host_ids,
+    )
+}
+
+pub fn podman_build_proxy_image(image: &str, context: &Path) -> Result<()> {
+    podman_build_image_with_contents(
+        image,
+        None,
+        Some(embedded_proxy_containerfile()),
+        context,
+        &BTreeMap::new(),
+        None,
+    )
+}
+
+fn podman_build_image_with_contents(
+    image: &str,
+    containerfile: Option<&Path>,
+    containerfile_contents: Option<&str>,
     context: &Path,
     build_args: &BTreeMap<String, String>,
     host_ids: Option<(u32, u32)>,
@@ -33,7 +64,11 @@ pub fn podman_build_image(
         && let Some(mut stdin) = child.stdin.take()
     {
         stdin
-            .write_all(embedded_containerfile().as_bytes())
+            .write_all(
+                containerfile_contents
+                    .expect("embedded image builds must provide Containerfile contents")
+                    .as_bytes(),
+            )
             .and_then(|_| stdin.flush())
             .with_context(|| "failed to write Containerfile to podman")?;
     }

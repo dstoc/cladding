@@ -6,7 +6,7 @@ Cladding lets you run an agent in a constrained container environment where netw
 - `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance` each serve [`mcp-run`](crates/mcp-run/README.md) on a mounted Unix socket and execute commands only when allowed by their Rego policy modules under `.cladding/config/`.
 - Proxy rules use native Baffle TOML under `.cladding/config/proxy/`.
 
-The proxy runtime is fail closed until Baffle startup is available: it starts no proxy listener, so execution containers have no network egress. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime.
+The proxy startup script validates its mounted inputs, starts Baffle, and creates persistent sessions for the agent and (when enabled) the network sandbox. Cladding does not wait for those sessions before it starts the execution containers, so early proxy requests can fail while Baffle starts. Startup errors appear in the proxy container logs and exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime.
 
 In short: the agent cannot freely access the network; users can run sandbox commands from the host with [`cladding run-with-scissors`](#useful-commands), while commands running inside the agent can delegate to sandbox containers with `run-in-nw-sandbox` or `run-in-fs-sandbox`.
 
@@ -200,7 +200,7 @@ Each component can use an existing image or build one from a Containerfile. The 
 
 `cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag.
 
-The default proxy image is a minimal Alpine image used for the fail-closed placeholder runtime. Set `proxy.image` to use a prebuilt proxy image, or configure `proxy.build` to build a proxy image locally.
+The default proxy image is built from Debian trixie slim. It includes GNU libc, a POSIX shell, the startup utilities, and system CA certificates. It does not include Cargo or a Rust toolchain. A custom `proxy.image` or `proxy.build` image must provide `/bin/sh`, `mkdir`, `chmod`, `dirname`, `sleep`, and compatible GNU libc runtime support for the embedded Baffle executable.
 
 ### Configuring mounts
 
@@ -269,7 +269,7 @@ Default mounts may be overridden by adding an entry with the same `mount` value,
 
 Current runtime shape:
 
-- `<name>-proxy` is the only Podman pod. It contains `<name>-proxy-instance` and `<name>-proxy-bridge`.
+- `<name>-proxy` is the only Podman pod. It contains `<name>-proxy-instance`, which runs Baffle and creates persistent proxy sessions.
 - `<name>-agent-instance`, `<name>-nw-sandbox-instance`, and `<name>-fs-sandbox-instance` are standalone execution containers with `--network none`.
 - Execution containers communicate through scoped Unix-domain socket mounts under `.cladding/runtime/sockets`.
 - `use_runsc`, when enabled, applies only to the standalone execution containers.
@@ -297,7 +297,11 @@ flowchart TB
   end
 
   subgraph P["pod: <name>-proxy"]
-    PX[Alpine placeholder; no proxy listener]
+    PX[Baffle daemon]
+    AGS[Persistent agent session]
+    NWS[Optional persistent nw-sandbox session]
+    PX --> AGS
+    PX --> NWS
   end
 
   WS --> CA
@@ -310,8 +314,8 @@ flowchart TB
   CA -- run-remote over UDS --> SA
   CA -- run-remote over UDS --> FA
   CA -- HTTP(S) proxy env --> CAP
-  CAP -- missing Baffle socket; fail closed --> PX
-  SAP -- missing Baffle socket; fail closed --> PX
+  CAP -- agent scoped UDS --> AGS
+  SAP -- nw-sandbox scoped UDS --> NWS
   SA -- HTTP(S) proxy env --> SAP
 ```
 

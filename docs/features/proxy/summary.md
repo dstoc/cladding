@@ -18,4 +18,6 @@ Cladding mounts `config/` read-only into the agent and network sandbox. They can
 
 ## Runtime status
 
-The current proxy runtime is fail closed while Baffle startup is integrated. Its Alpine placeholder starts no proxy listener, and execution containers have no network egress. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime. CI installs the pinned Baffle binary and validates both session files in rootless Podman.
+The proxy pod runs one Baffle daemon in a minimal Debian trixie-slim image. Its startup script verifies the mounted config and credentials, starts the daemon, waits until `baffle list` accepts control commands, then creates the persistent agent session and the network-sandbox session when enabled. On shutdown, the script forwards the signal to Baffle; the daemon stops its persistent sessions with the proxy container.
+
+Cladding does not wait for Baffle session readiness before it starts execution containers. Early proxy requests can fail while the proxy container starts. Startup errors appear in proxy logs and the container exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime. CI installs the pinned Baffle binary and validates both session files in rootless Podman.
