@@ -80,12 +80,11 @@ jobs:
           sudo apt-get install -y runsc
           runsc --version
           runner_user="$(id -un)"
-          runner_group="$(id -gn)"
           if ! grep -q "^${runner_user}:" /etc/subuid; then
             echo "${runner_user}:100000:65536" | sudo tee -a /etc/subuid
           fi
-          if ! grep -q "^${runner_group}:" /etc/subgid; then
-            echo "${runner_group}:100000:65536" | sudo tee -a /etc/subgid
+          if ! grep -q "^${runner_user}:" /etc/subgid; then
+            echo "${runner_user}:100000:65536" | sudo tee -a /etc/subgid
           fi
       - name: Install pinned Baffle binary
         run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
