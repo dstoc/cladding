@@ -5,9 +5,14 @@ BAFFLE_BIN=${BAFFLE_BIN:-/opt/tools/bin/baffle}
 CONFIG_DIR=${BAFFLE_CONFIG_DIR:-/opt/config/proxy}
 CREDENTIALS_DIR=${BAFFLE_CREDENTIALS_DIR:-/opt/credentials/baffle}
 CONTROL_SOCKET=${BAFFLE_CONTROL_SOCKET:-/run/baffle/control.sock}
+DEFAULT_CONTROL_SOCKET=/run/baffle/control.sock
 SOCKET_DIR=${BAFFLE_SOCKET_DIR:-/run/cladding/proxy}
 NW_SANDBOX_ENABLED=${CLADDING_NW_SANDBOX_ENABLED:-false}
 daemon_pid=
+control_socket_dir=
+private_control_dir=
+runtime_control_socket=
+runtime_config=
 
 log() {
     printf '[baffle-startup] %s\n' "$*" >&2
@@ -39,10 +44,25 @@ stop_daemon() {
     fi
 }
 
+remove_control_socket_alias() {
+    alias_path=$1
+    if [ -n "$runtime_control_socket" ] \
+        && [ -L "$alias_path" ] \
+        && [ "$(readlink "$alias_path")" = "$runtime_control_socket" ]; then
+        rm -f "$alias_path" || true
+    fi
+}
+
 cleanup() {
     status=$?
     trap - EXIT
     stop_daemon
+    remove_control_socket_alias "$CONTROL_SOCKET"
+    remove_control_socket_alias "$DEFAULT_CONTROL_SOCKET"
+    if [ -n "$private_control_dir" ]; then
+        rm -f "$private_control_dir/daemon.toml" "$private_control_dir/control.sock" || true
+        rmdir "$private_control_dir" 2>/dev/null || true
+    fi
     exit "$status"
 }
 
@@ -87,20 +107,55 @@ if [ "$NW_SANDBOX_ENABLED" = true ]; then
 fi
 
 umask 077
-if ! mkdir -p "$(dirname "$CONTROL_SOCKET")"; then
+proxy_uid=$(id -u)
+control_socket_dir=$(dirname "$CONTROL_SOCKET")
+if ! mkdir -p "$control_socket_dir"; then
     fail "failed to create private Baffle control-socket directory"
 fi
-if [ ! -w "$(dirname "$CONTROL_SOCKET")" ]; then
-    fail "Baffle control-socket directory is not writable: $(dirname "$CONTROL_SOCKET")"
+if [ ! -w "$control_socket_dir" ]; then
+    fail "Baffle control-socket parent directory is not writable: $control_socket_dir"
 fi
-proxy_uid=$(id -u)
-runtime_config="$(dirname "$CONTROL_SOCKET")/daemon.toml"
-if ! sed "s/^trusted_operator_uid = .*/trusted_operator_uid = $proxy_uid/" \
+private_control_dir="$control_socket_dir/$proxy_uid"
+if ! mkdir -p "$private_control_dir"; then
+    fail "failed to create private Baffle control directory"
+fi
+if ! chmod 0700 "$private_control_dir"; then
+    fail "failed to secure private Baffle control directory"
+fi
+runtime_control_socket="$private_control_dir/control.sock"
+rm -f "$private_control_dir/daemon.toml" "$runtime_control_socket"
+
+if [ -e "$CONTROL_SOCKET" ] || [ -L "$CONTROL_SOCKET" ]; then
+    if ! rm -f "$CONTROL_SOCKET"; then
+        fail "failed to remove stale Baffle control-socket path: $CONTROL_SOCKET"
+    fi
+fi
+if ! ln -s "$runtime_control_socket" "$CONTROL_SOCKET"; then
+    fail "failed to publish private Baffle control socket at $CONTROL_SOCKET"
+fi
+if [ "$CONTROL_SOCKET" != "$DEFAULT_CONTROL_SOCKET" ]; then
+    if [ -e "$DEFAULT_CONTROL_SOCKET" ] || [ -L "$DEFAULT_CONTROL_SOCKET" ]; then
+        if ! rm -f "$DEFAULT_CONTROL_SOCKET"; then
+            fail "failed to remove stale default Baffle control-socket path"
+        fi
+    fi
+    if ! ln -s "$runtime_control_socket" "$DEFAULT_CONTROL_SOCKET"; then
+        fail "failed to publish private Baffle control socket at $DEFAULT_CONTROL_SOCKET"
+    fi
+fi
+
+runtime_config="$private_control_dir/daemon.toml"
+if ! sed \
+    -e "s|^trusted_operator_uid = .*|trusted_operator_uid = $proxy_uid|" \
+    -e "s|^control_socket = .*|control_socket = \"$runtime_control_socket\"|" \
     "$CONFIG_DIR/daemon.toml" > "$runtime_config"; then
     fail "failed to write Baffle runtime configuration"
 fi
 if ! grep -q "^trusted_operator_uid = $proxy_uid$" "$runtime_config"; then
     fail "Baffle runtime configuration does not trust the proxy process UID"
+fi
+if ! grep -q "^control_socket = \"$runtime_control_socket\"$" "$runtime_config"; then
+    fail "Baffle runtime configuration does not use the private control socket"
 fi
 if ! chmod 0600 "$runtime_config"; then
     fail "failed to secure Baffle runtime configuration"

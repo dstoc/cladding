@@ -218,12 +218,21 @@ run_proxy_startup() {
   current_phase="verify private proxy control socket ($name)"
   if ! podman exec "$name" /bin/sh -ec '
     expected_uid=$(id -u)
+    private_dir="/run/baffle/$expected_uid"
     test "$(stat -c %a /run/baffle)" = 1733
-    test -f /run/baffle/daemon.toml
-    test "$(stat -c %a /run/baffle/daemon.toml)" = 600
-    test -S /run/baffle/control.sock
-    test "$(stat -c %a /run/baffle/control.sock)" = 600
-    grep -q "^trusted_operator_uid = $expected_uid$" /run/baffle/daemon.toml
+    test -d "$private_dir"
+    test "$(stat -c %a "$private_dir")" = 700
+    test "$(stat -c %u "$private_dir")" = "$expected_uid"
+    test -f "$private_dir/daemon.toml"
+    test "$(stat -c %a "$private_dir/daemon.toml")" = 600
+    test "$(stat -c %u "$private_dir/daemon.toml")" = "$expected_uid"
+    test -S "$private_dir/control.sock"
+    test "$(stat -c %a "$private_dir/control.sock")" = 600
+    test "$(stat -c %u "$private_dir/control.sock")" = "$expected_uid"
+    test -L /run/baffle/control.sock
+    test "$(readlink /run/baffle/control.sock)" = "$private_dir/control.sock"
+    grep -q "^trusted_operator_uid = $expected_uid$" "$private_dir/daemon.toml"
+    grep -q "^control_socket = \"$private_dir/control.sock\"$" "$private_dir/daemon.toml"
   '; then
     echo "Baffle private control socket or runtime configuration permissions are invalid" >&2
     podman logs "$name" >&2
