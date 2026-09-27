@@ -1,7 +1,10 @@
 use crate::error::{Error, Result};
-use crate::runtime::{RuntimeContainer, RuntimePlacement, RuntimePod, RuntimeSpec};
+use crate::runtime::{
+    RuntimeContainer, RuntimeMountSource, RuntimePlacement, RuntimePod, RuntimeSpec,
+    RuntimeUserNamespace,
+};
 use anyhow::Context as _;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -44,6 +47,7 @@ impl RuntimeInventory {
 pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     prepare_runtime_socket_dirs(spec)?;
     ensure_runtime_empty_mask_dir(spec)?;
+    ensure_proxy_relay_volumes(spec, verbose)?;
 
     for pod in runtime_pods(spec) {
         if pod.placement == RuntimePlacement::Pod {
@@ -107,7 +111,7 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
         pod_rm(&pod.name, verbose)?;
     }
 
-    Ok(())
+    remove_proxy_relay_volumes(spec, verbose)
 }
 
 /// Clean up resources only when their Podman labels identify this runtime.
@@ -116,7 +120,7 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
 pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     let inventory = runtime_inventory(spec, verbose)?;
     if inventory.is_empty() {
-        return Ok(());
+        return remove_proxy_relay_volumes(spec, verbose);
     }
     let exists = |kind: &str, name: &str| {
         inventory
@@ -229,6 +233,113 @@ pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     }
 }
 
+fn proxy_relay_volume_names(spec: &RuntimeSpec) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for pod in runtime_pods(spec) {
+        for container in &pod.containers {
+            for mount in &container.mounts {
+                if let RuntimeMountSource::NamedVolumeChown { claim_name } = &mount.source {
+                    names.insert(claim_name.clone());
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn ensure_proxy_relay_volumes(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+    for name in proxy_relay_volume_names(spec) {
+        if inspect_resource_state("volume", &name, verbose)?.is_some() {
+            if !proxy_relay_volume_labels_match(&name, spec)? {
+                return Err(Error::message(format!(
+                    "refusing to use Podman volume '{name}' because it is not owned by project '{}'",
+                    spec.project_name
+                )));
+            }
+            continue;
+        }
+
+        let mut cmd = build_volume_create_command(&name, spec);
+        trace_command(&cmd, verbose);
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to create Podman relay volume '{name}'"))?;
+        ensure_success_output(&output, "podman volume create")?;
+    }
+
+    Ok(())
+}
+
+fn remove_proxy_relay_volumes(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+    for name in proxy_relay_volume_names(spec) {
+        if inspect_resource_state("volume", &name, verbose)?.is_none() {
+            continue;
+        }
+        if !proxy_relay_volume_labels_match(&name, spec)? {
+            return Err(Error::message(format!(
+                "refusing to remove Podman volume '{name}' because it is not owned by project '{}'",
+                spec.project_name
+            )));
+        }
+
+        let mut cmd = build_volume_rm_command(&name);
+        trace_command(&cmd, verbose);
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to remove Podman relay volume '{name}'"))?;
+        if output.status.success() || remove_output_is_missing_volume(&output) {
+            continue;
+        }
+        ensure_success_output(&output, "podman volume rm")?;
+    }
+
+    Ok(())
+}
+
+fn proxy_relay_volume_labels_match(name: &str, spec: &RuntimeSpec) -> Result<bool> {
+    let labels = inspect_value("volume", name, "{{json .Labels}}", false)?;
+    let labels: serde_json::Value = serde_json::from_str(&labels)
+        .with_context(|| format!("failed to parse labels for Podman volume {name}"))?;
+
+    Ok(labels.get("cladding").and_then(serde_json::Value::as_str)
+        == Some(spec.project_name.as_str())
+        && labels
+            .get("project_root")
+            .and_then(serde_json::Value::as_str)
+            == Some(spec.project_root.to_string_lossy().as_ref())
+        && labels
+            .get("cladding_resource")
+            .and_then(serde_json::Value::as_str)
+            == Some("baffle-proxy-relay"))
+}
+
+fn build_volume_create_command(name: &str, spec: &RuntimeSpec) -> Command {
+    let mut cmd = Command::new("podman");
+    cmd.args([
+        "volume",
+        "create",
+        "--label",
+        &format!("cladding={}", spec.project_name),
+        "--label",
+        &format!("project_root={}", spec.project_root.display()),
+        "--label",
+        "cladding_resource=baffle-proxy-relay",
+        name,
+    ]);
+    cmd
+}
+
+fn build_volume_rm_command(name: &str) -> Command {
+    let mut cmd = Command::new("podman");
+    cmd.args(["volume", "rm", name]);
+    cmd
+}
+
+fn remove_output_is_missing_volume(output: &Output) -> bool {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    stderr.contains("no such volume") || stderr.contains("no volume with name or id")
+}
+
 fn record_cleanup_result(target: &mut Option<crate::error::Error>, result: Result<()>) {
     if let Err(err) = result
         && target.is_none()
@@ -238,10 +349,9 @@ fn record_cleanup_result(target: &mut Option<crate::error::Error>, result: Resul
 }
 
 fn resource_labels_match(kind: &str, name: &str, spec: &RuntimeSpec) -> Result<bool> {
-    let format = if kind == "pod" {
-        "{{json .Labels}}"
-    } else {
-        "{{json .Config.Labels}}"
+    let format = match kind {
+        "container" => "{{json .Config.Labels}}",
+        _ => "{{json .Labels}}",
     };
     let labels = inspect_value(kind, name, format, false)?;
     let labels: serde_json::Value = serde_json::from_str(&labels)
@@ -306,10 +416,10 @@ fn build_resource_exists_command(kind: &str, name: &str) -> Command {
 
 fn build_resource_inspect_command(kind: &str, name: &str) -> Command {
     let mut cmd = Command::new("podman");
-    let format = if kind == "pod" {
-        "{{.State}}"
-    } else {
-        "{{.State.Status}}"
+    let format = match kind {
+        "pod" => "{{.State}}",
+        "volume" => "{{.Name}}",
+        _ => "{{.State.Status}}",
     };
     cmd.args([kind, "inspect", "--format", format, name]);
     cmd
@@ -524,10 +634,7 @@ fn build_pod_create_command(use_runsc: bool, pod: &RuntimePod) -> Command {
     append_label_args(&mut cmd, &pod.labels);
     cmd.arg("--network");
     cmd.arg(&pod.network_name);
-    if pod.userns_keep_id {
-        cmd.arg("--userns");
-        cmd.arg("keep-id");
-    }
+    append_user_namespace_args(&mut cmd, pod.user_namespace);
     cmd
 }
 
@@ -557,10 +664,7 @@ fn build_container_run_command(
             append_label_args(&mut cmd, &pod.labels);
             cmd.arg("--network");
             cmd.arg(&pod.network_name);
-            if pod.userns_keep_id {
-                cmd.arg("--userns");
-                cmd.arg("keep-id");
-            }
+            append_user_namespace_args(&mut cmd, pod.user_namespace);
             cmd.arg("--hostname");
             cmd.arg(&pod.name);
         }
@@ -586,6 +690,15 @@ fn build_container_run_command(
     cmd.arg(&container.image);
     append_command_args(&mut cmd, &container.command);
     cmd
+}
+
+fn append_user_namespace_args(cmd: &mut Command, user_namespace: RuntimeUserNamespace) {
+    let mode = match user_namespace {
+        RuntimeUserNamespace::Default => return,
+        RuntimeUserNamespace::KeepId => "keep-id",
+    };
+    cmd.arg("--userns");
+    cmd.arg(mode);
 }
 
 fn build_container_rm_command(container_name: &str) -> Command {
@@ -634,7 +747,7 @@ mod tests {
     use crate::config::{ExecutionComponentConfig, ExecutionConfig};
     use crate::runtime::{
         RuntimeContainer, RuntimeEnvVar, RuntimeMount, RuntimeMountSource, RuntimePlacement,
-        RuntimePod,
+        RuntimePod, RuntimeUserNamespace,
     };
 
     fn command_args(cmd: &Command) -> Vec<String> {
@@ -714,7 +827,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             containers: Vec::new(),
-            userns_keep_id: true,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
         let spec = RuntimeSpec {
             project_name: "demo".to_string(),
@@ -831,7 +944,7 @@ mod tests {
             ]),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            userns_keep_id: true,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
 
         let cmd = build_pod_create_command(false, &pod);
@@ -857,6 +970,35 @@ mod tests {
     }
 
     #[test]
+    fn proxy_pod_preserves_the_invoking_user_identity() {
+        let pod = RuntimePod {
+            name: "demo-proxy".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "default".to_string(),
+            containers: Vec::new(),
+            user_namespace: RuntimeUserNamespace::KeepId,
+        };
+
+        let cmd = build_pod_create_command(false, &pod);
+
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "pod",
+                "create",
+                "--name",
+                "demo-proxy",
+                "--network",
+                "default",
+                "--userns",
+                "keep-id",
+            ]
+        );
+    }
+
+    #[test]
     fn build_pod_create_command_does_not_include_runtime_flags() {
         let pod = RuntimePod {
             name: "demo-agent".to_string(),
@@ -865,7 +1007,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            userns_keep_id: false,
+            user_namespace: RuntimeUserNamespace::Default,
         };
 
         let cmd = build_pod_create_command(false, &pod);
@@ -890,7 +1032,7 @@ mod tests {
             ]),
             network_name: "none".to_string(),
             containers: Vec::new(),
-            userns_keep_id: true,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),
@@ -991,7 +1133,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            userns_keep_id: false,
+            user_namespace: RuntimeUserNamespace::Default,
         };
 
         let cmd = build_container_run_command(false, &pod, &container);
@@ -1056,7 +1198,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            userns_keep_id: false,
+            user_namespace: RuntimeUserNamespace::Default,
         };
 
         let cmd = build_container_run_command(true, &pod, &container);
@@ -1092,7 +1234,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             containers: Vec::new(),
-            userns_keep_id: true,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),

@@ -44,13 +44,19 @@ pub struct RuntimePod {
     pub labels: BTreeMap<String, String>,
     pub network_name: String,
     pub containers: Vec<RuntimeContainer>,
-    pub userns_keep_id: bool,
+    pub user_namespace: RuntimeUserNamespace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimePlacement {
     Pod,
     Standalone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeUserNamespace {
+    Default,
+    KeepId,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +99,7 @@ pub enum RuntimeMountSource {
     HostPath { path: PathBuf },
     OverlayHostPath { path: PathBuf },
     NamedVolume { claim_name: String },
+    NamedVolumeChown { claim_name: String },
     GeneratedEmptyMask { path: PathBuf },
     Tmpfs { size_bytes: Option<u64> },
     EmptyDir,

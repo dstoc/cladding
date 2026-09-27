@@ -2,7 +2,7 @@ Cladding lets you run an agent in a constrained container environment where netw
 
 - The agent runs as a standalone `--network none` container named `<name>-agent-instance`.
 - Optional delegated sandboxes run as standalone `--network none` containers named `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance`.
-- HTTP(S) egress is intended to be mediated by the `<name>-proxy` pod. Execution containers use scoped Unix-domain socket mounts and local `socat` loopback bridges.
+- HTTP(S) egress is mediated by the `<name>-proxy` pod. Execution containers keep their local `socat` listeners at `127.0.0.1:3128` and mount only their own Baffle data socket; no separate proxy bridge container is used.
 - `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance` each serve [`mcp-run`](crates/mcp-run/README.md) on a mounted Unix socket and execute commands only when allowed by their Rego policy modules under `.cladding/config/`.
 - Proxy rules use native Baffle TOML under `.cladding/config/proxy/`.
 

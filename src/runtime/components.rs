@@ -5,15 +5,16 @@ use super::mounts::{
 };
 use super::sockets::{
     RUNTIME_AGENT_INJECT_MOUNT_PATH, RUNTIME_AGENT_INJECT_SOCKET_DIR,
-    RUNTIME_PROXY_AGENT_MOUNT_PATH, RUNTIME_PROXY_AGENT_SOCKET_DIR,
-    RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH, RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
+    RUNTIME_PROXY_AGENT_MOUNT_PATH, RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH,
+    RUNTIME_PROXY_AGENT_SOCKET_DIR, RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
+    RUNTIME_PROXY_NW_SANDBOX_RELAY_MOUNT_PATH, RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
     RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH, RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR,
     RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH, RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR,
-    build_scoped_socket_mount, runtime_socket_mount_path,
+    build_proxy_relay_volume_mount, build_scoped_socket_mount, runtime_socket_mount_path,
 };
 use super::types::{
-    RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeNames, RuntimePlacement,
-    RuntimePod, RuntimeSpec,
+    RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeMount, RuntimeNames,
+    RuntimePlacement, RuntimePod, RuntimeSpec, RuntimeUserNamespace,
 };
 use crate::config::{ExecutionConfig, MountTarget};
 use std::collections::BTreeMap;
@@ -84,7 +85,23 @@ fn build_proxy_pod(
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
-    let mounts = build_proxy_mounts(project_root, custom_mounts);
+    let mut mounts = build_proxy_mounts(project_root, custom_mounts);
+    if cfg!(target_os = "macos") {
+        mounts.push(build_proxy_relay_volume_mount(
+            &config.name,
+            "agent",
+            RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH,
+            true,
+        ));
+        if config.nw_sandbox_enabled() {
+            mounts.push(build_proxy_relay_volume_mount(
+                &config.name,
+                "nw-sandbox",
+                RUNTIME_PROXY_NW_SANDBOX_RELAY_MOUNT_PATH,
+                true,
+            ));
+        }
+    }
     let containers = vec![RuntimeContainer {
         name: runtime_container_name(&names.proxy_name),
         image: config.proxy_image().to_string(),
@@ -93,10 +110,16 @@ fn build_proxy_pod(
             "/opt/scripts/proxy_startup.sh".to_string(),
         ],
         workdir: None,
-        env: vec![RuntimeEnvVar {
-            name: "CLADDING_NW_SANDBOX_ENABLED".to_string(),
-            value: config.nw_sandbox_enabled().to_string(),
-        }],
+        env: vec![
+            RuntimeEnvVar {
+                name: "CLADDING_NW_SANDBOX_ENABLED".to_string(),
+                value: config.nw_sandbox_enabled().to_string(),
+            },
+            RuntimeEnvVar {
+                name: "CLADDING_BAFFLE_SOCKET_RELAY".to_string(),
+                value: cfg!(target_os = "macos").to_string(),
+            },
+        ],
         mounts,
         ports: Vec::new(),
         stdin: false,
@@ -110,7 +133,7 @@ fn build_proxy_pod(
         labels: build_labels(&config.name, project_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
         containers,
-        userns_keep_id: false,
+        user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
 
@@ -131,8 +154,10 @@ fn build_agent_pod(
         RUNTIME_AGENT_INJECT_SOCKET_DIR,
         RUNTIME_AGENT_INJECT_MOUNT_PATH,
     ));
-    mounts.extend(build_scoped_socket_mount(
+    mounts.extend(build_proxy_data_socket_mount(
         project_root,
+        &config.name,
+        "agent",
         RUNTIME_PROXY_AGENT_SOCKET_DIR,
         RUNTIME_PROXY_AGENT_MOUNT_PATH,
     ));
@@ -215,7 +240,7 @@ fn build_agent_pod(
             stdin: true,
             tty: true,
         }],
-        userns_keep_id: true,
+        user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
 
@@ -231,8 +256,10 @@ fn build_nw_sandbox_pod(
         custom_mounts,
         MountTarget::NwSandbox,
     );
-    mounts.extend(build_scoped_socket_mount(
+    mounts.extend(build_proxy_data_socket_mount(
         project_root,
+        &config.name,
+        "nw-sandbox",
         RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
         RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
     ));
@@ -303,7 +330,26 @@ fn build_nw_sandbox_pod(
             stdin: false,
             tty: false,
         }],
-        userns_keep_id: true,
+        user_namespace: RuntimeUserNamespace::KeepId,
+    }
+}
+
+fn build_proxy_data_socket_mount(
+    project_root: &Path,
+    project_name: &str,
+    component: &str,
+    socket_dir: &str,
+    mount_path: &str,
+) -> Vec<RuntimeMount> {
+    if cfg!(target_os = "macos") {
+        vec![build_proxy_relay_volume_mount(
+            project_name,
+            component,
+            mount_path,
+            false,
+        )]
+    } else {
+        build_scoped_socket_mount(project_root, socket_dir, mount_path)
     }
 }
 
@@ -356,7 +402,7 @@ fn build_fs_sandbox_pod(
             stdin: false,
             tty: false,
         }],
-        userns_keep_id: true,
+        user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
 
@@ -440,6 +486,17 @@ mod tests {
             .collect()
     }
 
+    fn host_mount_path<'a>(container: &'a RuntimeContainer, mount_path: &str) -> Option<&'a Path> {
+        container
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == mount_path)
+            .and_then(|mount| match &mount.source {
+                super::super::types::RuntimeMountSource::HostPath { path } => Some(path.as_path()),
+                _ => None,
+            })
+    }
+
     #[test]
     fn build_runtime_spec_fully_enabled_uses_five_containers() {
         let config = execution_config(true, true, Vec::new(), false);
@@ -456,7 +513,8 @@ mod tests {
         assert_eq!(spec.proxy.network_name, "default");
         assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
         assert_eq!(spec.agent.network_name, "none");
-        assert!(spec.agent.userns_keep_id);
+        assert_eq!(spec.proxy.user_namespace, RuntimeUserNamespace::KeepId);
+        assert_eq!(spec.agent.user_namespace, RuntimeUserNamespace::KeepId);
         assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert_eq!(spec.proxy.containers.len(), 1);
         assert_eq!(spec.agent.containers.len(), 1);
@@ -476,6 +534,14 @@ mod tests {
         assert_eq!(
             env_value(&spec.proxy.containers[0], "CLADDING_NW_SANDBOX_ENABLED"),
             Some("true")
+        );
+        assert_eq!(
+            env_value(&spec.proxy.containers[0], "CLADDING_BAFFLE_SOCKET_RELAY"),
+            Some(if cfg!(target_os = "macos") {
+                "true"
+            } else {
+                "false"
+            })
         );
         assert!(spec.proxy.containers[0].ports.is_empty());
         assert_eq!(
@@ -498,7 +564,7 @@ mod tests {
         assert!(mount_paths(proxy).contains("/opt/tools/bin/baffle"));
         assert!(mount_paths(proxy).contains("/opt/scripts/proxy_startup.sh"));
         assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
-        assert!(!mount_paths(proxy).contains("/run/baffle/control.sock"));
+        assert!(!mount_paths(proxy).contains("/run/baffle"));
         let baffle_binary = proxy
             .mounts
             .iter()
@@ -517,14 +583,17 @@ mod tests {
                 if path == &PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy")
         ));
         let agent = container(&spec.agent, "demo-agent-instance");
+        assert!(!mount_paths(agent).contains("/run/baffle"));
         let nw = container(
             spec.nw_sandbox.as_ref().expect("nw pod"),
             "demo-nw-sandbox-instance",
         );
+        assert!(!mount_paths(nw).contains("/run/baffle"));
         let fs = container(
             spec.fs_sandbox.as_ref().expect("fs pod"),
             "demo-fs-sandbox-instance",
         );
+        assert!(!mount_paths(fs).contains("/run/baffle"));
 
         assert!(
             agent
@@ -776,13 +845,154 @@ mod tests {
         let config = execution_config(false, false, Vec::new(), false);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let proxy = container(&spec.proxy, "demo-proxy-instance");
+        let agent = container(&spec.agent, "demo-agent-instance");
 
         assert_eq!(
             env_value(proxy, "CLADDING_NW_SANDBOX_ENABLED"),
             Some("false")
         );
         assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert!(mount_paths(agent).contains("/run/cladding/proxy/agent"));
+        assert!(!mount_paths(agent).contains("/run/cladding/proxy"));
         assert!(spec.nw_sandbox.is_none());
+        assert!(
+            !spec
+                .generated_runtime_socket_dirs()
+                .iter()
+                .any(|path| path.ends_with("proxy/nw-sandbox"))
+        );
+    }
+
+    #[test]
+    fn baffle_data_sockets_are_mounted_only_into_their_execution_containers() {
+        let config = execution_config(true, true, Vec::new(), false);
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+        let proxy = container(&spec.proxy, "demo-proxy-instance");
+        let agent = container(&spec.agent, "demo-agent-instance");
+        let nw = container(
+            spec.nw_sandbox.as_ref().expect("network sandbox"),
+            "demo-nw-sandbox-instance",
+        );
+        let fs = container(
+            spec.fs_sandbox.as_ref().expect("filesystem sandbox"),
+            "demo-fs-sandbox-instance",
+        );
+
+        assert_eq!(spec.proxy.containers.len(), 1);
+        assert!(
+            spec.proxy
+                .containers
+                .iter()
+                .all(|container| container.name != "demo-proxy-bridge-instance")
+        );
+        assert_eq!(
+            host_mount_path(proxy, "/run/cladding/proxy"),
+            Some(Path::new("/tmp/project/.cladding/runtime/sockets/proxy"))
+        );
+        if cfg!(target_os = "macos") {
+            for (component, container, mount_path) in [
+                ("agent", agent, "/run/cladding/proxy/agent"),
+                ("nw-sandbox", nw, "/run/cladding/proxy/nw-sandbox"),
+            ] {
+                let scoped_mount = container
+                    .mounts
+                    .iter()
+                    .find(|mount| mount.mount_path == mount_path)
+                    .expect("scoped relay volume mount");
+                assert!(matches!(
+                    &scoped_mount.source,
+                    super::super::types::RuntimeMountSource::NamedVolume { claim_name }
+                        if claim_name == &format!("cladding-demo-baffle-relay-{component}")
+                ));
+            }
+            for (component, mount_path) in [
+                ("agent", "/run/cladding/proxy/agent"),
+                ("nw-sandbox", "/run/cladding/proxy/nw-sandbox"),
+            ] {
+                let relay_mount = proxy
+                    .mounts
+                    .iter()
+                    .find(|mount| mount.mount_path == mount_path)
+                    .expect("proxy relay volume mount");
+                assert!(matches!(
+                    &relay_mount.source,
+                    super::super::types::RuntimeMountSource::NamedVolumeChown { claim_name }
+                        if claim_name == &format!("cladding-demo-baffle-relay-{component}")
+                ));
+            }
+        } else {
+            assert_eq!(
+                host_mount_path(agent, "/run/cladding/proxy/agent"),
+                Some(Path::new(
+                    "/tmp/project/.cladding/runtime/sockets/proxy/agent"
+                ))
+            );
+            assert_eq!(
+                host_mount_path(nw, "/run/cladding/proxy/nw-sandbox"),
+                Some(Path::new(
+                    "/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"
+                ))
+            );
+        }
+
+        for (pod, container, own_socket, other_socket) in [
+            (
+                &spec.agent,
+                agent,
+                "/run/cladding/proxy/agent",
+                "/run/cladding/proxy/nw-sandbox",
+            ),
+            (
+                spec.nw_sandbox.as_ref().expect("network sandbox"),
+                nw,
+                "/run/cladding/proxy/nw-sandbox",
+                "/run/cladding/proxy/agent",
+            ),
+        ] {
+            let paths = mount_paths(container);
+            assert!(paths.contains(own_socket));
+            assert!(!paths.contains(other_socket));
+            assert!(!paths.contains("/run/cladding/proxy"));
+            assert_eq!(pod.network_name, "none");
+            assert_eq!(pod.user_namespace, RuntimeUserNamespace::KeepId);
+            assert!(
+                container
+                    .command
+                    .iter()
+                    .any(|arg| arg.contains("TCP-LISTEN:3128"))
+            );
+            assert!(
+                container
+                    .command
+                    .iter()
+                    .any(|arg| arg.contains("UNIX-CONNECT:"))
+            );
+            assert_eq!(
+                env_value(container, "http_proxy"),
+                Some("http://127.0.0.1:3128")
+            );
+            assert_eq!(
+                env_value(container, "https_proxy"),
+                Some("http://127.0.0.1:3128")
+            );
+        }
+
+        assert!(
+            !mount_paths(fs)
+                .iter()
+                .any(|path| path.starts_with("/run/cladding/proxy"))
+        );
+        for execution in [agent, nw, fs] {
+            assert!(execution.mounts.iter().all(|mount| {
+                !matches!(
+                    &mount.source,
+                    super::super::types::RuntimeMountSource::HostPath { path }
+                        if path.ends_with("credentials/baffle")
+                            || path.ends_with("credentials/baffle/ca-key.pem")
+                            || path.ends_with("credentials/baffle/secrets")
+                )
+            }));
+        }
     }
 
     #[test]
@@ -797,7 +1007,7 @@ mod tests {
         assert_eq!(env_value(proxy, "CLADDING_SANDBOX_NAME"), None);
         assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert!(spec.agent.use_runsc);
-        assert!(spec.agent.userns_keep_id);
+        assert_eq!(spec.agent.user_namespace, RuntimeUserNamespace::KeepId);
     }
 
     #[test]

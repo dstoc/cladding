@@ -65,26 +65,190 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BAFFLE_PROXY_VERSION: 0.2.0
+      CLADDING_TEST_RUNSC: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96
       - name: Install Baffle build and rootless Podman dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang cmake libclang-dev podman uidmap slirp4netns fuse-overlayfs
+          sudo apt-get install -y build-essential clang cmake libclang-dev podman uidmap slirp4netns fuse-overlayfs ca-certificates curl gnupg
+          sudo install -d -m 0755 /usr/share/keyrings
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y runsc
+          runsc --version
           runner_user="$(id -un)"
-          runner_group="$(id -gn)"
           if ! grep -q "^${runner_user}:" /etc/subuid; then
             echo "${runner_user}:100000:65536" | sudo tee -a /etc/subuid
           fi
-          if ! grep -q "^${runner_group}:" /etc/subgid; then
-            echo "${runner_group}:100000:65536" | sudo tee -a /etc/subgid
+          if ! grep -q "^${runner_user}:" /etc/subgid; then
+            echo "${runner_user}:100000:65536" | sudo tee -a /etc/subgid
           fi
+      - name: Build Baffle socket operation probe
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
+          echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/baffle-socket-probe" >> "$GITHUB_ENV"
       - name: Install pinned Baffle binary
         run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
       - name: Set Baffle binary path
         run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/bin/baffle" >> "$GITHUB_ENV"
+      - name: Build Linux execution helpers
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
+      - name: Set execution helper paths
+        run: |
+          echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/target/mcp-run/release/mcp-run" >> "$GITHUB_ENV"
+          echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/target/mcp-run/release/run-remote" >> "$GITHUB_ENV"
       - name: Build Cladding CLI
         run: cargo build --locked --bin cladding
-      - name: Validate Baffle startup with the default proxy image under rootless Podman
+      - name: Check Baffle validation shell syntax
+        run: sh -n scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh
+      - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/bin/baffle"
+
+  baffle-podman-machine-assets:
+    runs-on: ubuntu-24.04
+    env:
+      BAFFLE_PROXY_VERSION: 0.2.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - name: Install Baffle build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake libclang-dev
+      - name: Install pinned Baffle binary
+        run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
+      - name: Set Baffle binary path
+        run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/bin/baffle" >> "$GITHUB_ENV"
+      - name: Build Linux amd64 execution helpers
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
+      - name: Build Linux amd64 Baffle socket operation probe
+        run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
+      - name: Verify embedded helper inputs
+        run: |
+          test -x "$CLADDING_BAFFLE_BIN"
+          test -x target/mcp-run/release/mcp-run
+          test -x target/mcp-run/release/run-remote
+          test -x "$RUNNER_TEMP/baffle-socket-probe"
+          for tool in \
+            "$CLADDING_BAFFLE_BIN" \
+            target/mcp-run/release/mcp-run \
+            target/mcp-run/release/run-remote \
+            "$RUNNER_TEMP/baffle-socket-probe"; do
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux amd64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - name: Stage Linux amd64 assets for Podman machine validation
+        run: |
+          mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin"
+          cp "$CLADDING_BAFFLE_BIN" "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/baffle"
+          cp target/mcp-run/release/mcp-run "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/mcp-run"
+          cp target/mcp-run/release/run-remote "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/run-remote"
+          cp "$RUNNER_TEMP/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/baffle-socket-probe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cladding-baffle-linux-tools-amd64
+          path: ${{ runner.temp }}/cladding-baffle-tools-amd64
+          if-no-files-found: error
+
+  baffle-podman-machine:
+    runs-on: macos-15-intel
+    needs: [baffle-config, baffle-podman-machine-assets]
+    env:
+      PODMAN_VERSION: 5.8.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-baffle-linux-tools-amd64
+          path: ${{ runner.temp }}/linux-tools
+      # Artifact downloads do not retain executable file modes.
+      - name: Restore and verify downloaded Linux tools
+        run: |
+          tool_dir="$RUNNER_TEMP/linux-tools/bin"
+          for name in baffle mcp-run run-remote baffle-socket-probe; do
+            tool="$tool_dir/$name"
+            if [ ! -f "$tool" ]; then
+              echo "Downloaded Linux tool is missing: $tool" >&2
+              exit 1
+            fi
+            chmod 0755 "$tool"
+            if [ ! -x "$tool" ]; then
+              echo "Downloaded Linux tool is not executable: $tool" >&2
+              exit 1
+            fi
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux amd64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - uses: dtolnay/rust-toolchain@1.96
+      - name: Set prebuilt Linux binary paths
+        run: |
+          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
+          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
+          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
+          echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe" >> "$GITHUB_ENV"
+          echo "BAFFLE_VALIDATION_CHECK_HOST_UID=false" >> "$GITHUB_ENV"
+          echo "BAFFLE_VALIDATION_TMP_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Install pinned Podman for Intel macOS
+        run: |
+          podman_pkg="$RUNNER_TEMP/podman-installer-macos-amd64.pkg"
+          curl --fail --location --retry 3 --output "$podman_pkg" "https://github.com/podman-container-tools/podman/releases/download/v${PODMAN_VERSION}/podman-installer-macos-amd64.pkg"
+          echo "2312f91523aeb168709f35d41576ade763c891c3991befe7173aac0edf133af9  $podman_pkg" | shasum -a 256 --check
+          sudo installer -pkg "$podman_pkg" -target /
+          echo "/opt/podman/bin" >> "$GITHUB_PATH"
+          export PATH="/opt/podman/bin:$PATH"
+          podman --version
+      - name: Initialize Podman machine
+        run: |
+          set +e
+          podman --log-level=debug machine init >"$RUNNER_TEMP/podman-machine-init.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/podman-machine-init.log"
+          if [ "$status" -ne 0 ]; then
+            tail -n 20 "$RUNNER_TEMP/podman-machine-init.log" | while IFS= read -r line; do
+              escaped="${line//%/%25}"
+              printf '::error title=podman machine init::%s\n' "$escaped"
+            done
+            exit "$status"
+          fi
+      - name: Start Podman machine
+        run: |
+          set +e
+          podman --log-level=debug machine start >"$RUNNER_TEMP/podman-machine-start.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/podman-machine-start.log"
+          if [ "$status" -ne 0 ]; then
+            diagnostics="$(grep -Ei -B 2 -A 2 'error|failed|invalid|unsupported|vfkit|hypervisor|hv_' "$RUNNER_TEMP/podman-machine-start.log" | tail -n 25 | tr '\n' ' ' || true)"
+            if [ -z "$diagnostics" ]; then
+              diagnostics="$(tail -n 25 "$RUNNER_TEMP/podman-machine-start.log" | tr '\n' ' ')"
+            fi
+            diagnostics="${diagnostics//%/%25}"
+            printf '::error title=Podman machine startup diagnostics::%s\n' "$diagnostics"
+            hypervisor="$(sysctl kern.hv_support 2>&1 || true)"
+            printf '::error title=Host hypervisor capability::%s\n' "${hypervisor//%/%25}"
+            exit "$status"
+          fi
+      - name: Verify rootless Podman machine
+        run: |
+          podman info --format '{{.Host.Security.Rootless}}'
+          machine_uid="$(podman machine ssh podman-machine-default id -u | tail -n 1)"
+          machine_gid="$(podman machine ssh podman-machine-default id -g | tail -n 1)"
+          echo "BAFFLE_VALIDATION_CONTAINER_UID=$machine_uid" >> "$GITHUB_ENV"
+          echo "BAFFLE_VALIDATION_CONTAINER_GID=$machine_gid" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Cladding for macOS with Linux embedded binaries
+        run: cargo build --locked --bin cladding
+      - name: Validate Baffle socket access through macOS Podman machine
+        run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/linux-tools/bin/baffle"

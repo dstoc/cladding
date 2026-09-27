@@ -1,8 +1,9 @@
 FROM debian:trixie-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates dash coreutils libgcc-s1 \
+    && apt-get install -y --no-install-recommends ca-certificates dash coreutils libgcc-s1 socat \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /opt/config /opt/credentials/baffle /opt/tools/bin /opt/scripts \
        /run/baffle /run/cladding/proxy \
+    && chmod 1733 /run/baffle \
     && touch /opt/tools/bin/baffle /opt/scripts/proxy_startup.sh
