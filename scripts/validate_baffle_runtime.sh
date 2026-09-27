@@ -240,17 +240,31 @@ if [ "$ready" != true ]; then
   echo "Baffle daemon did not become ready" >&2
   exit 1
 fi
+origin_ready=false
 attempt=0
 phase="wait for local TLS origin readiness"
 while [ "$attempt" -lt 60 ]; do
   if podman exec "$origin_name" python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8443), 1).close()' >/dev/null 2>&1; then
+    origin_ready=true
+    break
+  fi
+  if [ "$(podman inspect --format '{{.State.Running}}' "$origin_name" 2>/dev/null || true)" != true ]; then
     break
   fi
   attempt=$((attempt + 1))
   sleep 1
 done
-if [ "$attempt" -ge 60 ]; then
+if [ "$origin_ready" != true ]; then
   echo "local TLS origin did not become ready" >&2
+  origin_state=$(podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' "$origin_name" 2>&1 || true)
+  origin_probe=$(podman exec "$origin_name" python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8443), 1).close()' 2>&1 || true)
+  origin_logs=$(podman logs "$origin_name" 2>&1 | tail -n 20 || true)
+  printf 'TLS origin state: %s\nTLS origin probe: %s\nTLS origin logs:\n%s\n' \
+    "$origin_state" "$origin_probe" "$origin_logs" >&2
+  diagnostic=$(printf 'state=%s; probe=%s; logs=%s' \
+    "$origin_state" "$origin_probe" "$origin_logs" \
+    | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-3000)
+  printf '::error title=TLS origin readiness diagnostics::%s\n' "$diagnostic"
   exit 1
 fi
 
