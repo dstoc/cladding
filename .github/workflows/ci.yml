@@ -130,6 +130,18 @@ jobs:
           test -x target/mcp-run/release/mcp-run
           test -x target/mcp-run/release/run-remote
           test -x "$RUNNER_TEMP/baffle-socket-probe"
+          for tool in \
+            "$CLADDING_BAFFLE_BIN" \
+            target/mcp-run/release/mcp-run \
+            target/mcp-run/release/run-remote \
+            "$RUNNER_TEMP/baffle-socket-probe"; do
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux amd64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
       - name: Stage Linux amd64 assets for Podman machine validation
         run: |
           mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin"
@@ -154,6 +166,28 @@ jobs:
         with:
           name: cladding-baffle-linux-tools-amd64
           path: ${{ runner.temp }}/linux-tools
+      # Artifact downloads do not retain executable file modes.
+      - name: Restore and verify downloaded Linux tools
+        run: |
+          tool_dir="$RUNNER_TEMP/linux-tools/bin"
+          for name in baffle mcp-run run-remote baffle-socket-probe; do
+            tool="$tool_dir/$name"
+            if [ ! -f "$tool" ]; then
+              echo "Downloaded Linux tool is missing: $tool" >&2
+              exit 1
+            fi
+            chmod 0755 "$tool"
+            if [ ! -x "$tool" ]; then
+              echo "Downloaded Linux tool is not executable: $tool" >&2
+              exit 1
+            fi
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux amd64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
       - uses: dtolnay/rust-toolchain@1.96
       - name: Set prebuilt Linux binary paths
         run: |
