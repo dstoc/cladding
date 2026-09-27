@@ -102,6 +102,8 @@ jobs:
           echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/target/mcp-run/release/run-remote" >> "$GITHUB_ENV"
       - name: Build Cladding CLI
         run: cargo build --locked --bin cladding
+      - name: Check Baffle validation shell syntax
+        run: sh -n scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh
       - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/bin/baffle"
 
