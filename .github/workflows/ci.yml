@@ -176,10 +176,14 @@ jobs:
           set -e
           cat "$RUNNER_TEMP/podman-machine-start.log"
           if [ "$status" -ne 0 ]; then
-            tail -n 20 "$RUNNER_TEMP/podman-machine-start.log" | while IFS= read -r line; do
-              escaped="${line//%/%25}"
-              printf '::error title=podman machine start::%s\n' "$escaped"
-            done
+            diagnostics="$(grep -Ei -B 2 -A 2 'error|failed|invalid|unsupported|vfkit|hypervisor|hv_' "$RUNNER_TEMP/podman-machine-start.log" | tail -n 25 | tr '\n' ' ' || true)"
+            if [ -z "$diagnostics" ]; then
+              diagnostics="$(tail -n 25 "$RUNNER_TEMP/podman-machine-start.log" | tr '\n' ' ')"
+            fi
+            diagnostics="${diagnostics//%/%25}"
+            printf '::error title=Podman machine startup diagnostics::%s\n' "$diagnostics"
+            hypervisor="$(sysctl kern.hv_support 2>&1 || true)"
+            printf '::error title=Host hypervisor capability::%s\n' "${hypervisor//%/%25}"
             exit "$status"
           fi
       - name: Verify rootless Podman machine
