@@ -44,13 +44,21 @@ pub struct RuntimePod {
     pub labels: BTreeMap<String, String>,
     pub network_name: String,
     pub containers: Vec<RuntimeContainer>,
-    pub userns_keep_id: bool,
+    pub user_namespace: RuntimeUserNamespace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimePlacement {
     Pod,
     Standalone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeUserNamespace {
+    Default,
+    KeepId,
+    /// Map the Podman caller to container root so Baffle owns mounted sockets as that user.
+    KeepIdAsRoot,
 }
 
 #[derive(Debug, Clone)]

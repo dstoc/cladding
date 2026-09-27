@@ -1,5 +1,7 @@
 use crate::error::{Error, Result};
-use crate::runtime::{RuntimeContainer, RuntimePlacement, RuntimePod, RuntimeSpec};
+use crate::runtime::{
+    RuntimeContainer, RuntimePlacement, RuntimePod, RuntimeSpec, RuntimeUserNamespace,
+};
 use anyhow::Context as _;
 use std::collections::HashMap;
 use std::fs;
@@ -524,10 +526,7 @@ fn build_pod_create_command(use_runsc: bool, pod: &RuntimePod) -> Command {
     append_label_args(&mut cmd, &pod.labels);
     cmd.arg("--network");
     cmd.arg(&pod.network_name);
-    if pod.userns_keep_id {
-        cmd.arg("--userns");
-        cmd.arg("keep-id");
-    }
+    append_user_namespace_args(&mut cmd, pod.user_namespace);
     cmd
 }
 
@@ -557,10 +556,7 @@ fn build_container_run_command(
             append_label_args(&mut cmd, &pod.labels);
             cmd.arg("--network");
             cmd.arg(&pod.network_name);
-            if pod.userns_keep_id {
-                cmd.arg("--userns");
-                cmd.arg("keep-id");
-            }
+            append_user_namespace_args(&mut cmd, pod.user_namespace);
             cmd.arg("--hostname");
             cmd.arg(&pod.name);
         }
@@ -586,6 +582,16 @@ fn build_container_run_command(
     cmd.arg(&container.image);
     append_command_args(&mut cmd, &container.command);
     cmd
+}
+
+fn append_user_namespace_args(cmd: &mut Command, user_namespace: RuntimeUserNamespace) {
+    let mode = match user_namespace {
+        RuntimeUserNamespace::Default => return,
+        RuntimeUserNamespace::KeepId => "keep-id",
+        RuntimeUserNamespace::KeepIdAsRoot => "keep-id:uid=0,gid=0",
+    };
+    cmd.arg("--userns");
+    cmd.arg(mode);
 }
 
 fn build_container_rm_command(container_name: &str) -> Command {
@@ -634,7 +640,7 @@ mod tests {
     use crate::config::{ExecutionComponentConfig, ExecutionConfig};
     use crate::runtime::{
         RuntimeContainer, RuntimeEnvVar, RuntimeMount, RuntimeMountSource, RuntimePlacement,
-        RuntimePod,
+        RuntimePod, RuntimeUserNamespace,
     };
 
     fn command_args(cmd: &Command) -> Vec<String> {
@@ -714,7 +720,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             containers: Vec::new(),
-            userns_keep_id: true,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
         let spec = RuntimeSpec {
             project_name: "demo".to_string(),
@@ -831,7 +837,7 @@ mod tests {
             ]),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            userns_keep_id: true,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
 
         let cmd = build_pod_create_command(false, &pod);
@@ -857,6 +863,35 @@ mod tests {
     }
 
     #[test]
+    fn proxy_pod_maps_the_invoking_user_to_container_root() {
+        let pod = RuntimePod {
+            name: "demo-proxy".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "default".to_string(),
+            containers: Vec::new(),
+            user_namespace: RuntimeUserNamespace::KeepIdAsRoot,
+        };
+
+        let cmd = build_pod_create_command(false, &pod);
+
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "pod",
+                "create",
+                "--name",
+                "demo-proxy",
+                "--network",
+                "default",
+                "--userns",
+                "keep-id:uid=0,gid=0",
+            ]
+        );
+    }
+
+    #[test]
     fn build_pod_create_command_does_not_include_runtime_flags() {
         let pod = RuntimePod {
             name: "demo-agent".to_string(),
@@ -865,7 +900,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            userns_keep_id: false,
+            user_namespace: RuntimeUserNamespace::Default,
         };
 
         let cmd = build_pod_create_command(false, &pod);
@@ -890,7 +925,7 @@ mod tests {
             ]),
             network_name: "none".to_string(),
             containers: Vec::new(),
-            userns_keep_id: true,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),
@@ -991,7 +1026,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            userns_keep_id: false,
+            user_namespace: RuntimeUserNamespace::Default,
         };
 
         let cmd = build_container_run_command(false, &pod, &container);
@@ -1056,7 +1091,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            userns_keep_id: false,
+            user_namespace: RuntimeUserNamespace::Default,
         };
 
         let cmd = build_container_run_command(true, &pod, &container);
@@ -1092,7 +1127,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             containers: Vec::new(),
-            userns_keep_id: true,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),

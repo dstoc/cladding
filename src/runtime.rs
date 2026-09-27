@@ -6,5 +6,5 @@ mod types;
 
 pub use types::{
     RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeMount, RuntimeMountSource,
-    RuntimePlacement, RuntimePod, RuntimeSpec,
+    RuntimePlacement, RuntimePod, RuntimeSpec, RuntimeUserNamespace,
 };

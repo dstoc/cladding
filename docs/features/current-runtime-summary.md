@@ -30,6 +30,8 @@ Cladding creates a private runtime socket root and per-component subdirectories:
 The proxy container mounts `.cladding/runtime/sockets/proxy` read/write. The agent and network sandbox mount only their own proxy session socket directories. The agent uses its proxy socket for outbound HTTP proxying and the sandbox run sockets when the corresponding sandboxes are enabled. The nw-sandbox and fs-sandbox containers bind their own run sockets via `MCP_BIND_UDS`.
 `cladding inject` binds the agent inject socket under `/run/cladding/agent/inject` so a foreground command can reach one host endpoint for its duration.
 
+Each execution container keeps its `socat` listener on `127.0.0.1:3128` and forwards to its own Baffle `proxy.sock`. Baffle owns a mode-`0600` socket inside a mode-`0700` component directory. The proxy pod maps the invoking host user to container UID 0, and execution containers use `keep-id`, so both sides map to the same host owner without widening socket permissions. No separate proxy bridge container is used.
+
 ## `use_runsc`
 - `use_runsc` applies only to the standalone execution containers.
 - The proxy pod stays on Podman's default runtime.

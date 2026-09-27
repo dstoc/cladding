@@ -12,6 +12,9 @@ temp_root=$(mktemp -d)
 container_prefix="cladding-baffle-startup-$$"
 disabled_container="${container_prefix}-disabled"
 enabled_container="${container_prefix}-enabled"
+socket_test_image="localhost/cladding-baffle-socket-test:latest"
+runner_uid=$(id -u)
+runner_gid=$(id -g)
 trap 'podman rm -f "$disabled_container" "$enabled_container" >/dev/null 2>&1 || true; rm -rf "$temp_root"' EXIT
 
 rootless=$(podman info --format '{{.Host.Security.Rootless}}')
@@ -19,6 +22,9 @@ if [ "$rootless" != true ]; then
   echo "Baffle config validation requires rootless Podman" >&2
   exit 1
 fi
+
+podman build --quiet --tag "$socket_test_image" \
+  --file scripts/Containerfile.baffle-socket-test scripts
 
 mkdir "$temp_root/workspace"
 (
@@ -31,6 +37,42 @@ jq '.agent.image = "docker.io/library/debian:trixie-slim" | .nw_sandbox.image = 
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 "$cladding_bin" --cladding-dir "$project_root" build
 cmp "$project_root/tools/bin/baffle" "$baffle_bin"
+
+verify_scoped_socket_access() {
+  component=$1
+  socket_dir=$2
+  component_dir="$socket_dir/$component"
+  socket_path="$component_dir/proxy.sock"
+
+  if [ "$(stat -c '%a' "$component_dir")" != 700 ]; then
+    echo "Baffle $component socket directory is not mode 0700" >&2
+    exit 1
+  fi
+  if [ "$(stat -c '%a' "$socket_path")" != 600 ]; then
+    echo "Baffle $component socket is not mode 0600" >&2
+    exit 1
+  fi
+  if [ "$(stat -c '%u' "$socket_path")" != "$runner_uid" ]; then
+    echo "Baffle $component socket is not owned by the invoking host user" >&2
+    exit 1
+  fi
+
+  podman run --rm --network none --userns keep-id \
+    --user "$runner_uid:$runner_gid" \
+    --volume "$component_dir:/run/cladding/proxy/$component:rw" \
+    --entrypoint /bin/sh "$socket_test_image" -ec '
+      socket_path=$1
+      test -S "$socket_path"
+      socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr \
+        UNIX-CONNECT:"$socket_path" &
+      bridge_pid=$!
+      trap '\''kill "$bridge_pid" 2>/dev/null || true; wait "$bridge_pid" 2>/dev/null || true'\'' EXIT
+      sleep 1
+      curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+        --proxy http://127.0.0.1:3128 --output /dev/null https://example.com/
+    ' socket-test "/run/cladding/proxy/$component/proxy.sock"
+  echo "Rootless keep-id socket access passed for the $component proxy endpoint"
+}
 
 run_proxy_startup() {
   name=$1
@@ -47,6 +89,7 @@ run_proxy_startup() {
   fi
 
   podman run --detach --name "$name" \
+    --userns keep-id:uid=0,gid=0 \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
     --volume "$project_root/tools/bin/baffle:/opt/tools/bin/baffle:ro" \
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
@@ -81,6 +124,11 @@ run_proxy_startup() {
   if [ "$sandbox_enabled" = false ] && [ -S "$socket_dir/nw-sandbox/proxy.sock" ]; then
     echo "Baffle startup created a network-sandbox session while it was disabled" >&2
     exit 1
+  fi
+
+  verify_scoped_socket_access agent "$socket_dir"
+  if [ "$sandbox_enabled" = true ]; then
+    verify_scoped_socket_access nw-sandbox "$socket_dir"
   fi
 
   podman stop --time 5 "$name" >/dev/null
