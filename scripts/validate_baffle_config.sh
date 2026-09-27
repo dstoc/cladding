@@ -8,6 +8,7 @@ fi
 
 cladding_bin=$1
 baffle_bin=$2
+socket_probe_bin=${BAFFLE_SOCKET_PROBE_BIN:-}
 temp_parent=${BAFFLE_VALIDATION_TMP_DIR:-${TMPDIR:-/tmp}}
 temp_root=$(mktemp -d "$temp_parent/cladding-baffle-validation.XXXXXX")
 container_prefix="cladding-baffle-startup-$$"
@@ -93,6 +94,10 @@ current_phase="build Cladding proxy image"
 "$cladding_bin" --cladding-dir "$project_root" build
 current_phase="verify embedded Baffle binary"
 cmp "$project_root/tools/bin/baffle" "$baffle_bin"
+if [ -n "$socket_probe_bin" ] && [ ! -x "$socket_probe_bin" ]; then
+  echo "Baffle socket operation probe is missing or not executable: $socket_probe_bin" >&2
+  exit 1
+fi
 
 verify_scoped_socket_access() {
   component=$1
@@ -170,7 +175,7 @@ run_proxy_startup() {
 
   start_output_file="$temp_root/proxy-start-$name.log"
   current_phase="create proxy container ($name)"
-  if podman run --detach --name "$name" \
+  set -- podman run --detach --name "$name" \
     --userns keep-id \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
     --env "CLADDING_BAFFLE_SOCKET_RELAY=$socket_relay" \
@@ -181,8 +186,13 @@ run_proxy_startup() {
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
     --volume "$project_root/config:/opt/config:ro" \
     --volume "$project_root/credentials/baffle:/opt/credentials/baffle:ro" \
-    --volume "$socket_dir:/run/cladding/proxy:rw" \
-    --entrypoint /bin/sh \
+    --volume "$socket_dir:/run/cladding/proxy:rw"
+  if [ -n "$socket_probe_bin" ]; then
+    set -- "$@" \
+      --volume "$socket_probe_bin:/opt/tools/bin/baffle-socket-probe:ro" \
+      --env CLADDING_BAFFLE_EXACT_BIND_PROBE=true
+  fi
+  if "$@" --entrypoint /bin/sh \
     localhost/cladding-proxy:latest /opt/scripts/proxy_startup.sh >"$start_output_file" 2>&1; then
     :
   else

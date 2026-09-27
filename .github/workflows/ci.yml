@@ -86,6 +86,10 @@ jobs:
           if ! grep -q "^${runner_user}:" /etc/subgid; then
             echo "${runner_user}:100000:65536" | sudo tee -a /etc/subgid
           fi
+      - name: Build Baffle socket operation probe
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
+          echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/baffle-socket-probe" >> "$GITHUB_ENV"
       - name: Install pinned Baffle binary
         run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
       - name: Set Baffle binary path
@@ -118,17 +122,21 @@ jobs:
         run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/bin/baffle" >> "$GITHUB_ENV"
       - name: Build Linux amd64 execution helpers
         run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
+      - name: Build Linux amd64 Baffle socket operation probe
+        run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Verify embedded helper inputs
         run: |
           test -x "$CLADDING_BAFFLE_BIN"
           test -x target/mcp-run/release/mcp-run
           test -x target/mcp-run/release/run-remote
+          test -x "$RUNNER_TEMP/baffle-socket-probe"
       - name: Stage Linux amd64 assets for Podman machine validation
         run: |
           mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin"
           cp "$CLADDING_BAFFLE_BIN" "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/baffle"
           cp target/mcp-run/release/mcp-run "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/mcp-run"
           cp target/mcp-run/release/run-remote "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/run-remote"
+          cp "$RUNNER_TEMP/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/baffle-socket-probe"
       - uses: actions/upload-artifact@v4
         with:
           name: cladding-baffle-linux-tools-amd64
@@ -152,6 +160,7 @@ jobs:
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
           echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
+          echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe" >> "$GITHUB_ENV"
           echo "BAFFLE_VALIDATION_CHECK_HOST_UID=false" >> "$GITHUB_ENV"
           echo "BAFFLE_VALIDATION_TMP_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - name: Install pinned Podman for Intel macOS

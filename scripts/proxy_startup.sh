@@ -272,6 +272,13 @@ while :; do
 done
 
 log "Baffle control socket accepts commands"
+daemon_status_file="/proc/$daemon_pid/status"
+if [ -r "$daemon_status_file" ]; then
+    awk '/^(Name|Uid|Gid|Groups|NSpid):/ { print "[baffle-startup] daemon_process_identity: " $0 }' \
+        "$daemon_status_file" >&2 || true
+else
+    log "Baffle daemon process status is not readable: $daemon_status_file"
+fi
 if ! cd "$CONFIG_DIR/sessions"; then
     fail "cannot read Baffle session configuration directory: $CONFIG_DIR/sessions"
 fi
@@ -416,6 +423,17 @@ create_session() {
     if [ "${CLADDING_BAFFLE_BIND_PROBE:-false}" = true ]; then
         if ! probe_socket_bind "$component" "$session_socket_dir"; then
             fail "minimal Unix socket bind failed for $component session directory: $session_socket_dir"
+        fi
+    fi
+
+    if [ "${CLADDING_BAFFLE_EXACT_BIND_PROBE:-false}" = true ]; then
+        exact_probe=/opt/tools/bin/baffle-socket-probe
+        if [ ! -x "$exact_probe" ]; then
+            fail "Baffle socket operation probe is missing or not executable: $exact_probe"
+        fi
+        log "running Baffle-compatible socket operation probe for $component"
+        if ! "$exact_probe" "$session_socket_dir/proxy.sock"; then
+            fail "Baffle-compatible socket operation probe failed for $component session directory: $session_socket_dir"
         fi
     fi
 
