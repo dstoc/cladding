@@ -155,11 +155,11 @@ run_proxy_startup() {
   sandbox_state=$3
   socket_dir="$temp_root/sockets-$name"
   current_phase="start proxy ($name)"
-  mkdir -p "$socket_dir/agent"
+  mkdir -p "$socket_dir/agent" "$socket_dir/control"
   if [ "$sandbox_enabled" = true ]; then
     mkdir -p "$socket_dir/nw-sandbox"
   fi
-  chmod 700 "$socket_dir" "$socket_dir/agent"
+  chmod 700 "$socket_dir" "$socket_dir/agent" "$socket_dir/control"
   if [ "$sandbox_enabled" = true ]; then
     chmod 700 "$socket_dir/nw-sandbox"
   fi
@@ -167,13 +167,14 @@ run_proxy_startup() {
   start_output_file="$temp_root/proxy-start-$name.log"
   current_phase="create proxy container ($name)"
   if podman run --detach --name "$name" \
-    --userns keep-id:uid=0 \
+    --userns keep-id \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
     --volume "$project_root/tools/bin/baffle:/opt/tools/bin/baffle:ro" \
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
     --volume "$project_root/config:/opt/config:ro" \
     --volume "$project_root/credentials/baffle:/opt/credentials/baffle:ro" \
     --volume "$socket_dir:/run/cladding/proxy:rw" \
+    --volume "$socket_dir/control:/run/baffle:rw" \
     --entrypoint /bin/sh \
     localhost/cladding-proxy:latest /opt/scripts/proxy_startup.sh >"$start_output_file" 2>&1; then
     :
@@ -212,6 +213,21 @@ run_proxy_startup() {
         "container=$name expected=$sandbox_state" "$start_output_file"
     fi
     echo "Baffle startup did not create the expected $sandbox_state session socket" >&2
+    exit 1
+  fi
+
+  current_phase="verify proxy control directory ($name)"
+  runtime_config="$socket_dir/control/daemon.toml"
+  if [ "$(stat_mode "$socket_dir/control")" != 700 ]; then
+    echo "Baffle control directory is not mode 0700" >&2
+    exit 1
+  fi
+  if [ ! -f "$runtime_config" ] || [ "$(stat_mode "$runtime_config")" != 600 ]; then
+    echo "Baffle runtime daemon config is missing or not mode 0600" >&2
+    exit 1
+  fi
+  if ! grep -q "^trusted_operator_uid = $container_uid$" "$runtime_config"; then
+    echo "Baffle runtime daemon config does not trust the keep-id proxy UID" >&2
     exit 1
   fi
 

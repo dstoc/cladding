@@ -57,8 +57,6 @@ pub enum RuntimePlacement {
 pub enum RuntimeUserNamespace {
     Default,
     KeepId,
-    /// Map the Podman caller to container root so Baffle owns mounted sockets as that user.
-    KeepIdAsRoot,
 }
 
 #[derive(Debug, Clone)]

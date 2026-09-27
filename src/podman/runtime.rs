@@ -588,7 +588,6 @@ fn append_user_namespace_args(cmd: &mut Command, user_namespace: RuntimeUserName
     let mode = match user_namespace {
         RuntimeUserNamespace::Default => return,
         RuntimeUserNamespace::KeepId => "keep-id",
-        RuntimeUserNamespace::KeepIdAsRoot => "keep-id:uid=0",
     };
     cmd.arg("--userns");
     cmd.arg(mode);
@@ -863,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_pod_maps_the_invoking_user_to_container_root() {
+    fn proxy_pod_preserves_the_invoking_user_identity() {
         let pod = RuntimePod {
             name: "demo-proxy".to_string(),
             placement: RuntimePlacement::Pod,
@@ -871,7 +870,7 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
-            user_namespace: RuntimeUserNamespace::KeepIdAsRoot,
+            user_namespace: RuntimeUserNamespace::KeepId,
         };
 
         let cmd = build_pod_create_command(false, &pod);
@@ -886,7 +885,7 @@ mod tests {
                 "--network",
                 "default",
                 "--userns",
-                "keep-id:uid=0",
+                "keep-id",
             ]
         );
     }

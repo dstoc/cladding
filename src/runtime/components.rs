@@ -110,7 +110,7 @@ fn build_proxy_pod(
         labels: build_labels(&config.name, project_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
         containers,
-        user_namespace: RuntimeUserNamespace::KeepIdAsRoot,
+        user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
 
@@ -467,10 +467,7 @@ mod tests {
         assert_eq!(spec.proxy.network_name, "default");
         assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
         assert_eq!(spec.agent.network_name, "none");
-        assert_eq!(
-            spec.proxy.user_namespace,
-            RuntimeUserNamespace::KeepIdAsRoot
-        );
+        assert_eq!(spec.proxy.user_namespace, RuntimeUserNamespace::KeepId);
         assert_eq!(spec.agent.user_namespace, RuntimeUserNamespace::KeepId);
         assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert_eq!(spec.proxy.containers.len(), 1);
@@ -513,7 +510,13 @@ mod tests {
         assert!(mount_paths(proxy).contains("/opt/tools/bin/baffle"));
         assert!(mount_paths(proxy).contains("/opt/scripts/proxy_startup.sh"));
         assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
-        assert!(!mount_paths(proxy).contains("/run/baffle/control.sock"));
+        assert!(mount_paths(proxy).contains("/run/baffle"));
+        let control_socket_dir =
+            host_mount_path(proxy, "/run/baffle").expect("proxy control socket directory mount");
+        assert_eq!(
+            control_socket_dir,
+            Path::new("/tmp/project/.cladding/runtime/sockets/proxy/control")
+        );
         let baffle_binary = proxy
             .mounts
             .iter()
@@ -532,14 +535,17 @@ mod tests {
                 if path == &PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy")
         ));
         let agent = container(&spec.agent, "demo-agent-instance");
+        assert!(!mount_paths(agent).contains("/run/baffle"));
         let nw = container(
             spec.nw_sandbox.as_ref().expect("nw pod"),
             "demo-nw-sandbox-instance",
         );
+        assert!(!mount_paths(nw).contains("/run/baffle"));
         let fs = container(
             spec.fs_sandbox.as_ref().expect("fs pod"),
             "demo-fs-sandbox-instance",
         );
+        assert!(!mount_paths(fs).contains("/run/baffle"));
 
         assert!(
             agent

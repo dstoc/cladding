@@ -93,9 +93,21 @@ fi
 if ! chmod 0700 "$(dirname "$CONTROL_SOCKET")"; then
     fail "failed to secure private Baffle control-socket directory"
 fi
+proxy_uid=$(id -u)
+runtime_config="$(dirname "$CONTROL_SOCKET")/daemon.toml"
+if ! sed "s/^trusted_operator_uid = .*/trusted_operator_uid = $proxy_uid/" \
+    "$CONFIG_DIR/daemon.toml" > "$runtime_config"; then
+    fail "failed to write Baffle runtime configuration"
+fi
+if ! grep -q "^trusted_operator_uid = $proxy_uid$" "$runtime_config"; then
+    fail "Baffle runtime configuration does not trust the proxy process UID"
+fi
+if ! chmod 0600 "$runtime_config"; then
+    fail "failed to secure Baffle runtime configuration"
+fi
 
 log "starting Baffle daemon"
-"$BAFFLE_BIN" daemon --config "$CONFIG_DIR/daemon.toml" &
+"$BAFFLE_BIN" daemon --config "$runtime_config" &
 daemon_pid=$!
 
 attempt=0
