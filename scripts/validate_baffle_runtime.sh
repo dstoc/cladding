@@ -51,6 +51,8 @@ cleanup() {
   fi
   if [ "$status" -ne 0 ]; then
     echo "Baffle runtime integration failed during: $phase" >&2
+    printf '::error title=Baffle runtime integration phase::%s (exit code %s)\n' \
+      "$phase" "$status"
     podman logs "$project_name-proxy-instance" >&2 2>/dev/null || true
     podman logs "$origin_name" >&2 2>/dev/null || true
   fi
@@ -390,9 +392,14 @@ if grep -F 'cladding-test-old-value' "$temp_root/events.jsonl" \
   echo "origin event log contains a credential value" >&2
   exit 1
 fi
+if ! jq -s -e 'any(.[]; (.path | startswith("/authorized/repo.git/"))
+                      and .authorization == "old")' \
+  "$temp_root/events.jsonl" >/dev/null; then
+  echo "Git clone did not receive the expected old injected credential" >&2
+  exit 1
+fi
 jq -s -e 'any(.[]; .path == "/authorized/curl" and .authorization == "old")
           and any(.[]; .path == "/authorized/node" and .authorization == "old")
-          and any(.[]; (.path | startswith("/authorized/repo.git/")))
           and any(.[]; .path == "/replacement/new-policy" and .authorization == "new")
           and all(.[]; .path != "/authorized/wrong-host"
                      and .path != "/authorized/wrong-port"
