@@ -65,13 +65,20 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BAFFLE_PROXY_VERSION: 0.2.0
+      CLADDING_TEST_RUNSC: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96
       - name: Install Baffle build and rootless Podman dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang cmake libclang-dev podman uidmap slirp4netns fuse-overlayfs
+          sudo apt-get install -y build-essential clang cmake libclang-dev podman uidmap slirp4netns fuse-overlayfs ca-certificates curl gnupg
+          sudo install -d -m 0755 /usr/share/keyrings
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y runsc
+          runsc --version
           runner_user="$(id -un)"
           runner_group="$(id -gn)"
           if ! grep -q "^${runner_user}:" /etc/subuid; then
@@ -84,7 +91,57 @@ jobs:
         run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
       - name: Set Baffle binary path
         run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/bin/baffle" >> "$GITHUB_ENV"
+      - name: Build Linux execution helpers
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
+      - name: Set execution helper paths
+        run: |
+          echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/target/mcp-run/release/mcp-run" >> "$GITHUB_ENV"
+          echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/target/mcp-run/release/run-remote" >> "$GITHUB_ENV"
       - name: Build Cladding CLI
         run: cargo build --locked --bin cladding
-      - name: Validate Baffle startup with the default proxy image under rootless Podman
+      - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/bin/baffle"
+      - name: Stage Linux assets for Podman machine validation
+        run: |
+          mkdir -p "$RUNNER_TEMP/cladding-baffle-tools/bin"
+          cp "$RUNNER_TEMP/baffle/bin/baffle" "$RUNNER_TEMP/cladding-baffle-tools/bin/baffle"
+          cp "$CLADDING_MCP_RUN_BIN" "$RUNNER_TEMP/cladding-baffle-tools/bin/mcp-run"
+          cp "$CLADDING_RUN_REMOTE_BIN" "$RUNNER_TEMP/cladding-baffle-tools/bin/run-remote"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cladding-baffle-linux-tools
+          path: ${{ runner.temp }}/cladding-baffle-tools
+          if-no-files-found: error
+
+  baffle-podman-machine:
+    runs-on: macos-15-intel
+    needs: baffle-config
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-baffle-linux-tools
+          path: ${{ runner.temp }}/linux-tools
+      - uses: dtolnay/rust-toolchain@1.96
+      - name: Set prebuilt Linux binary paths
+        run: |
+          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
+          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
+          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
+          echo "BAFFLE_VALIDATION_CHECK_HOST_UID=false" >> "$GITHUB_ENV"
+          echo "BAFFLE_VALIDATION_TMP_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Install Podman and start a rootless machine
+        run: |
+          brew install podman
+          podman machine init
+          podman machine start
+          podman info --format '{{.Host.Security.Rootless}}'
+          machine_uid="$(podman machine ssh podman-machine-default id -u | tail -n 1)"
+          machine_gid="$(podman machine ssh podman-machine-default id -g | tail -n 1)"
+          echo "BAFFLE_VALIDATION_CONTAINER_UID=$machine_uid" >> "$GITHUB_ENV"
+          echo "BAFFLE_VALIDATION_CONTAINER_GID=$machine_gid" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Cladding for macOS with Linux embedded binaries
+        run: cargo build --locked --bin cladding
+      - name: Validate Baffle socket access through macOS Podman machine
+        run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/linux-tools/bin/baffle"

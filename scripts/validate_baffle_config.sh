@@ -8,14 +8,52 @@ fi
 
 cladding_bin=$1
 baffle_bin=$2
-temp_root=$(mktemp -d)
+temp_parent=${BAFFLE_VALIDATION_TMP_DIR:-${TMPDIR:-/tmp}}
+temp_root=$(mktemp -d "$temp_parent/cladding-baffle-validation.XXXXXX")
 container_prefix="cladding-baffle-startup-$$"
 disabled_container="${container_prefix}-disabled"
 enabled_container="${container_prefix}-enabled"
 socket_test_image="localhost/cladding-baffle-socket-test:latest"
 runner_uid=$(id -u)
 runner_gid=$(id -g)
-trap 'podman rm -f "$disabled_container" "$enabled_container" >/dev/null 2>&1 || true; rm -rf "$temp_root"' EXIT
+container_uid=${BAFFLE_VALIDATION_CONTAINER_UID:-$runner_uid}
+container_gid=${BAFFLE_VALIDATION_CONTAINER_GID:-$runner_gid}
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ]; then
+    echo "::error title=Baffle socket validation failed::validator exited with code $status"
+    for name in "$disabled_container" "$enabled_container"; do
+      if podman inspect "$name" >/dev/null 2>&1; then
+        echo "--- $name state ---" >&2
+        podman inspect --format '{{.State.Status}} (exit {{.State.ExitCode}})' "$name" >&2 || true
+        echo "--- $name logs ---" >&2
+        podman logs "$name" >&2 || true
+      fi
+    done
+  fi
+  podman rm -f "$disabled_container" "$enabled_container" >/dev/null 2>&1 || true
+  rm -rf "$temp_root"
+  exit "$status"
+}
+trap cleanup EXIT
+
+stat_mode() {
+  if [ "$(uname -s)" = Darwin ]; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+
+stat_uid() {
+  if [ "$(uname -s)" = Darwin ]; then
+    stat -f '%u' "$1"
+  else
+    stat -c '%u' "$1"
+  fi
+}
 
 rootless=$(podman info --format '{{.Host.Security.Rootless}}')
 if [ "$rootless" != true ]; then
@@ -41,24 +79,36 @@ cmp "$project_root/tools/bin/baffle" "$baffle_bin"
 verify_scoped_socket_access() {
   component=$1
   socket_dir=$2
+  socket_runtime=${3:-default}
   component_dir="$socket_dir/$component"
   socket_path="$component_dir/proxy.sock"
 
-  if [ "$(stat -c '%a' "$component_dir")" != 700 ]; then
+  if [ "$(stat_mode "$component_dir")" != 700 ]; then
     echo "Baffle $component socket directory is not mode 0700" >&2
     exit 1
   fi
-  if [ "$(stat -c '%a' "$socket_path")" != 600 ]; then
+  if [ "$(stat_mode "$socket_path")" != 600 ]; then
     echo "Baffle $component socket is not mode 0600" >&2
     exit 1
   fi
-  if [ "$(stat -c '%u' "$socket_path")" != "$runner_uid" ]; then
+  if [ "${BAFFLE_VALIDATION_CHECK_HOST_UID:-true}" = true ] \
+    && [ "$(stat_uid "$socket_path")" != "$runner_uid" ]; then
     echo "Baffle $component socket is not owned by the invoking host user" >&2
     exit 1
   fi
 
-  podman run --rm --network none --userns keep-id \
-    --user "$runner_uid:$runner_gid" \
+  echo "Testing rootless keep-id socket access for $component ($socket_runtime runtime)"
+  if [ "$socket_runtime" = runsc ]; then
+    set -- podman --runtime runsc \
+      --runtime-flag ignore-cgroups \
+      --runtime-flag host-uds=all \
+      --runtime-flag network=none \
+      run
+  else
+    set -- podman run
+  fi
+  "$@" --rm --network none --userns keep-id \
+    --user "$container_uid:$container_gid" \
     --volume "$component_dir:/run/cladding/proxy/$component:rw" \
     --entrypoint /bin/sh "$socket_test_image" -ec '
       socket_path=$1
@@ -71,7 +121,7 @@ verify_scoped_socket_access() {
       curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
         --proxy http://127.0.0.1:3128 --output /dev/null https://example.com/
     ' socket-test "/run/cladding/proxy/$component/proxy.sock"
-  echo "Rootless keep-id socket access passed for the $component proxy endpoint"
+  echo "Rootless keep-id socket access passed for the $component proxy endpoint ($socket_runtime runtime)"
 }
 
 run_proxy_startup() {
@@ -129,6 +179,12 @@ run_proxy_startup() {
   verify_scoped_socket_access agent "$socket_dir"
   if [ "$sandbox_enabled" = true ]; then
     verify_scoped_socket_access nw-sandbox "$socket_dir"
+  fi
+  if [ "${CLADDING_TEST_RUNSC:-false}" = true ]; then
+    verify_scoped_socket_access agent "$socket_dir" runsc
+    if [ "$sandbox_enabled" = true ]; then
+      verify_scoped_socket_access nw-sandbox "$socket_dir" runsc
+    fi
   fi
 
   podman stop --time 5 "$name" >/dev/null

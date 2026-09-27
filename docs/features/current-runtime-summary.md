@@ -32,6 +32,8 @@ The proxy container mounts `.cladding/runtime/sockets/proxy` read/write. The age
 
 Each execution container keeps its `socat` listener on `127.0.0.1:3128` and forwards to its own Baffle `proxy.sock`. Baffle owns a mode-`0600` socket inside a mode-`0700` component directory. The proxy pod maps the invoking host user to container UID 0, and execution containers use `keep-id`, so both sides map to the same host owner without widening socket permissions. No separate proxy bridge container is used.
 
+CI checks this direct socket path with rootless Podman and its default OCI runtime, with `runsc` for execution containers, and through the macOS Podman machine. Each check verifies the socket modes and sends an HTTPS request through the component's existing `127.0.0.1:3128` endpoint. The Podman-machine check uses the machine user's UID inside its containers and verifies access with the request itself; host and VM UID values are not compared.
+
 ## `use_runsc`
 - `use_runsc` applies only to the standalone execution containers.
 - The proxy pod stays on Podman's default runtime.
