@@ -129,6 +129,9 @@ phase="build integration client image"
 podman build --quiet -t "$client_image" \
   -f "$script_dir/Containerfile.baffle-integration-client" "$script_dir"
 
+phase="stage local TLS origin build context"
+cp "$script_dir/baffle_test_origin.py" "$temp_root/origin/baffle_test_origin.py"
+
 phase="build local TLS origin image"
 podman build --pull=never -t "$origin_image" \
   --build-arg BASE_IMAGE="$client_image" \
