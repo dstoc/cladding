@@ -27,7 +27,6 @@ jobs:
     env:
       CLADDING_MCP_RUN_BIN: ${{ github.workspace }}/target/mcp-run/release/mcp-run
       CLADDING_RUN_REMOTE_BIN: ${{ github.workspace }}/target/mcp-run/release/run-remote
-      CLADDING_BAFFLE_BIN: ${{ runner.temp }}/baffle-install/bin/baffle
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96
@@ -46,6 +45,8 @@ jobs:
           cache-workspace-crates: true
       - name: Install pinned Baffle
         run: cargo install --locked --force --version '=0.2.0' --root "$RUNNER_TEMP/baffle-install" --bin baffle baffle-proxy
+      - name: Set Baffle binary path
+        run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle-install/bin/baffle" >> "$GITHUB_ENV"
       - name: Build embedded helpers
         run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
       - name: Verify embedded helpers
