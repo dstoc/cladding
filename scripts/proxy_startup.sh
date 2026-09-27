@@ -324,6 +324,101 @@ start_socket_relay() {
 create_session() {
     component=$1
     session_file=$2
+
+    if [ "$SOCKET_RELAY" = true ]; then
+        session_socket_dir="$private_data_dir/$component"
+    else
+        session_socket_dir="$SOCKET_DIR/$component"
+    fi
+
+    probe_socket_bind() {
+        probe_component=$1
+        probe_directory=$2
+        probe_name=".cladding-bind-probe-$probe_component-$$.sock"
+        probe_path="$probe_directory/$probe_name"
+        probe_bind_path="/proc/self/fd/3/$probe_name"
+        probe_output="${TMPDIR:-/tmp}/cladding-bind-probe-$probe_component-$$.log"
+        canonical_directory=$(readlink -f "$probe_directory" 2>/dev/null || printf '%s' "$probe_directory")
+
+        log "Unix socket bind probe: component=$probe_component uid=$(id -u) directory=$probe_directory canonical_directory=$canonical_directory bind_path=$probe_bind_path canonical_target=$(readlink -f "$probe_path" 2>/dev/null || printf '%s' "$probe_path")"
+        id >&2 || true
+        stat -c 'directory_metadata: mode=%a uid=%u gid=%g path=%n' "$probe_directory" >&2 || true
+        stat -f -c 'filesystem_type=%T path=%n' "$probe_directory" >&2 || true
+        awk -v target="$canonical_directory" '
+            {
+                mount = $5
+                if ((mount == "/" || target == mount || index(target, mount "/") == 1) \
+                    && length(mount) >= longest) {
+                    mount_record = $0
+                    longest = length(mount)
+                }
+            }
+            END {
+                if (mount_record != "") print "mountinfo: " mount_record
+                else print "mountinfo: no matching mount found"
+            }
+        ' /proc/self/mountinfo >&2 || true
+
+        if [ -e "$probe_path" ] || [ -L "$probe_path" ]; then
+            log "Unix socket bind probe path already exists: $probe_path"
+            return 1
+        fi
+
+        (
+            exec 3< "$probe_directory"
+            umask 0077
+            exec socat "UNIX-LISTEN:$probe_bind_path,unlink-early" /dev/null
+        ) >"$probe_output" 2>&1 &
+        probe_pid=$!
+        probe_attempt=0
+        while [ "$probe_attempt" -lt 50 ] && [ ! -S "$probe_path" ]; do
+            if ! kill -0 "$probe_pid" 2>/dev/null; then
+                break
+            fi
+            probe_attempt=$((probe_attempt + 1))
+            sleep 0.1
+        done
+
+        if [ -S "$probe_path" ]; then
+            if ! chmod 0600 "$probe_path"; then
+                log "Unix socket permission probe failed: component=$probe_component path=$probe_path"
+                stat -c 'probe_socket_metadata: mode=%a uid=%u gid=%g path=%n' "$probe_path" >&2 || true
+                kill -TERM "$probe_pid" 2>/dev/null || true
+                wait "$probe_pid" 2>/dev/null || true
+                rm -f "$probe_path" || true
+                rm -f "$probe_output"
+                return 1
+            fi
+            stat -c 'probe_socket_metadata: mode=%a uid=%u gid=%g path=%n' "$probe_path" >&2 || true
+            kill -TERM "$probe_pid" 2>/dev/null || true
+            wait "$probe_pid" 2>/dev/null || true
+            rm -f "$probe_path"
+            rm -f "$probe_output"
+            log "Unix socket bind probe passed: component=$probe_component"
+            return 0
+        fi
+
+        if kill -0 "$probe_pid" 2>/dev/null; then
+            kill -TERM "$probe_pid" 2>/dev/null || true
+        fi
+        probe_status=0
+        wait "$probe_pid" || probe_status=$?
+        log "Unix socket bind probe failed: component=$probe_component exit_code=$probe_status path=$probe_path"
+        cat "$probe_output" >&2 || true
+        if [ -e "$probe_path" ] || [ -S "$probe_path" ]; then
+            ls -ld "$probe_path" >&2 || true
+            rm -f "$probe_path" || true
+        fi
+        rm -f "$probe_output"
+        return 1
+    }
+
+    if [ "${CLADDING_BAFFLE_BIND_PROBE:-false}" = true ]; then
+        if ! probe_socket_bind "$component" "$session_socket_dir"; then
+            fail "minimal Unix socket bind failed for $component session directory: $session_socket_dir"
+        fi
+    fi
+
     log "creating persistent session from $session_file"
     if "$BAFFLE_BIN" create "$session_file"; then
         log "created persistent session from $session_file"

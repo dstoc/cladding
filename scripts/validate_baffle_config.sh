@@ -174,6 +174,7 @@ run_proxy_startup() {
     --userns keep-id \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
     --env "CLADDING_BAFFLE_SOCKET_RELAY=$socket_relay" \
+    --env CLADDING_BAFFLE_BIND_PROBE=true \
     --env RUST_LOG=debug \
     --env RUST_BACKTRACE=1 \
     --volume "$project_root/tools/bin/baffle:/opt/tools/bin/baffle:ro" \
