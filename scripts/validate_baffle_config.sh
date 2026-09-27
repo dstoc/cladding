@@ -18,12 +18,13 @@ runner_uid=$(id -u)
 runner_gid=$(id -g)
 container_uid=${BAFFLE_VALIDATION_CONTAINER_UID:-$runner_uid}
 container_gid=${BAFFLE_VALIDATION_CONTAINER_GID:-$runner_gid}
+current_phase="initialize validation"
 
 cleanup() {
   status=$?
   trap - EXIT
   if [ "$status" -ne 0 ]; then
-    echo "::error title=Baffle socket validation failed::validator exited with code $status"
+    echo "::error title=Baffle socket validation failed::phase=$current_phase; validator exited with code $status"
     for name in "$disabled_container" "$enabled_container"; do
       if podman inspect "$name" >/dev/null 2>&1; then
         echo "--- $name state ---" >&2
@@ -61,19 +62,24 @@ if [ "$rootless" != true ]; then
   exit 1
 fi
 
+current_phase="build socket test image"
 podman build --quiet --tag "$socket_test_image" \
   --file scripts/Containerfile.baffle-socket-test scripts
 
 mkdir "$temp_root/workspace"
+current_phase="initialize Baffle fixture"
 (
   cd "$temp_root/workspace"
   "$cladding_bin" init bafflevalidation >/dev/null
 )
 project_root="$temp_root/workspace/.cladding"
+current_phase="configure Baffle fixture"
 jq '.agent.image = "docker.io/library/debian:trixie-slim" | .nw_sandbox.image = "docker.io/library/debian:trixie-slim"' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
+current_phase="build Cladding proxy image"
 "$cladding_bin" --cladding-dir "$project_root" build
+current_phase="verify embedded Baffle binary"
 cmp "$project_root/tools/bin/baffle" "$baffle_bin"
 
 verify_scoped_socket_access() {
@@ -82,6 +88,7 @@ verify_scoped_socket_access() {
   socket_runtime=${3:-default}
   component_dir="$socket_dir/$component"
   socket_path="$component_dir/proxy.sock"
+  current_phase="verify $component socket permissions ($socket_runtime runtime)"
 
   if [ "$(stat_mode "$component_dir")" != 700 ]; then
     echo "Baffle $component socket directory is not mode 0700" >&2
@@ -98,6 +105,7 @@ verify_scoped_socket_access() {
   fi
 
   echo "Testing rootless keep-id socket access for $component ($socket_runtime runtime)"
+  current_phase="test $component socket access ($socket_runtime runtime)"
   if [ "$socket_runtime" = runsc ]; then
     set -- podman --runtime runsc \
       --runtime-flag ignore-cgroups \
@@ -107,7 +115,8 @@ verify_scoped_socket_access() {
   else
     set -- podman run
   fi
-  "$@" --rm --network none --userns keep-id \
+  output_file="$temp_root/socket-test-$component-$socket_runtime.log"
+  if "$@" --rm --network none --userns keep-id \
     --user "$container_uid:$container_gid" \
     --volume "$component_dir:/run/cladding/proxy/$component:rw" \
     --entrypoint /bin/sh "$socket_test_image" -ec '
@@ -120,7 +129,15 @@ verify_scoped_socket_access() {
       sleep 1
       curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
         --proxy http://127.0.0.1:3128 --output /dev/null https://example.com/
-    ' socket-test "/run/cladding/proxy/$component/proxy.sock"
+    ' socket-test "/run/cladding/proxy/$component/proxy.sock" >"$output_file" 2>&1; then
+    cat "$output_file"
+  else
+    status=$?
+    cat "$output_file" >&2
+    details=$(tail -n 8 "$output_file" | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
+    echo "::error title=Baffle socket access failed::component=$component runtime=$socket_runtime exit=$status output=$details"
+    exit "$status"
+  fi
   echo "Rootless keep-id socket access passed for the $component proxy endpoint ($socket_runtime runtime)"
 }
 
@@ -129,6 +146,7 @@ run_proxy_startup() {
   sandbox_enabled=$2
   sandbox_state=$3
   socket_dir="$temp_root/sockets-$name"
+  current_phase="start proxy ($name)"
   mkdir -p "$socket_dir/agent"
   if [ "$sandbox_enabled" = true ]; then
     mkdir -p "$socket_dir/nw-sandbox"
