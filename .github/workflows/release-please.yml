@@ -24,11 +24,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # cladding's build.rs embeds the Linux mcp-run/run-remote helpers, which run
-  # inside cladding's arm64 sandbox containers on Apple silicon. GitHub's macOS
-  # runners can't run a Linux container to build them, so cross-compile the
-  # aarch64-linux (glibc, matching the Debian base image) helpers here and hand
-  # them to the macOS job as an artifact.
+  # Cladding embeds Linux mcp-run/run-remote helpers for its sandbox containers
+  # and a Linux Baffle executable for the proxy container. GitHub's macOS
+  # runners can't run a Linux container to build these artifacts, so build
+  # Baffle on native Linux runners and cross-compile the arm64 helpers here.
   build-helpers:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -62,10 +61,53 @@ jobs:
           name: mcp-run-helpers-aarch64-linux
           path: helpers/
 
+  # Build the pinned Baffle crate once for each supported Linux guest
+  # architecture. Reuse these validated binaries in the host release jobs.
+  build-baffle:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Baffle build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang cmake libclang-dev
+      - name: Install pinned Baffle
+        run: cargo install --locked --force --version '=0.2.0' --root "$RUNNER_TEMP/baffle-install" --bin baffle baffle-proxy
+      - name: Collect Baffle license notices
+        run: |
+          manifest=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path '*/baffle-proxy-0.2.0/Cargo.toml' -print -quit)
+          test -n "$manifest"
+          cargo fetch --locked --manifest-path "$manifest"
+          mkdir -p baffle
+          cp "$RUNNER_TEMP/baffle-install/bin/baffle" baffle/baffle
+          python3 scripts/collect-baffle-notices.py "$manifest" baffle
+      - name: Run Baffle in the proxy image
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/baffle/baffle:/usr/local/bin/baffle:ro" \
+            --entrypoint /usr/local/bin/baffle \
+            docker.io/ubuntu/squid:latest --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baffle-linux-${{ matrix.arch }}
+          path: baffle/
+
   # Only runs on the push that merges the release PR (release_created == true).
   # Builds a release binary per target and attaches it to the draft Release.
   upload-binaries:
-    needs: [release-please, build-helpers]
+    needs: [release-please, build-helpers, build-baffle]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     permissions:
       contents: write
@@ -75,11 +117,17 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            baffle_arch: x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
+            baffle_arch: aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: baffle-linux-${{ matrix.baffle_arch }}
+          path: baffle
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -99,6 +147,8 @@ jobs:
         run: |
           echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/helpers/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/helpers/run-remote" >> "$GITHUB_ENV"
+      - name: Point build.rs at the validated Linux Baffle binary
+        run: echo "CLADDING_BAFFLE_BIN=$GITHUB_WORKSPACE/baffle/baffle" >> "$GITHUB_ENV"
       # --locked is safe: the cargo-workspace plugin keeps the root Cargo.lock
       # in sync with the version bump on the release commit.
       - name: Build
@@ -109,8 +159,13 @@ jobs:
           bin=cladding
           staging="${bin}-${{ needs.release-please.outputs.tag_name }}-${{ matrix.target }}"
           mkdir "$staging"
+          mkdir -p "$staging/docs/features/baffle-integration"
           cp "target/${{ matrix.target }}/release/${bin}" "$staging/"
           cp README.md "$staging/"
+          cp docs/features/baffle-integration/embedded-baffle.md "$staging/docs/features/baffle-integration/"
+          cp baffle/THIRD_PARTY_NOTICES.md "$staging/"
+          cp -R baffle/licenses "$staging/"
+          if [ -f baffle/Cargo.lock ]; then cp baffle/Cargo.lock "$staging/baffle-Cargo.lock"; fi
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
       - name: Upload to release

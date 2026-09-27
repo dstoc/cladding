@@ -58,7 +58,7 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 
   `cladding init` creates these TOML files when missing and preserves existing edits on later runs. The network-sandbox session file is present even when that component is disabled.
 
-* Build images and refresh host-mounted binaries (`mcp-run`, `run-remote`, and sandbox helper wrappers) in `.cladding/tools/bin`:
+* Build images and refresh host-mounted binaries (`mcp-run`, `run-remote`, `baffle`, and sandbox helper wrappers) in `.cladding/tools/bin`. See the [embedded Baffle build and update procedure](docs/features/baffle-integration/embedded-baffle.md): Baffle builds need Rust 1.96 or newer and native build tools; cross-build hosts can provide `CLADDING_BAFFLE_BIN`.
 
   ```bash
   cladding build
@@ -146,6 +146,10 @@ cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - chec
 Cladding reuses a valid CA when the project starts again. If either CA file is missing, malformed, expired, or does not match its partner, Cladding reports an error and leaves the material in place. It does not rotate the CA automatically. The credentials directories use mode `0700`, the private key and secret files use `0600`, and the public certificate uses `0644` on Unix hosts.
 
 Users or external secret managers provision one file per Baffle symbolic secret in `secrets/`. Cladding creates this directory but does not create, copy, read, rewrite, or log secret values. Keep secret names in policy configuration and keep the values in these files. The proxy receives the credentials directory as a read-only mount. The agent and network sandbox receive a separate read-only mount of `ca.crt`; they do not receive the private key or secret files. The filesystem sandbox receives no CA mount.
+
+After Cladding creates the agent and enabled network-sandbox containers, it runs `podman exec --user 0` in each container. The command copies the public certificate to `/usr/local/share/ca-certificates/baffle.crt` and runs `update-ca-certificates`. The workload still runs as its configured unprivileged user. The default `Containerfile.cladding` sets `NODE_USE_SYSTEM_CA=1` so Node.js uses the updated system trust store.
+
+Custom agent and network-sandbox images must support the same initialization command. They need `sh`, `cp`, a writable `/usr/local/share/ca-certificates/` directory, and an `update-ca-certificates` command that adds certificates from that directory to the system trust store. Images with another trust-store layout can provide a compatible command in the image. Cladding does not provide a per-image initialization hook. Applications that use a private CA bundle or another application-specific trust store may need a separate import step. Certificate-pinned applications can reject intercepted connections even when the system trusts the CA.
 
 `cladding down` and `cladding destroy` remove runtime resources but keep the project CA and secrets. `cladding once` creates a separate temporary CA and empty secrets directory, then removes them during cleanup.
 

@@ -12,6 +12,7 @@ static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/config-template")
 
 static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
 static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
+static BAFFLE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/baffle"));
 
 const RUN_IN_NW_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_NW_SANDBOX_SOCKET:?RUN_NW_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_NW_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
 const RUN_IN_FS_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_FS_SANDBOX_SOCKET:?RUN_FS_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_FS_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
@@ -46,6 +47,7 @@ pub fn tool_files() -> Vec<(&'static str, &'static [u8])> {
     vec![
         ("mcp-run", MCP_RUN_BIN),
         ("run-remote", RUN_REMOTE_BIN),
+        ("baffle", BAFFLE_BIN),
         ("run-in-nw-sandbox", RUN_IN_NW_SANDBOX),
         ("run-in-fs-sandbox", RUN_IN_FS_SANDBOX),
     ]
@@ -398,5 +400,25 @@ mod tests {
         }
         fs::create_dir_all(&path).expect("create temporary directory");
         path
+    }
+
+    #[test]
+    fn baffle_is_embedded_as_a_linux_binary() {
+        let (_, baffle) = tool_files()
+            .into_iter()
+            .find(|(name, _)| *name == "baffle")
+            .expect("embedded Baffle tool");
+        assert!(baffle.len() >= 20);
+        assert_eq!(&baffle[..4], b"\x7fELF");
+        assert_eq!(baffle[4], 2, "Baffle must be 64-bit");
+        assert_eq!(baffle[5], 1, "Baffle must be little-endian");
+
+        let machine = u16::from_le_bytes([baffle[18], baffle[19]]);
+        let expected = match std::env::consts::ARCH {
+            "x86_64" => 62,
+            "aarch64" => 183,
+            arch => panic!("unsupported Cladding target architecture: {arch}"),
+        };
+        assert_eq!(machine, expected, "Baffle architecture must match Cladding");
     }
 }
