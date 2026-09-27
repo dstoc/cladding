@@ -18,6 +18,10 @@ runner_uid=$(id -u)
 runner_gid=$(id -g)
 container_uid=${BAFFLE_VALIDATION_CONTAINER_UID:-$runner_uid}
 container_gid=${BAFFLE_VALIDATION_CONTAINER_GID:-$runner_gid}
+socket_relay=false
+if [ "$(uname -s)" = Darwin ]; then
+  socket_relay=true
+fi
 current_phase="initialize validation"
 
 cleanup() {
@@ -169,6 +173,7 @@ run_proxy_startup() {
   if podman run --detach --name "$name" \
     --userns keep-id \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
+    --env "CLADDING_BAFFLE_SOCKET_RELAY=$socket_relay" \
     --volume "$project_root/tools/bin/baffle:/opt/tools/bin/baffle:ro" \
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
     --volume "$project_root/config:/opt/config:ro" \
@@ -233,6 +238,24 @@ run_proxy_startup() {
     test "$(readlink /run/baffle/control.sock)" = "$private_dir/control.sock"
     grep -q "^trusted_operator_uid = $expected_uid$" "$private_dir/daemon.toml"
     grep -q "^control_socket = \"$private_dir/control.sock\"$" "$private_dir/daemon.toml"
+    if [ "${CLADDING_BAFFLE_SOCKET_RELAY:-false}" = true ]; then
+      test "$(stat -c %a "$private_dir/data")" = 700
+      test "$(stat -c %u "$private_dir/data")" = "$expected_uid"
+      test "$(stat -c %a "$private_dir/data/agent")" = 700
+      test "$(stat -c %u "$private_dir/data/agent")" = "$expected_uid"
+      test -S "$private_dir/data/agent/proxy.sock"
+      test "$(stat -c %a "$private_dir/data/agent/proxy.sock")" = 600
+      test "$(stat -c %u "$private_dir/data/agent/proxy.sock")" = "$expected_uid"
+      if [ "${CLADDING_NW_SANDBOX_ENABLED:-false}" = true ]; then
+        test "$(stat -c %a "$private_dir/data/nw-sandbox")" = 700
+        test "$(stat -c %u "$private_dir/data/nw-sandbox")" = "$expected_uid"
+        test -S "$private_dir/data/nw-sandbox/proxy.sock"
+        test "$(stat -c %a "$private_dir/data/nw-sandbox/proxy.sock")" = 600
+        test "$(stat -c %u "$private_dir/data/nw-sandbox/proxy.sock")" = "$expected_uid"
+      else
+        test ! -e "$private_dir/data/nw-sandbox"
+      fi
+    fi
   '; then
     echo "Baffle private control socket or runtime configuration permissions are invalid" >&2
     podman logs "$name" >&2

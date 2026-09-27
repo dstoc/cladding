@@ -93,10 +93,16 @@ fn build_proxy_pod(
             "/opt/scripts/proxy_startup.sh".to_string(),
         ],
         workdir: None,
-        env: vec![RuntimeEnvVar {
-            name: "CLADDING_NW_SANDBOX_ENABLED".to_string(),
-            value: config.nw_sandbox_enabled().to_string(),
-        }],
+        env: vec![
+            RuntimeEnvVar {
+                name: "CLADDING_NW_SANDBOX_ENABLED".to_string(),
+                value: config.nw_sandbox_enabled().to_string(),
+            },
+            RuntimeEnvVar {
+                name: "CLADDING_BAFFLE_SOCKET_RELAY".to_string(),
+                value: cfg!(target_os = "macos").to_string(),
+            },
+        ],
         mounts,
         ports: Vec::new(),
         stdin: false,
@@ -488,6 +494,14 @@ mod tests {
         assert_eq!(
             env_value(&spec.proxy.containers[0], "CLADDING_NW_SANDBOX_ENABLED"),
             Some("true")
+        );
+        assert_eq!(
+            env_value(&spec.proxy.containers[0], "CLADDING_BAFFLE_SOCKET_RELAY"),
+            Some(if cfg!(target_os = "macos") {
+                "true"
+            } else {
+                "false"
+            })
         );
         assert!(spec.proxy.containers[0].ports.is_empty());
         assert_eq!(
