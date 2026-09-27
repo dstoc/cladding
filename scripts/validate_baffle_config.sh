@@ -21,7 +21,7 @@ fi
 mkdir "$temp_root/workspace"
 (
   cd "$temp_root/workspace"
-  "$cladding_bin" init baffle-validation >/dev/null
+  "$cladding_bin" init bafflevalidation >/dev/null
 )
 project_root="$temp_root/workspace/.cladding"
 socket_dir="$project_root/runtime/sockets/proxy"
