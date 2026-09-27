@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::runtime::{RuntimeContainer, RuntimePlacement, RuntimePod, RuntimeSpec};
 use anyhow::Context as _;
 use std::collections::HashMap;
@@ -54,6 +54,9 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     for pod in runtime_pods(spec) {
         for container in &pod.containers {
             container_run(pod.use_runsc, pod, container, verbose)?;
+            if should_install_baffle_ca(spec, pod) {
+                install_baffle_ca(container, verbose)?;
+            }
         }
     }
 
@@ -112,6 +115,9 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
 /// cannot cause cleanup to remove another project's resources.
 pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     let inventory = runtime_inventory(spec, verbose)?;
+    if inventory.is_empty() {
+        return Ok(());
+    }
     let exists = |kind: &str, name: &str| {
         inventory
             .resources
@@ -349,6 +355,55 @@ pub fn container_run(
     ensure_success(status, "podman run")
 }
 
+fn should_install_baffle_ca(spec: &RuntimeSpec, pod: &RuntimePod) -> bool {
+    pod.name == spec.agent.name
+        || spec
+            .nw_sandbox
+            .as_ref()
+            .is_some_and(|sandbox| sandbox.name == pod.name)
+}
+
+fn install_baffle_ca(container: &RuntimeContainer, verbose: bool) -> Result<()> {
+    let mut cmd = build_baffle_ca_install_command(&container.name);
+    trace_command(&cmd, verbose);
+    let status = cmd.status().with_context(|| {
+        format!(
+            "failed to run Baffle CA installation in execution container '{}'",
+            container.name
+        )
+    })?;
+    if status.success() {
+        return Ok(());
+    }
+
+    let code = status.code().unwrap_or(1);
+    eprintln!(
+        "error: failed to install the Baffle CA in execution container '{}'",
+        container.name
+    );
+    eprintln!(
+        "hint: ensure the image provides sh, cp, and update-ca-certificates with a writable system trust store"
+    );
+    Err(Error::CommandFailed {
+        context: "Baffle CA installation",
+        code,
+    })
+}
+
+fn build_baffle_ca_install_command(container_name: &str) -> Command {
+    let mut cmd = Command::new("podman");
+    cmd.args([
+        "exec",
+        "--user",
+        "0",
+        container_name,
+        "sh",
+        "-ec",
+        "cp /run/cladding/ca/baffle.crt /usr/local/share/ca-certificates/baffle.crt\nupdate-ca-certificates",
+    ]);
+    cmd
+}
+
 pub fn container_rm(container_name: &str, verbose: bool) -> Result<()> {
     let mut cmd = build_container_rm_command(container_name);
     trace_command(&cmd, verbose);
@@ -584,6 +639,57 @@ mod tests {
         cmd.get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn baffle_ca_install_runs_as_container_root_with_system_trust_update() {
+        let cmd = build_baffle_ca_install_command("demo-agent-instance");
+
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "exec",
+                "--user",
+                "0",
+                "demo-agent-instance",
+                "sh",
+                "-ec",
+                "cp /run/cladding/ca/baffle.crt /usr/local/share/ca-certificates/baffle.crt\nupdate-ca-certificates",
+            ]
+        );
+    }
+
+    #[test]
+    fn baffle_ca_install_targets_agent_and_enabled_network_sandbox_only() {
+        let pod = |name: &str| RuntimePod {
+            name: name.to_string(),
+            placement: RuntimePlacement::Standalone,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "none".to_string(),
+            containers: Vec::new(),
+            userns_keep_id: true,
+        };
+        let spec = RuntimeSpec {
+            project_name: "demo".to_string(),
+            project_root: "/tmp/demo/.cladding".into(),
+            use_runsc: false,
+            proxy: pod("demo-proxy"),
+            agent: pod("demo-agent"),
+            nw_sandbox: Some(pod("demo-nw-sandbox")),
+            fs_sandbox: Some(pod("demo-fs-sandbox")),
+        };
+
+        assert!(should_install_baffle_ca(&spec, &spec.agent));
+        assert!(should_install_baffle_ca(
+            &spec,
+            spec.nw_sandbox.as_ref().expect("network sandbox")
+        ));
+        assert!(!should_install_baffle_ca(&spec, &spec.proxy));
+        assert!(!should_install_baffle_ca(
+            &spec,
+            spec.fs_sandbox.as_ref().expect("filesystem sandbox")
+        ));
     }
 
     fn successful_status() -> std::process::ExitStatus {

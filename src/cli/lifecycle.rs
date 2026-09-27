@@ -310,7 +310,16 @@ fn cmd_up_inner(
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;
     *runtime_create_attempted = true;
-    runtime_create(&spec, verbose)
+    if let Err(startup_error) = runtime_create(&spec, verbose) {
+        if !fail_if_already_running
+            && let Err(cleanup_error) = runtime_cleanup_owned(&spec, verbose)
+        {
+            eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
+        }
+        return Err(startup_error);
+    }
+
+    Ok(())
 }
 
 pub(super) fn prepare_once_runtime_root(project_root: &std::path::Path) -> Result<()> {
