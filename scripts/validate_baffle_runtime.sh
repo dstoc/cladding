@@ -229,7 +229,7 @@ ready=false
 attempt=0
 phase="wait for Baffle daemon readiness"
 while [ "$attempt" -lt 60 ]; do
-  if podman exec "$proxy" baffle list >/dev/null 2>&1; then
+  if podman exec "$proxy" /opt/tools/bin/baffle list >/dev/null 2>&1; then
     ready=true
     break
   fi
@@ -447,7 +447,7 @@ if podman inspect "$sandbox" >/dev/null 2>&1; then
   echo "Cladding started a network-sandbox container while it was disabled" >&2
   exit 1
 fi
-sessions=$(podman exec "$proxy" baffle list)
+sessions=$(podman exec "$proxy" /opt/tools/bin/baffle list)
 printf '%s\n' "$sessions" | grep -F 'agent/proxy.sock' >/dev/null
 if printf '%s\n' "$sessions" | grep -F 'nw-sandbox/proxy.sock' >/dev/null; then
   echo "Baffle created a network-sandbox session while it was disabled" >&2
