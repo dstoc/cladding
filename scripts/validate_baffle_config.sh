@@ -234,9 +234,15 @@ run_proxy_startup() {
   fi
 
   current_phase="verify private proxy control socket ($name)"
-  if ! podman exec "$name" /bin/sh -ec '
+  control_output_file="$temp_root/control-check-$name.log"
+  if podman exec "$name" /bin/sh -exc '
     expected_uid=$(id -u)
     private_dir="/run/baffle/$expected_uid"
+    printf "control_check_identity: uid=%s gid=%s\n" "$expected_uid" "$(id -g)"
+    stat -c "control_check_metadata: mode=%a uid=%u gid=%g path=%n" \
+      /run/baffle "$private_dir" "$private_dir/daemon.toml" \
+      "$private_dir/control.sock" /run/baffle/control.sock || true
+    printf "control_check_alias_target: %s\n" "$(readlink /run/baffle/control.sock 2>&1 || true)"
     test "$(stat -c %a /run/baffle)" = 1733
     test -d "$private_dir"
     test "$(stat -c %a "$private_dir")" = 700
@@ -275,10 +281,15 @@ run_proxy_startup() {
         test ! -e "$data_dir/nw-sandbox"
       fi
     fi
-  '; then
-    echo "Baffle private control socket or runtime configuration permissions are invalid" >&2
+  ' >"$control_output_file" 2>&1; then
+    echo "Private Baffle control socket and runtime configuration verified for $name"
+  else
+    status=$?
+    cat "$control_output_file" >&2
+    report_failure_output "Baffle private control socket validation failed" \
+      "container=$name exit=$status" "$control_output_file"
     podman logs "$name" >&2
-    exit 1
+    exit "$status"
   fi
 
   if [ "$sandbox_enabled" = false ] && [ -S "$socket_dir/nw-sandbox/proxy.sock" ]; then
