@@ -1,0 +1,14 @@
+[daemon]
+control_socket = "/run/baffle/control.sock"
+socket_dir = "/run/cladding/proxy"
+trusted_operator_uid = 0
+create_mode = "file_only"
+session_config_dir = "/opt/config/proxy/sessions"
+
+[ca]
+certificate = "/opt/credentials/baffle/ca.crt"
+private_key = "/opt/credentials/baffle/ca-key.pem"
+
+[secrets]
+directory = "/opt/credentials/baffle/secrets"
+allowed = []

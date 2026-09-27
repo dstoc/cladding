@@ -1,9 +1,9 @@
 use super::DEFAULT_CLADDING_BUILD_IMAGE;
 use super::context::Context;
-use cladding::assets::{scripts_files, tool_files};
+use cladding::assets::tool_files;
 use cladding::config::ExecutionConfig;
 use cladding::error::{Error, Result};
-use cladding::fs_utils::{is_executable, path_is_symlink};
+use cladding::fs_utils::is_executable;
 use cladding::podman::runsc_available;
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashSet;
@@ -15,7 +15,6 @@ pub(super) fn cmd_check(context: &Context) -> Result<()> {
     let legacy_config_entries_present = check_legacy_config_entries(context);
     let config = context.load_config()?;
 
-    warn_obsolete_generated_paths(context);
     check_required_binaries(context, &config)?;
     check_runsc_runtime(&config, false)?;
     check_required_config_files(context, &config)?;
@@ -129,10 +128,13 @@ fn check_legacy_config_entries(context: &Context) -> bool {
 }
 
 fn required_config_entries(config: &ExecutionConfig) -> Vec<&'static str> {
-    let mut entries = vec!["agent/domains.lst", "agent/host_ports.lst"];
+    let mut entries = vec![
+        "proxy/daemon.toml",
+        "proxy/sessions/agent.toml",
+        "proxy/sessions/nw-sandbox.toml",
+    ];
     if config.nw_sandbox_enabled() {
         entries.push("nw_sandbox");
-        entries.push("nw_sandbox/domains.lst");
     }
     if config.fs_sandbox_enabled() {
         entries.push("fs_sandbox");
@@ -142,57 +144,7 @@ fn required_config_entries(config: &ExecutionConfig) -> Vec<&'static str> {
 }
 
 fn legacy_config_entries() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("sandbox_commands", "nw_sandbox"),
-        ("sandbox_domains.lst", "nw_sandbox/domains.lst"),
-        ("cli_domains.lst", "agent/domains.lst"),
-        ("cli_host_ports.lst", "agent/host_ports.lst"),
-        ("agent_domains.lst", "agent/domains.lst"),
-        ("agent_host_ports.lst", "agent/host_ports.lst"),
-        ("nw_sandbox_domains.lst", "nw_sandbox/domains.lst"),
-    ]
-}
-
-pub(super) fn warn_obsolete_generated_paths(context: &Context) {
-    for rel_path in ["scripts", "config/proxy/squid.conf", "config/squid.conf"] {
-        let path = context.project_root.join(rel_path);
-        if path.exists() || path_is_symlink(&path) {
-            eprintln!(
-                "warning: {rel_path} is no longer used and can be removed ({})",
-                path.display()
-            );
-        }
-    }
-}
-
-pub(super) fn report_runtime_script_mismatch(context: &Context, level: &str) -> Result<bool> {
-    let dst = context.project_root.join("runtime/scripts");
-    let mut mismatched = false;
-
-    for (rel_path, contents) in scripts_files() {
-        let target = dst.join(&rel_path);
-        match fs::read(&target) {
-            Ok(existing) => {
-                if existing != contents {
-                    eprintln!(
-                        "{level}: runtime/scripts/{} differs from embedded version",
-                        rel_path.display()
-                    );
-                    mismatched = true;
-                }
-            }
-            Err(_) => {
-                eprintln!("{level}: runtime/scripts/{} is missing", rel_path.display());
-                mismatched = true;
-            }
-        }
-    }
-
-    if mismatched {
-        eprintln!("hint: run cladding up to regenerate runtime scripts");
-    }
-
-    Ok(mismatched)
+    &[("sandbox_commands", "nw_sandbox")]
 }
 
 pub(super) fn check_required_host_paths(spec: &RuntimeSpec) -> Result<()> {
@@ -324,7 +276,25 @@ mod tests {
         let config = execution_config(false, false, Vec::new());
         assert_eq!(
             required_config_entries(&config),
-            vec!["agent/domains.lst", "agent/host_ports.lst"]
+            vec![
+                "proxy/daemon.toml",
+                "proxy/sessions/agent.toml",
+                "proxy/sessions/nw-sandbox.toml",
+            ]
+        );
+    }
+
+    #[test]
+    fn required_config_entries_keep_network_sandbox_policy_files() {
+        let config = execution_config(true, false, Vec::new());
+        assert_eq!(
+            required_config_entries(&config),
+            vec![
+                "proxy/daemon.toml",
+                "proxy/sessions/agent.toml",
+                "proxy/sessions/nw-sandbox.toml",
+                "nw_sandbox",
+            ]
         );
     }
 
@@ -334,8 +304,9 @@ mod tests {
         assert_eq!(
             required_config_entries(&config),
             vec![
-                "agent/domains.lst",
-                "agent/host_ports.lst",
+                "proxy/daemon.toml",
+                "proxy/sessions/agent.toml",
+                "proxy/sessions/nw-sandbox.toml",
                 "fs_sandbox",
                 "fs_sandbox/main.rego",
             ]
@@ -343,58 +314,38 @@ mod tests {
     }
 
     #[test]
-    fn legacy_config_entries_cover_pre_rename_and_flat_layouts() {
+    fn legacy_config_entries_preserve_command_policy_validation() {
         assert_eq!(
             legacy_config_entries(),
-            &[
-                ("sandbox_commands", "nw_sandbox"),
-                ("sandbox_domains.lst", "nw_sandbox/domains.lst"),
-                ("cli_domains.lst", "agent/domains.lst"),
-                ("cli_host_ports.lst", "agent/host_ports.lst"),
-                ("agent_domains.lst", "agent/domains.lst"),
-                ("agent_host_ports.lst", "agent/host_ports.lst"),
-                ("nw_sandbox_domains.lst", "nw_sandbox/domains.lst"),
-            ]
+            &[("sandbox_commands", "nw_sandbox")]
         );
     }
 
     #[test]
-    fn check_legacy_config_entries_detects_old_layout_paths() {
-        let temp = create_temp_dir("legacy-config-paths");
+    fn check_legacy_config_entries_ignores_squid_allow_lists() {
+        let temp = create_temp_dir("squid-allow-lists");
         let config_dir = temp.join("config");
         fs::create_dir_all(&config_dir).expect("create config dir");
-        fs::write(config_dir.join("cli_domains.lst"), "legacy").expect("write legacy config");
+        fs::write(config_dir.join("cli_domains.lst"), "legacy").expect("write old domain list");
+        fs::write(config_dir.join("agent_host_ports.lst"), "legacy")
+            .expect("write old host-port list");
+
+        let context = Context::default_for_project(temp);
+
+        assert!(!check_legacy_config_entries(&context));
+    }
+
+    #[test]
+    fn check_legacy_config_entries_still_detects_old_command_policy_path() {
+        let temp = create_temp_dir("legacy-command-policy");
+        let config_dir = temp.join("config");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(config_dir.join("sandbox_commands"))
+            .expect("create legacy command policy dir");
 
         let context = Context::default_for_project(temp);
 
         assert!(check_legacy_config_entries(&context));
-    }
-
-    #[test]
-    fn report_runtime_script_mismatch_detects_drift() {
-        let temp = create_temp_dir("runtime-script-mismatch");
-        let scripts_dir = temp.join("runtime/scripts");
-        fs::create_dir_all(&scripts_dir).expect("create scripts dir");
-        for (rel_path, contents) in scripts_files() {
-            let path = scripts_dir.join(rel_path);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("create script parent");
-            }
-            fs::write(path, contents).expect("write script");
-        }
-
-        let context = Context::default_for_project(temp);
-        assert!(!report_runtime_script_mismatch(&context, "error").expect("check scripts"));
-
-        fs::write(
-            context
-                .project_root
-                .join("runtime/scripts/proxy_startup.sh"),
-            b"#!/bin/sh\nexit 0\n",
-        )
-        .expect("modify script");
-
-        assert!(report_runtime_script_mismatch(&context, "error").expect("check scripts"));
     }
 
     #[test]

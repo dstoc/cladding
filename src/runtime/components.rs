@@ -52,7 +52,6 @@ impl RuntimeSpec {
                 &project_root,
                 &workspace_root,
                 config,
-                &names,
                 component_name,
                 &custom_mounts,
             )
@@ -86,32 +85,12 @@ fn build_proxy_pod(
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mounts = build_proxy_mounts(project_root, custom_mounts);
-    let mut env = vec![
-        RuntimeEnvVar {
-            name: "CLADDING_PROXY_NAME".to_string(),
-            value: names.proxy_name.clone(),
-        },
-        RuntimeEnvVar {
-            name: "CLADDING_AGENT_NAME".to_string(),
-            value: names.agent_name.clone(),
-        },
-    ];
-    if let Some(nw_name) = names.nw_sandbox_name.as_ref() {
-        env.push(RuntimeEnvVar {
-            name: "CLADDING_SANDBOX_NAME".to_string(),
-            value: nw_name.clone(),
-        });
-    }
-
     let mut containers = vec![RuntimeContainer {
         name: runtime_container_name(&names.proxy_name),
         image: config.proxy_image().to_string(),
-        command: vec![
-            "/bin/sh".to_string(),
-            "/opt/scripts/proxy_startup.sh".to_string(),
-        ],
+        command: Vec::new(),
         workdir: None,
-        env,
+        env: Vec::new(),
         mounts,
         ports: vec![3128, 3129],
         stdin: false,
@@ -179,14 +158,6 @@ fn build_agent_pod(
                 .to_string(),
         },
         RuntimeEnvVar {
-            name: "CLADDING_PROXY_NAME".to_string(),
-            value: names.proxy_name.clone(),
-        },
-        RuntimeEnvVar {
-            name: "CLADDING_AGENT_NAME".to_string(),
-            value: names.agent_name.clone(),
-        },
-        RuntimeEnvVar {
             name: "http_proxy".to_string(),
             value: format!("http://{LOOPBACK}:3128"),
         },
@@ -211,14 +182,7 @@ fn build_agent_pod(
             value: build_no_proxy(),
         },
     ];
-    if let Some(nw_name) = names.nw_sandbox_name.as_ref() {
-        env.insert(
-            3,
-            RuntimeEnvVar {
-                name: "CLADDING_SANDBOX_NAME".to_string(),
-                value: nw_name.clone(),
-            },
-        );
+    if names.nw_sandbox_name.is_some() {
         env.push(RuntimeEnvVar {
             name: "RUN_NW_SANDBOX_SOCKET".to_string(),
             value: runtime_socket_mount_path(RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH, "run.sock"),
@@ -259,7 +223,6 @@ fn build_nw_sandbox_pod(
     project_root: &Path,
     workspace_root: &Path,
     config: &ExecutionConfig,
-    names: &RuntimeNames,
     component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
@@ -292,18 +255,6 @@ fn build_nw_sandbox_pod(
         RuntimeEnvVar {
             name: "POLICY_DIR".to_string(),
             value: "/opt/config/nw_sandbox".to_string(),
-        },
-        RuntimeEnvVar {
-            name: "CLADDING_PROXY_NAME".to_string(),
-            value: names.proxy_name.clone(),
-        },
-        RuntimeEnvVar {
-            name: "CLADDING_AGENT_NAME".to_string(),
-            value: names.agent_name.clone(),
-        },
-        RuntimeEnvVar {
-            name: "CLADDING_SANDBOX_NAME".to_string(),
-            value: component_name.to_string(),
         },
         RuntimeEnvVar {
             name: "http_proxy".to_string(),
@@ -580,6 +531,7 @@ mod tests {
         );
         assert_eq!(spec.proxy.containers[0].name, "demo-proxy-instance");
         assert_eq!(spec.proxy.containers[1].name, "demo-proxy-bridge");
+        assert!(spec.proxy.containers[0].command.is_empty());
         assert_eq!(
             spec.proxy.containers[0].image,
             "docker.io/ubuntu/squid:latest"
@@ -596,6 +548,8 @@ mod tests {
 
         let proxy_bridge = container(&spec.proxy, "demo-proxy-bridge");
         let proxy = container(&spec.proxy, "demo-proxy-instance");
+        assert!(mount_paths(proxy).contains("/opt/config"));
+        assert!(!mount_paths(proxy).contains("/opt/scripts"));
         let agent = container(&spec.agent, "demo-agent-instance");
         let nw = container(
             spec.nw_sandbox.as_ref().expect("nw pod"),
@@ -636,10 +590,7 @@ mod tests {
                 .any(|arg| arg.contains("proxy/nw-sandbox/proxy.sock"))
         );
         assert!(nw.command.iter().any(|arg| arg.contains("mcp-run")));
-        assert_eq!(
-            env_value(proxy, "CLADDING_SANDBOX_NAME"),
-            Some("demo-nw-sandbox")
-        );
+        assert_eq!(env_value(proxy, "CLADDING_SANDBOX_NAME"), None);
         assert_eq!(
             env_value(agent, "RUN_NW_SANDBOX_SOCKET"),
             Some("/run/cladding/run/nw-sandbox/run.sock")
@@ -804,10 +755,7 @@ mod tests {
                 .iter()
                 .all(|container| container.name != "demo-proxy-nw-sandbox-proxy-socket")
         );
-        assert_eq!(
-            env_value(proxy, "CLADDING_SANDBOX_NAME"),
-            Some("demo-nw-sandbox")
-        );
+        assert_eq!(env_value(proxy, "CLADDING_SANDBOX_NAME"), None);
         assert_eq!(
             env_value(agent, "RUN_NW_SANDBOX_SOCKET"),
             Some("/run/cladding/run/nw-sandbox/run.sock")

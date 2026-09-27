@@ -34,13 +34,13 @@ run-in-nw-sandbox -- cargo fetch
 2. If the error mentions a missing `--` delimiter, add it.
 3. If the error mentions missing local env vars, set them and retry.
 4. If the error indicates a policy violation, inspect the Rego policy directory.
-5. If the error indicates a network block, inspect the domain allowlist.
+5. If the error indicates a network block, inspect the network-sandbox Baffle session rules.
 
-## Policy and Allowlist Checks
+## Policy and Network Rule Checks
 
 - Inspect Rego policy at `/opt/config/nw_sandbox/` using shell commands (`ls`, `rg`, or `less`).
 - The decision query is `data.sandbox.main.allow`, so check `main.rego` and the command package (for example `package sandbox.curl`).
-- Inspect allowed domains at `/opt/config/nw_sandbox/domains.lst`.
+- Inspect network access rules at `/opt/config/proxy/sessions/nw-sandbox.toml`.
 - Match arguments against Rego rules in the command package (for example `package sandbox.curl`) and adjust commands accordingly.
 
 ## Error Patterns and Fixes
@@ -49,4 +49,4 @@ run-in-nw-sandbox -- cargo fetch
 - "missing required '--' delimiter": insert `--` before the command.
 - "Command not allowed": executable not in policy.
 - "Policy deny-all is active" or "Policy evaluation failed": fix Rego syntax or rule logic in `/opt/config/nw_sandbox/`.
-- Network timeouts or connection failures: check domain allowlist and use only listed domains.
+- Network timeouts or connection failures: check the network-sandbox session rules and use only listed hosts and ports.

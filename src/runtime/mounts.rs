@@ -26,22 +26,13 @@ pub(super) fn build_proxy_mounts(
     project_root: &Path,
     _custom_mounts: &[RuntimeCustomMount],
 ) -> Vec<RuntimeMount> {
-    vec![
-        RuntimeMount {
-            mount_path: "/opt/config".to_string(),
-            read_only: true,
-            source: RuntimeMountSource::HostPath {
-                path: project_root.join("config"),
-            },
+    vec![RuntimeMount {
+        mount_path: "/opt/config".to_string(),
+        read_only: true,
+        source: RuntimeMountSource::HostPath {
+            path: project_root.join("config"),
         },
-        RuntimeMount {
-            mount_path: "/opt/scripts".to_string(),
-            read_only: true,
-            source: RuntimeMountSource::HostPath {
-                path: project_root.join("runtime/scripts"),
-            },
-        },
-    ]
+    }]
 }
 
 pub(super) fn build_agent_mounts(
