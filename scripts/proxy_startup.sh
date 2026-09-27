@@ -32,7 +32,8 @@ require_directory() {
 
 stop_daemon() {
     if [ -n "$daemon_pid" ]; then
-        kill -TERM "$daemon_pid" 2>/dev/null || true
+        # Baffle handles SIGINT with an orderly shutdown that removes session sockets.
+        kill -INT "$daemon_pid" 2>/dev/null || true
         wait "$daemon_pid" 2>/dev/null || true
         daemon_pid=
     fi
