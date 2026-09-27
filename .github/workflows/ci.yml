@@ -100,26 +100,49 @@ jobs:
         run: cargo build --locked --bin cladding
       - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/bin/baffle"
-      - name: Stage Linux assets for Podman machine validation
+
+  baffle-podman-machine-assets:
+    runs-on: ubuntu-24.04-arm
+    env:
+      BAFFLE_PROXY_VERSION: 0.2.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - name: Install Baffle build dependencies
         run: |
-          mkdir -p "$RUNNER_TEMP/cladding-baffle-tools/bin"
-          cp "$RUNNER_TEMP/baffle/bin/baffle" "$RUNNER_TEMP/cladding-baffle-tools/bin/baffle"
-          cp "$CLADDING_MCP_RUN_BIN" "$RUNNER_TEMP/cladding-baffle-tools/bin/mcp-run"
-          cp "$CLADDING_RUN_REMOTE_BIN" "$RUNNER_TEMP/cladding-baffle-tools/bin/run-remote"
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake libclang-dev
+      - name: Install pinned Baffle binary
+        run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
+      - name: Set Baffle binary path
+        run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/bin/baffle" >> "$GITHUB_ENV"
+      - name: Build Linux ARM64 execution helpers
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
+      - name: Verify embedded helper inputs
+        run: |
+          test -x "$CLADDING_BAFFLE_BIN"
+          test -x target/mcp-run/release/mcp-run
+          test -x target/mcp-run/release/run-remote
+      - name: Stage ARM64 assets for Podman machine validation
+        run: |
+          mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-arm64/bin"
+          cp "$CLADDING_BAFFLE_BIN" "$RUNNER_TEMP/cladding-baffle-tools-arm64/bin/baffle"
+          cp target/mcp-run/release/mcp-run "$RUNNER_TEMP/cladding-baffle-tools-arm64/bin/mcp-run"
+          cp target/mcp-run/release/run-remote "$RUNNER_TEMP/cladding-baffle-tools-arm64/bin/run-remote"
       - uses: actions/upload-artifact@v4
         with:
-          name: cladding-baffle-linux-tools
-          path: ${{ runner.temp }}/cladding-baffle-tools
+          name: cladding-baffle-linux-tools-arm64
+          path: ${{ runner.temp }}/cladding-baffle-tools-arm64
           if-no-files-found: error
 
   baffle-podman-machine:
-    runs-on: macos-15-intel
-    needs: baffle-config
+    runs-on: macos-15
+    needs: [baffle-config, baffle-podman-machine-assets]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: cladding-baffle-linux-tools
+          name: cladding-baffle-linux-tools-arm64
           path: ${{ runner.temp }}/linux-tools
       - uses: dtolnay/rust-toolchain@1.96
       - name: Set prebuilt Linux binary paths
