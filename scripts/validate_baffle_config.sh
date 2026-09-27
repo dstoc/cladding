@@ -26,8 +26,8 @@ mkdir "$temp_root/workspace"
 project_root="$temp_root/workspace/.cladding"
 socket_dir="$project_root/runtime/sockets/proxy"
 control_dir="$temp_root/control"
-mkdir -p "$socket_dir" "$control_dir"
-chmod 700 "$control_dir"
+mkdir -p "$socket_dir/agent" "$socket_dir/nw-sandbox" "$control_dir"
+chmod 700 "$socket_dir" "$control_dir"
 
 podman run --pull=always --detach --name "$container_name" \
   --volume "$baffle_bin:/usr/local/bin/baffle:ro" \
