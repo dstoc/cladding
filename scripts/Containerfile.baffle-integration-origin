@@ -1,0 +1,9 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY baffle_test_origin.py /usr/local/bin/baffle_test_origin.py
+COPY www /fixtures/www
+COPY server.crt /fixtures/server.crt
+COPY server.key /fixtures/server.key
+
+ENTRYPOINT ["python3", "/usr/local/bin/baffle_test_origin.py"]

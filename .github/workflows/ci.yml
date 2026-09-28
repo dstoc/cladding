@@ -72,7 +72,7 @@ jobs:
       - name: Install Baffle build and rootless Podman dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang cmake libclang-dev podman uidmap slirp4netns fuse-overlayfs ca-certificates curl gnupg
+          sudo apt-get install -y build-essential clang cmake libclang-dev podman uidmap slirp4netns fuse-overlayfs ca-certificates curl gnupg git jq openssl
           sudo install -d -m 0755 /usr/share/keyrings
           curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
@@ -103,9 +103,16 @@ jobs:
       - name: Build Cladding CLI
         run: cargo build --locked --bin cladding
       - name: Check Baffle validation shell syntax
-        run: sh -n scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh
+        run: |
+          for script in scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh scripts/validate_baffle_runtime.sh; do
+            sh -n "$script"
+          done
       - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/bin/baffle"
+      - name: Validate Baffle policy and client workloads with the default runtime
+        run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_baffle_runtime.sh default
+      - name: Validate Baffle policy and client workloads with runsc
+        run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_baffle_runtime.sh runsc
 
   baffle-podman-machine-assets:
     runs-on: ubuntu-24.04

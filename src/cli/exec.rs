@@ -334,7 +334,8 @@ fn reload_proxy_args(project_name: &str) -> [String; 5] {
     [
         "exec".to_string(),
         runtime_container_name(&project_component_name(project_name, "proxy")),
-        "baffle".to_string(),
+        // The proxy image does not add /opt/tools/bin to PATH.
+        "/opt/tools/bin/baffle".to_string(),
         "reload".to_string(),
         "--all".to_string(),
     ]
@@ -356,7 +357,13 @@ mod reload_proxy_tests {
     fn reload_proxy_targets_all_baffle_sessions_in_the_proxy_container() {
         assert_eq!(
             reload_proxy_args("demo"),
-            ["exec", "demo-proxy-instance", "baffle", "reload", "--all"]
+            [
+                "exec",
+                "demo-proxy-instance",
+                "/opt/tools/bin/baffle",
+                "reload",
+                "--all"
+            ]
         );
     }
 }
