@@ -289,6 +289,21 @@ expect_curl_denied() {
   fi
 }
 
+report_client_failure() {
+  container=$1
+  output_file=$2
+  client_state=$(podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
+    "$container" 2>&1 || true)
+  command_output=$(tail -n 15 "$output_file" 2>/dev/null || true)
+  client_logs=$(podman logs "$container" 2>&1 | tail -n 15 || true)
+  printf 'Client container state: %s\nCommand output:\n%s\nContainer logs:\n%s\n' \
+    "$client_state" "$command_output" "$client_logs" >&2
+  diagnostic=$(printf 'container=%s; state=%s; command_output=%s; logs=%s' \
+    "$container" "$client_state" "$command_output" "$client_logs" \
+    | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-3000)
+  printf '::error title=Baffle client workload diagnostics::%s\n' "$diagnostic"
+}
+
 phase="check execution-container isolation and installed trust"
 for component in agent nw-sandbox; do
   if [ "$component" = agent ]; then
@@ -337,13 +352,30 @@ expect_curl_denied "$sandbox" https://localhost:9443/unauthorized/path
 phase="deny plaintext HTTP request"
 expect_curl_denied "$agent" http://localhost:8080/authorized/plaintext
 
-phase="exercise curl, Git, and Node.js through intercepted TLS"
-podman exec --env no_proxy= --env NO_PROXY= "$agent" git clone \
-  https://localhost:8443/authorized/repo.git /tmp/baffle-git-clone >/dev/null 2>&1
+phase="clone Git fixture through intercepted TLS"
+git_output="$temp_root/git-clone.log"
+if podman exec --env no_proxy= --env NO_PROXY= "$agent" git clone \
+  https://localhost:8443/authorized/repo.git /tmp/baffle-git-clone >"$git_output" 2>&1; then
+  :
+else
+  status=$?
+  report_client_failure "$agent" "$git_output"
+  exit "$status"
+fi
+phase="verify Git fixture clone content"
 podman exec "$agent" test -s /tmp/baffle-git-clone/README.md
+phase="copy Node.js integration test"
 podman cp "$script_dir/baffle_node_integration.js" "$agent:/tmp/baffle_node_integration.js" >/dev/null
-podman exec --env no_proxy= --env NO_PROXY= --env NODE_USE_ENV_PROXY=1 \
-  "$agent" node --use-env-proxy /tmp/baffle_node_integration.js
+phase="Node.js HTTPS request through intercepted TLS"
+node_output="$temp_root/node-integration.log"
+if podman exec --env no_proxy= --env NO_PROXY= --env NODE_USE_ENV_PROXY=1 \
+  "$agent" node --use-env-proxy /tmp/baffle_node_integration.js >"$node_output" 2>&1; then
+  :
+else
+  status=$?
+  report_client_failure "$agent" "$node_output"
+  exit "$status"
+fi
 
 phase="check Baffle rejects missing secret material"
 cat > "$project_root/config/proxy/sessions/missing-secret.toml" <<'EOF'
