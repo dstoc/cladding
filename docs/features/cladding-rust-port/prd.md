@@ -1,5 +1,9 @@
 # PRD: Rust Port of `cladding`
 
+> Historical proposal. The Squid reload and configuration requirements below
+> describe the pre-Baffle runtime. See `README.md` and
+> `docs/features/current-runtime-summary.md` for current behavior.
+
 ## Objective
 Replace the `./cladding` shell script with a Rust binary that preserves the exact CLI, behavior, and semantics while reducing script complexity and removing external tool dependencies (other than `podman`). The binary should be self-contained: it embeds and materializes `Containerfile.cladding`, `config-template/`, and runtime scripts; `pods.yaml` is rendered in-memory and piped to `podman`.
 

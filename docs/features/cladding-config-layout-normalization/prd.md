@@ -1,5 +1,9 @@
 # PRD: Config Layout Normalization
 
+> Historical proposal. Its Squid config paths describe the pre-Baffle layout.
+> Current proxy configuration uses native Baffle TOML under
+> `.cladding/config/proxy/`; see `docs/features/proxy/summary.md`.
+
 ## Objective
 Normalize the `.cladding/config` layout so component-specific config lives under the component directory that consumes it:
 

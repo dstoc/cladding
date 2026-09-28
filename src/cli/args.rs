@@ -29,13 +29,13 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum CommandSpec {
-    /// Build local container images
+    /// Build local container images and refresh embedded tools
     Build,
-    /// Create config and default mount directories
+    /// Create default config, Baffle credentials, and mount directories
     Init { name: Option<String> },
     /// Check requirements
     Check,
-    /// Start the system
+    /// Start the proxy and enabled execution containers
     Up {
         /// Show Podman commands before executing them
         #[arg(short, long)]
@@ -234,6 +234,7 @@ impl LogsTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn version_flag_displays_version() {
@@ -242,6 +243,26 @@ mod tests {
             Err(err) => err,
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn help_summaries_describe_the_baffle_workflow() {
+        let mut command = Cli::command();
+        for (name, expected) in [
+            ("init", "Baffle credentials"),
+            ("build", "embedded tools"),
+            ("up", "proxy"),
+            ("reload-proxy", "Baffle sessions"),
+        ] {
+            let summary = command
+                .find_subcommand_mut(name)
+                .and_then(|subcommand| subcommand.get_about())
+                .unwrap_or_else(|| panic!("missing help summary for {name}"));
+            assert!(
+                summary.to_string().contains(expected),
+                "{name} help summary does not mention {expected:?}: {summary}"
+            );
+        }
     }
 
     #[test]

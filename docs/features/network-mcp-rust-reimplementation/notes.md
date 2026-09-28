@@ -1,5 +1,9 @@
 # Notes: Network MCP Rust Reimplementation
 
+> Historical research notes. The infrastructure details below predate the
+> Baffle runtime. See `docs/features/current-runtime-summary.md` for the
+> current proxy architecture.
+
 ## Research Scope
 - Feature request: Reimplement `clawmini/docs/03_network_mcp` server in Rust, based on existing TS implementation in `clawmini/mcp-servers/network`, using initialized Cargo project `mcp-run`.
 - Constraint from request: target hardened container already provides `http_proxy`, `https_proxy`, `no_proxy`, etc. Do not include proxy setup/configuration, and do not keep existing env filtering behavior.

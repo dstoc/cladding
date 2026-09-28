@@ -1,5 +1,9 @@
 # Proxy CONNECT Failures in `agent` (2026-02-17)
 
+> Historical incident record. Squid references describe the proxy in use at
+> the time of this issue. Current proxy behavior uses Baffle and is documented
+> in `docs/features/current-runtime-summary.md`.
+
 ## Status
 - Resolved.
 - Current proxy path is Squid-based, not HAProxy-based.

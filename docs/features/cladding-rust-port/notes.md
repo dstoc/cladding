@@ -1,5 +1,9 @@
 # Research Notes: cladding Rust port
 
+> Historical research notes. Squid references below describe the runtime at
+> the time of the Rust port. Current behavior is documented in
+> `docs/features/current-runtime-summary.md`.
+
 ## Existing cladding script behavior (./cladding)
 - Entry point: POSIX shell script with subcommands `build`, `init [name]`, `check`, `up`, `down`, `destroy`, `run`, `reload-proxy`, `help`.
 - Discovers project root by searching for a `.cladding` directory in cwd or parents.
