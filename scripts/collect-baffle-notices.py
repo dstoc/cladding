@@ -8,31 +8,9 @@ import sys
 from pathlib import Path
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
-        print(
-            "usage: collect-baffle-notices.py <baffle-Cargo.toml> <output-dir>",
-            file=sys.stderr,
-        )
-        return 2
-
-    manifest = Path(sys.argv[1]).resolve()
-    output_dir = Path(sys.argv[2]).resolve()
-    metadata = subprocess.run(
-        [
-            "cargo",
-            "metadata",
-            "--manifest-path",
-            str(manifest),
-            "--locked",
-            "--format-version",
-            "1",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    packages = json.loads(metadata.stdout)["packages"]
+def collect_notices(
+    packages: list[dict], output_dir: Path, lockfile: Path | None = None
+) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     license_dir = output_dir / "licenses"
     license_dir.mkdir(exist_ok=True)
@@ -82,7 +60,10 @@ def main() -> int:
         if license_files:
             lines.append(
                 "  Included text: "
-                + ", ".join(f"`licenses/{safe_name}-{version}/{name}`" for name in license_files)
+                + ", ".join(
+                    f"`licenses/{safe_name}-{version}/{file_name}`"
+                    for file_name in license_files
+                )
                 + "."
             )
         else:
@@ -90,9 +71,38 @@ def main() -> int:
 
     (output_dir / "THIRD_PARTY_NOTICES.md").write_text("\n".join(lines) + "\n")
 
-    lockfile = manifest.parent / "Cargo.lock"
-    if lockfile.is_file():
+    if lockfile is not None and lockfile.is_file():
         shutil.copy2(lockfile, output_dir / "Cargo.lock")
+
+    return missing_licenses
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print(
+            "usage: collect-baffle-notices.py <baffle-Cargo.toml> <output-dir>",
+            file=sys.stderr,
+        )
+        return 2
+
+    manifest = Path(sys.argv[1]).resolve()
+    output_dir = Path(sys.argv[2]).resolve()
+    metadata = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--manifest-path",
+            str(manifest),
+            "--locked",
+            "--format-version",
+            "1",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    packages = json.loads(metadata.stdout)["packages"]
+    missing_licenses = collect_notices(packages, output_dir, manifest.parent / "Cargo.lock")
 
     if missing_licenses:
         print(

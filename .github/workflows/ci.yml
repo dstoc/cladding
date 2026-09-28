@@ -22,31 +22,99 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+  build-baffle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      BAFFLE_PROXY_VERSION: 0.2.0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-baffle
+          shared-key: ${{ matrix.arch }}-${{ env.BAFFLE_PROXY_VERSION }}
+          cache-all-crates: true
+      - name: Install Baffle build and verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang cmake file libclang-dev
+      - name: Install pinned Baffle
+        run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
+      - name: Verify the Baffle architecture
+        run: |
+          description=$(file -b "$RUNNER_TEMP/baffle/bin/baffle")
+          printf '%s\n' "$description"
+          case "${{ matrix.arch }}:$description" in
+            x86_64:*"ELF 64-bit"*x86-64*) ;;
+            aarch64:*"ELF 64-bit"*aarch64*) ;;
+            *) echo "Baffle is not the expected Linux ${{ matrix.arch }} executable" >&2; exit 1 ;;
+          esac
+      - name: Build the default proxy runtime image
+        run: docker build --file Containerfile.proxy --tag cladding-baffle-proxy-check .
+      - name: Start Baffle in the default proxy runtime image
+        run: |
+          docker run --rm \
+            -v "$RUNNER_TEMP/baffle/bin/baffle:/opt/tools/bin/baffle:ro" \
+            --entrypoint /opt/tools/bin/baffle \
+            cladding-baffle-proxy-check --help
+      - name: Build Cladding with the target Baffle executable
+        run: CLADDING_BAFFLE_BIN="$RUNNER_TEMP/baffle/bin/baffle" cargo build --locked --bin cladding
+      - name: Collect Baffle redistribution notices
+        if: matrix.arch == 'x86_64'
+        run: |
+          manifest=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path "*/baffle-proxy-$BAFFLE_PROXY_VERSION/Cargo.toml" -print -quit)
+          test -n "$manifest"
+          cargo fetch --locked --manifest-path "$manifest"
+          mkdir -p baffle
+          cp "$RUNNER_TEMP/baffle/bin/baffle" baffle/baffle
+          python3 scripts/collect-baffle-notices.py "$manifest" baffle
+      - name: Stage Baffle executable
+        if: matrix.arch == 'aarch64'
+        run: |
+          mkdir -p baffle
+          cp "$RUNNER_TEMP/baffle/bin/baffle" baffle/baffle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baffle-linux-${{ matrix.arch }}
+          path: baffle/
+          if-no-files-found: error
+
   test:
+    needs: build-baffle
     runs-on: ubuntu-latest
     env:
+      BAFFLE_PROXY_VERSION: 0.2.0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CLADDING_MCP_RUN_BIN: ${{ github.workspace }}/target/mcp-run/release/mcp-run
       CLADDING_RUN_REMOTE_BIN: ${{ github.workspace }}/target/mcp-run/release/run-remote
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: baffle-linux-x86_64
+          path: ${{ runner.temp }}/baffle
       - uses: dtolnay/rust-toolchain@1.96
         with:
           components: clippy
-      - name: Install Baffle build dependencies
+      - name: Set the validated Baffle binary path
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake libclang-dev
+          chmod 0755 "$RUNNER_TEMP/baffle/baffle"
+          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
-          # Start a fresh cache and keep workspace artifacts for the helper build.
-          prefix-key: v1-rust
-          # Refresh cached helper artifacts when helper sources or CI build settings change.
-          key: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build.rs', 'crates/mcp-run/src/**', 'crates/mcp-run/Cargo.toml', '.github/workflows/ci.yml') }}
+          prefix-key: v1-baffle
+          shared-key: x86_64-${{ env.BAFFLE_PROXY_VERSION }}
+          cache-all-crates: true
           cache-workspace-crates: true
-      - name: Install pinned Baffle
-        run: cargo install --locked --force --version '=0.2.0' --root "$RUNNER_TEMP/baffle-install" --bin baffle baffle-proxy
-      - name: Set Baffle binary path
-        run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle-install/bin/baffle" >> "$GITHUB_ENV"
       - name: Build embedded helpers
         run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
       - name: Verify embedded helpers
@@ -58,21 +126,31 @@ jobs:
         run: cargo build --locked -p cladding --bin cladding
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test Baffle redistribution notices
+        run: python3 scripts/test_collect_baffle_notices.py
       - name: Test
         run: cargo test --locked
 
   baffle-config:
+    needs: build-baffle
     runs-on: ubuntu-latest
     env:
-      BAFFLE_PROXY_VERSION: 0.2.0
       CLADDING_TEST_RUNSC: "true"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: baffle-linux-x86_64
+          path: ${{ runner.temp }}/baffle
       - uses: dtolnay/rust-toolchain@1.96
-      - name: Install Baffle build and rootless Podman dependencies
+      - name: Set the validated Baffle binary path
+        run: |
+          chmod 0755 "$RUNNER_TEMP/baffle/baffle"
+          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
+      - name: Install rootless Podman dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang cmake libclang-dev podman uidmap slirp4netns fuse-overlayfs ca-certificates curl gnupg git jq openssl
+          sudo apt-get install -y build-essential podman uidmap slirp4netns fuse-overlayfs ca-certificates curl gnupg git jq openssl
           sudo install -d -m 0755 /usr/share/keyrings
           curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
@@ -90,10 +168,6 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
           echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/baffle-socket-probe" >> "$GITHUB_ENV"
-      - name: Install pinned Baffle binary
-        run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
-      - name: Set Baffle binary path
-        run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/bin/baffle" >> "$GITHUB_ENV"
       - name: Build Linux execution helpers
         run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
       - name: Set execution helper paths
@@ -108,27 +182,26 @@ jobs:
             sh -n "$script"
           done
       - name: Validate Baffle startup and socket access under rootless Podman
-        run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/bin/baffle"
+        run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/baffle"
       - name: Validate Baffle policy and client workloads with the default runtime
         run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_baffle_runtime.sh default
       - name: Validate Baffle policy and client workloads with runsc
         run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_baffle_runtime.sh runsc
 
   baffle-podman-machine-assets:
+    needs: build-baffle
     runs-on: ubuntu-24.04
-    env:
-      BAFFLE_PROXY_VERSION: 0.2.0
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: baffle-linux-x86_64
+          path: ${{ runner.temp }}/baffle
       - uses: dtolnay/rust-toolchain@1.96
-      - name: Install Baffle build dependencies
+      - name: Restore the validated Baffle executable mode
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang cmake libclang-dev
-      - name: Install pinned Baffle binary
-        run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
-      - name: Set Baffle binary path
-        run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/bin/baffle" >> "$GITHUB_ENV"
+          chmod 0755 "$RUNNER_TEMP/baffle/baffle"
+          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
       - name: Build Linux amd64 execution helpers
         run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
       - name: Build Linux amd64 Baffle socket operation probe
@@ -154,7 +227,7 @@ jobs:
       - name: Stage Linux amd64 assets for Podman machine validation
         run: |
           mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin"
-          cp "$CLADDING_BAFFLE_BIN" "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/baffle"
+          cp "$RUNNER_TEMP/baffle/baffle" "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/baffle"
           cp target/mcp-run/release/mcp-run "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/mcp-run"
           cp target/mcp-run/release/run-remote "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/run-remote"
           cp "$RUNNER_TEMP/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-amd64/bin/baffle-socket-probe"
