@@ -25,40 +25,38 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # Cladding embeds Linux mcp-run/run-remote helpers for its sandbox containers
-  # and a Linux Baffle executable for the proxy container. GitHub's macOS
-  # runners can't run a Linux container to build these artifacts, so build
-  # Baffle on native Linux runners and cross-compile the arm64 helpers here.
+  # and a Linux Baffle executable for the proxy container. Build native helper
+  # artifacts for each Linux guest architecture and reuse them on host builds.
   build-helpers:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-gnu
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Install aarch64 cross toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-      - name: Build helpers (aarch64 Linux)
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-        run: |
-          cargo build -p mcp-run --release --locked \
-            --target aarch64-unknown-linux-gnu \
-            --bin mcp-run --bin run-remote
+      - name: Build Linux helpers
+        run: cargo build -p mcp-run --release --locked --target "${{ matrix.target }}" --bin mcp-run --bin run-remote
       - name: Stage helpers
         run: |
-          mkdir helpers
-          cp target/aarch64-unknown-linux-gnu/release/mcp-run helpers/
-          cp target/aarch64-unknown-linux-gnu/release/run-remote helpers/
+          mkdir -p helpers
+          cp "target/${{ matrix.target }}/release/mcp-run" helpers/
+          cp "target/${{ matrix.target }}/release/run-remote" helpers/
       - uses: actions/upload-artifact@v4
         with:
-          name: mcp-run-helpers-aarch64-linux
+          name: mcp-run-helpers-${{ matrix.arch }}-linux
           path: helpers/
 
   # Build the pinned Baffle crate once for each supported Linux guest
@@ -75,30 +73,48 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    env:
+      BAFFLE_PROXY_VERSION: 0.2.0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-baffle-release
+          shared-key: ${{ matrix.arch }}-${{ env.BAFFLE_PROXY_VERSION }}
+          cache-all-crates: true
       - name: Install Baffle build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake libclang-dev
+          sudo apt-get install --yes build-essential clang cmake file libclang-dev
       - name: Install pinned Baffle
-        run: cargo install --locked --force --version '=0.2.0' --root "$RUNNER_TEMP/baffle-install" --bin baffle baffle-proxy
+        run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle-install" --bin baffle baffle-proxy
+      - name: Verify the Baffle architecture
+        run: |
+          description=$(file -b "$RUNNER_TEMP/baffle-install/bin/baffle")
+          printf '%s\n' "$description"
+          case "${{ matrix.arch }}:$description" in
+            x86_64:*"ELF 64-bit"*x86-64*) ;;
+            aarch64:*"ELF 64-bit"*aarch64*) ;;
+            *) echo "Baffle is not the expected Linux ${{ matrix.arch }} executable" >&2; exit 1 ;;
+          esac
       - name: Collect Baffle license notices
         run: |
-          manifest=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path '*/baffle-proxy-0.2.0/Cargo.toml' -print -quit)
+          manifest=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path "*/baffle-proxy-$BAFFLE_PROXY_VERSION/Cargo.toml" -print -quit)
           test -n "$manifest"
           cargo fetch --locked --manifest-path "$manifest"
           mkdir -p baffle
           cp "$RUNNER_TEMP/baffle-install/bin/baffle" baffle/baffle
           python3 scripts/collect-baffle-notices.py "$manifest" baffle
-      - name: Run Baffle in the proxy image
+      - name: Build the default proxy runtime image
+        run: docker build --file Containerfile.proxy --tag cladding-baffle-proxy-check .
+      - name: Start Baffle in the default proxy runtime image
         run: |
           docker run --rm \
-            -v "$GITHUB_WORKSPACE/baffle/baffle:/usr/local/bin/baffle:ro" \
-            --entrypoint /usr/local/bin/baffle \
-            docker.io/ubuntu/squid:latest --help
+            -v "$GITHUB_WORKSPACE/baffle/baffle:/opt/tools/bin/baffle:ro" \
+            --entrypoint /opt/tools/bin/baffle \
+            cladding-baffle-proxy-check --help
       - uses: actions/upload-artifact@v4
         with:
           name: baffle-linux-${{ matrix.arch }}
@@ -118,9 +134,19 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             baffle_arch: x86_64
+            helper_arch: x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            baffle_arch: aarch64
+            helper_arch: aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            baffle_arch: x86_64
+            helper_arch: x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             baffle_arch: aarch64
+            helper_arch: aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -132,18 +158,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      # macOS can't run a Linux container to build the embedded helpers, so pull
-      # the prebuilt aarch64-linux binaries and let build.rs copy them in via the
-      # CLADDING_MCP_RUN_BIN / CLADDING_RUN_REMOTE_BIN escape hatch. On Linux the
-      # build.rs builds them locally, so this step is skipped.
       - name: Fetch prebuilt helpers
-        if: runner.os == 'macOS'
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
         uses: actions/download-artifact@v4
         with:
-          name: mcp-run-helpers-aarch64-linux
+          name: mcp-run-helpers-${{ matrix.helper_arch }}-linux
           path: helpers
       - name: Point build.rs at prebuilt helpers
-        if: runner.os == 'macOS'
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
         run: |
           echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/helpers/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/helpers/run-remote" >> "$GITHUB_ENV"

@@ -15,8 +15,15 @@ tools are needed to build Baffle and do not belong in the proxy runtime image.
 For Cladding builds on macOS or other cross-build hosts, set
 `CLADDING_BAFFLE_BIN` to a prebuilt 64-bit Linux GNU executable for the matching
 Podman guest architecture. The build checks the ELF format and architecture.
-CI also runs the extracted executable in Cladding's selected default proxy
-image to check its loader and shared-library requirements.
+CI runs Baffle in Cladding's default proxy image to check its loader and shared
+libraries. The integration suite also starts the executable that Cladding
+extracts during `cladding build`.
+
+Release archives are built for Linux x86_64, Linux aarch64, Intel macOS, and
+Apple Silicon macOS. Each archive embeds the Linux GNU Baffle executable for
+the matching Podman guest architecture. CI builds Baffle on a native Linux
+runner for each architecture, checks it in the default proxy image, and reuses
+the validated files in the release jobs.
 
 Cladding writes the embedded executable to `.cladding/tools/bin/baffle` and
 sets its mode to executable. `cladding check` reports a missing or outdated
@@ -46,5 +53,6 @@ crate graph is the source of the executable and its release notices.
 contains code from its locked dependencies, and each dependency keeps its own
 license terms. Release archives include `THIRD_PARTY_NOTICES.md`, the upstream
 `Cargo.lock` when present in the published crate, and license or notice files
-shipped in each crate archive. Review entries with no declared license before
+shipped in each crate archive. The notice file points to each copied file under
+`licenses/<crate>-<version>/`. Review entries with no declared license before
 publishing a release.
