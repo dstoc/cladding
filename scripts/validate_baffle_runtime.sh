@@ -364,7 +364,7 @@ secret = "missing-token"
 format = "bearer"
 EOF
 chmod 0644 "$project_root/config/proxy/sessions/missing-secret.toml"
-if podman exec "$proxy" baffle create missing-secret.toml >/dev/null 2>&1; then
+if podman exec "$proxy" /opt/tools/bin/baffle create missing-secret.toml >/dev/null 2>&1; then
   echo "Baffle accepted a session whose allowed secret file is missing" >&2
   exit 1
 fi

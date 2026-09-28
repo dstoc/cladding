@@ -112,7 +112,7 @@ fn reload_proxy_displays_each_result_and_executes_baffle_reload_all() {
     assert!(stdout.contains("sandbox-session: unchanged"), "{stdout}");
     assert_eq!(
         fs::read_to_string(&fixture.args_path).expect("Podman args should be recorded"),
-        "exec\ndemo-proxy-instance\nbaffle\nreload\n--all\n"
+        "exec\ndemo-proxy-instance\n/opt/tools/bin/baffle\nreload\n--all\n"
     );
     assert_eq!(
         fs::read_to_string(&fixture.session_config_path)
