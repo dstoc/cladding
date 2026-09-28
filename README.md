@@ -58,6 +58,14 @@ In short: the agent cannot freely access the network; users can run sandbox comm
 
   `cladding init` creates these TOML files when missing and preserves existing edits on later runs. The network-sandbox session file is present even when that component is disabled.
 
+The proxy uses Baffle's `file_only` mode. `daemon.toml` defines the daemon and
+its allowed symbolic secrets. The session files define the agent and optional
+network-sandbox policies. The proxy startup script creates the network-sandbox
+session only when that component is enabled. Each active session needs at least
+one exact host rule. The agent and network sandbox can read these non-secret
+TOML files. They cannot access the Baffle control socket, CA private key, or
+injection credentials.
+
 * Build images and refresh host-mounted binaries (`mcp-run`, `run-remote`, `baffle`, and sandbox helper wrappers) in `.cladding/tools/bin`. See the [embedded Baffle build and update procedure](docs/features/baffle-integration/embedded-baffle.md): Baffle builds need Rust 1.96 or newer and native build tools; cross-build hosts can provide `CLADDING_BAFFLE_BIN`.
 
   ```bash
@@ -69,6 +77,12 @@ In short: the agent cannot freely access the network; users can run sandbox comm
   ```bash
   cladding up
   ```
+
+The normal setup order is `cladding init`, edit the files under
+`.cladding/config/`, then run `cladding build` and `cladding up`. `init`
+creates the Baffle configuration and project credentials. `build` creates
+the local images and refreshes the embedded tools. `up` starts the proxy
+pod and enabled execution containers.
 
 * Run commands in the agent container (workdir follows your host `cwd` relative to the directory containing `.cladding`; if it cannot be mapped, the command starts in `/home/user`):
 
@@ -147,7 +161,17 @@ Cladding reuses a valid CA when the project starts again. If either CA file is m
 
 Users or external secret managers provision one file per Baffle symbolic secret in `secrets/`. Cladding creates this directory but does not create, copy, read, rewrite, or log secret values. Keep secret names in policy configuration and keep the values in these files. The proxy receives the credentials directory as a read-only mount. The agent and network sandbox receive a separate read-only mount of `ca.crt`; they do not receive the private key or secret files. The filesystem sandbox receives no CA mount.
 
-After Cladding creates the agent and enabled network-sandbox containers, it runs `podman exec --user 0` in each container. The command copies the public certificate to `/usr/local/share/ca-certificates/baffle.crt` and runs `update-ca-certificates`. The workload still runs as its configured unprivileged user. The default `Containerfile.cladding` sets `NODE_USE_SYSTEM_CA=1` so Node.js uses the updated system trust store.
+To use an injection credential, add its symbolic name to
+`[secrets].allowed` in `daemon.toml` and reference that name from a session
+rule. Provision a regular file with that name under `secrets/`. Keep the
+credentials directory at mode `0700` and each secret file at mode `0600` on
+Unix hosts. Use a secret manager or another protected source to write the
+file; do not put a secret value in TOML, a command argument, an environment
+variable, or a log. Replace a secret file through the same protected process,
+then run `cladding reload-proxy`. The new value applies to new connections;
+open connections keep the value they already use.
+
+After Cladding creates the agent and enabled network-sandbox containers, it runs `podman exec --user 0` in each container. The command copies the public certificate to `/usr/local/share/ca-certificates/baffle.crt` and runs `update-ca-certificates`. UID 0 is container root for this exec; Cladding does not start the container as privileged. The workload still runs as its configured unprivileged user. The default `Containerfile.cladding` sets `NODE_USE_SYSTEM_CA=1` so Node.js uses the updated system trust store.
 
 Custom agent and network-sandbox images must support the same initialization command. They need `sh`, `cp`, a writable `/usr/local/share/ca-certificates/` directory, and an `update-ca-certificates` command that adds certificates from that directory to the system trust store. Images with another trust-store layout can provide a compatible command in the image. Cladding does not provide a per-image initialization hook. Applications that use a private CA bundle or another application-specific trust store may need a separate import step. Certificate-pinned applications can reject intercepted connections even when the system trusts the CA.
 
@@ -162,6 +186,28 @@ New `.cladding` directories contain an internal ignore file. For an existing pro
 After editing `.cladding/config/proxy/sessions/agent.toml` or `nw-sandbox.toml`, run `cladding reload-proxy`. Baffle reads those existing files and reports each active session as `reloaded`, `unchanged`, or `failed`. It reports all session results, even when one reload fails, and the command exits unsuccessfully if any session fails. Invalid updates leave the prior effective session in place.
 
 Changed policy, injection credentials, and socket paths apply to new connections. Existing connections keep their prior policy and credentials until they close, so a credential change does not revoke access on an already-open connection. A reload can fail when an old policy generation or listener is still in use; inspect `cladding logs proxy` to diagnose it. Changes to daemon settings, the CA, or the Baffle binary require a proxy container restart.
+
+### Proxy behavior and migration limits
+
+The execution containers keep the local HTTP proxy endpoint
+`http://127.0.0.1:3128`. The `http://` scheme describes the connection from
+the application to its local proxy. Baffle accepts HTTPS origins through
+HTTP `CONNECT`; it does not permit ordinary plaintext HTTP origins. A rule
+must name an exact DNS hostname and explicit port. Wildcard hostnames and
+literal IP addresses are not supported.
+
+Baffle checks the requested hostname and port. It does not pin DNS results or
+filter destination IP addresses. A hostname rule therefore does not prevent a
+hostname from resolving to an internal or private address. Add separate DNS
+or network controls when Baffle's outbound destinations need IP restrictions.
+
+Cladding does not read or convert old Squid configuration, domain lists, or
+host-port lists. Replace those files with native TOML under
+`.cladding/config/proxy/`. See [Proxy Configuration](docs/features/proxy/summary.md)
+for the file roles, security boundaries, and policy examples. The separate
+`cladding expose` and `cladding inject` commands remain available as deliberate
+host-network exceptions. The filesystem sandbox still has no proxy egress by
+default.
 
 ### Configuring container images
 

@@ -15,6 +15,34 @@ This file is the quick reference for the current Cladding runtime.
 - The agent, nw-sandbox, and fs-sandbox are standalone containers, not pods.
 - Execution containers run with `--network none`.
 - Execution containers communicate through scoped Unix-domain socket mounts under `.cladding/runtime/sockets`.
+- The proxy creates a persistent Baffle session for the agent. It creates a network-sandbox session only when that component is enabled.
+- Cladding does not wait for Baffle sessions to become ready before it starts execution containers. Early requests to the local proxy can fail during startup.
+
+## Baffle policy and trust
+`cladding init` creates native daemon and session TOML under
+`.cladding/config/proxy/`. Baffle uses `file_only` mode. The agent and network
+sandbox can read those non-secret configuration files, but the Baffle control
+socket stays private inside the proxy container.
+
+Each project has a persistent CA under `.cladding/credentials/baffle/`.
+Cladding reuses a valid CA. After each agent and enabled network-sandbox
+container starts, Cladding uses `podman exec --user 0` to install the public
+certificate in that container's system trust store. This exec uses container
+root; the application remains unprivileged. The default image sets
+`NODE_USE_SYSTEM_CA=1`. Custom images must provide a compatible command to
+install the certificate. The filesystem sandbox does not receive the CA.
+
+Injection secrets are provisioned separately under
+`.cladding/credentials/baffle/secrets/`. The proxy receives the credentials
+directory read-only. Execution containers receive neither the secret files
+nor the CA private key. Protect secret files as mode `0600` and the credentials
+directories as mode `0700`; never commit these files.
+
+The local application endpoint stays `http://127.0.0.1:3128`. Baffle accepts
+HTTPS origins through `CONNECT` and rejects ordinary plaintext HTTP. Rules
+use exact DNS hostnames and explicit ports. Baffle does not filter resolved
+destination IP addresses. See the [proxy configuration reference](proxy/summary.md)
+for migration limits and troubleshooting.
 
 ## Socket directories
 Cladding creates a private runtime socket root and per-component subdirectories:

@@ -1,5 +1,10 @@
 # Migrating from v0.1 to v0.2
 
+> Historical guide for the v0.2 transition. Current Cladding uses Baffle and
+> native TOML under `.cladding/config/proxy/`. It does not read or convert the
+> Squid files listed below. For current setup and proxy policy, see the
+> [README](../README.md) and [proxy configuration reference](features/proxy/summary.md).
+
 v0.2 contains breaking runtime and configuration renames. Existing projects
 must update `.cladding/cladding.json`, move config files into the new
 component directories, refresh embedded scripts/tools, and recreate running
@@ -18,7 +23,7 @@ pods.
 4. Refresh embedded scripts and tools:
 
    ```bash
-   cladding init --update-scripts
+   cladding init
    cladding build
    ```
 
@@ -158,6 +163,10 @@ can be backed by different host paths in different components:
 ```
 
 ## Config Directory Layout
+
+The mapping below records the historical v0.2 layout. In particular,
+`.cladding/config/proxy/squid.conf` is not a supported current config file;
+replace it with native Baffle TOML.
 
 Configuration under `.cladding/config/` is now grouped by component.
 

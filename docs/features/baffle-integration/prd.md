@@ -1,6 +1,6 @@
 # PRD: Replace Squid with Baffle in Cladding
 
-**Status:** Proposed  
+**Status:** Historical design proposal; the Baffle runtime is implemented. See `docs/features/current-runtime-summary.md` and `README.md` for current behavior.
 **Repository:** `dstoc/cladding`  
 **Intended path:** `docs/features/baffle-integration/prd.md`  
 **Issue IDs:** `baffle-1` through `baffle-12`
@@ -33,7 +33,7 @@ Each project has one persistent interception CA. Cladding provisions its public 
 - No changes to filesystem-sandbox networking: it remains without proxy egress by default.
 - No requirement to conceal non-secret Baffle TOML configuration from the agent or network sandbox.
 
-## Current architecture
+## Pre-Baffle architecture
 
 Cladding currently runs a Squid instance and a `socat` bridge sidecar in the project proxy pod. Squid distinguishes agent and network-sandbox traffic by separate local listeners. The standalone execution containers use `--network none` and scoped Unix sockets, and each runs a local `socat` listener on `127.0.0.1:3128`. Cladding mounts `.cladding/config/` read-only into its execution containers.
 

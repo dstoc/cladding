@@ -1,5 +1,9 @@
 # PRD: Runtime Resource Renaming
 
+> Historical proposal. Its Squid configuration examples describe the
+> pre-Baffle runtime. See `docs/features/current-runtime-summary.md` for the
+> current architecture.
+
 ## Objective
 Rename the cladding runtime resources from the current `*-pod` / `cli-app` terminology to shorter project-scoped names:
 

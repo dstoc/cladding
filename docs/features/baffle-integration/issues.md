@@ -2,6 +2,13 @@
 
 Ready-to-file descriptions for the issue graph in [the Baffle integration proposal](./prd.md). Each section below is a separate issue for `dstoc/cladding`, identified by `baffle-N`. Copy its heading into the issue title and the remaining section into its body. The `depends-on:` line must remain at the end of each issue description. These IDs are planning identifiers, not GitHub issue numbers. `baffle-12` is deferred beyond phase one.
 
+# Historical implementation issue breakdown
+
+This file records the requirements used to implement the Baffle runtime. Its
+Squid descriptions refer to the replaced pre-Baffle system. For current
+behavior, see `docs/features/current-runtime-summary.md`,
+`docs/features/proxy/summary.md`, and `README.md`.
+
 ## baffle-1 — Replace Squid configuration with native Baffle TOML
 
 **Context:** [Baffle integration proposal](./prd.md), especially *User-editable configuration*.
