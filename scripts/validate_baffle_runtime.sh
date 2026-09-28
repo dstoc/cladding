@@ -364,8 +364,8 @@ else
 fi
 phase="verify Git fixture clone content"
 podman exec "$agent" test -s /tmp/baffle-git-clone/README.md
-phase="copy Node.js integration test"
-podman cp "$script_dir/baffle_node_integration.js" "$agent:/tmp/baffle_node_integration.js" >/dev/null
+phase="verify Node.js integration test is present"
+podman exec "$agent" test -r /tmp/baffle_node_integration.js
 phase="Node.js HTTPS request through intercepted TLS"
 node_output="$temp_root/node-integration.log"
 if podman exec --env no_proxy= --env NO_PROXY= --env NODE_USE_ENV_PROXY=1 \
