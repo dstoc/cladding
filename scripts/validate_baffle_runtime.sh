@@ -317,17 +317,24 @@ test "$(stat -c '%a' "$project_root/credentials/baffle/ca.crt")" = 644
 test "$(stat -c '%a' "$project_root/credentials/baffle/ca-key.pem")" = 600
 test "$(stat -c '%u' "$project_root/credentials/baffle/ca-key.pem")" = "$(id -u)"
 
-phase="check exact-host, port, path, and plaintext policy"
+phase="authorize agent HTTPS request through scoped proxy"
 body=$(agent_curl --fail https://localhost:8443/authorized/curl \
   -H "Authorization: Bearer client-supplied-test-value")
 printf '%s' "$body" | jq -e '.authorization == "old"' >/dev/null
+phase="authorize network-sandbox HTTPS request through scoped proxy"
 body=$(sandbox_curl --fail https://localhost:9443/sandbox/ordinary)
 printf '%s' "$body" | jq -e '.authorization == "none"' >/dev/null
+phase="deny agent request to an unapproved host"
 expect_curl_denied "$agent" --insecure https://127.0.0.1:8443/authorized/wrong-host
+phase="deny agent request to an unapproved destination port"
 expect_curl_denied "$agent" https://localhost:9443/authorized/wrong-port
+phase="deny agent request to an unapproved path"
 expect_curl_denied "$agent" https://localhost:8443/unauthorized/path
+phase="deny network-sandbox request to the agent port"
 expect_curl_denied "$sandbox" https://localhost:8443/sandbox/wrong-component
+phase="deny network-sandbox request to an unapproved path"
 expect_curl_denied "$sandbox" https://localhost:9443/unauthorized/path
+phase="deny plaintext HTTP request"
 expect_curl_denied "$agent" http://localhost:8080/authorized/plaintext
 
 phase="exercise curl, Git, and Node.js through intercepted TLS"
