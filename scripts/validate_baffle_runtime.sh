@@ -402,7 +402,7 @@ if podman exec "$proxy" /opt/tools/bin/baffle create missing-secret.toml >/dev/n
 fi
 
 phase="check Baffle reload snapshots and invalid reload handling"
-podman cp "$script_dir/baffle_reload_connection.py" "$agent:/tmp/baffle_reload_connection.py" >/dev/null
+podman exec "$agent" test -r /tmp/baffle_reload_connection.py
 podman exec --env no_proxy= --env NO_PROXY= "$agent" \
   python3 /tmp/baffle_reload_connection.py >/dev/null 2>&1 &
 reload_client_pid=$!
