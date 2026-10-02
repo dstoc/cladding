@@ -154,12 +154,12 @@ Mount injection in `cladding/src/pods.rs` should apply custom mounts to `nw-sand
 With `podman play kube`, Podman may continue deriving raw container names from the pod name plus the container name. The implementation should treat `NetworkSettings` as the source of truth and should not assume old generated names. If exact raw Podman container names of `<name>-proxy`, `<name>-nw-sandbox`, and `<name>-agent` are required in `podman ps`, that is a separate runtime-construction change because `play kube` currently generates pod/container composite names.
 
 ### CLI Behavior
-`cladding run` should execute in the agent container for the active project. Internally, it should derive the new Podman target container name from the rendered runtime names and the app container name:
+`cladding exec` should execute in the agent container for the active project. Internally, it should derive the new Podman target container name from the rendered runtime names and the app container name:
 
 - old: `<cli_pod_name>-cli-app`
 - new: derived from `<agent_name>` and `agent`
 
-`cladding run --target nw-sandbox` should execute in the network sandbox container:
+`cladding exec --target nw-sandbox` should execute in the network sandbox container:
 
 - old: `<sandbox_pod_name>-sandbox-app`
 - new: derived from `<sandbox_name>` and `nw-sandbox`
@@ -255,7 +255,7 @@ For cleanup only, commands may include best-effort legacy name removal for:
 - `<name>-sandbox-pod`
 - `<name>-cli-pod`
 
-This fallback is only for teardown and should not be used for `run`, `run --target nw-sandbox`, proxy reload, or new pod startup.
+This fallback is only for teardown and should not be used for `exec`, `exec --target nw-sandbox`, proxy reload, or new pod startup.
 
 ## Non-Goals
 1. Changing the shared Podman network pool names (`cladding-N`) or subnet allocation.
@@ -287,9 +287,9 @@ This fallback is only for teardown and should not be used for `run`, `run --targ
 9. Config parsing tests assert new schema keys are accepted and old keys fail as unknown keys with clear errors.
 10. Integration verification with Podman:
    - `cladding up`
-   - `cladding run getent hosts <name>-proxy`
-   - `cladding run getent hosts <name>-nw-sandbox`
-   - `cladding run curl http://<name>-nw-sandbox:3000/raw` or equivalent health check
+   - `cladding exec getent hosts <name>-proxy`
+   - `cladding exec getent hosts <name>-nw-sandbox`
+   - `cladding exec curl http://<name>-nw-sandbox:3000/raw` or equivalent health check
    - `cladding reload-proxy`
    - `cladding expose 3000`
    - `cladding down`
@@ -298,7 +298,7 @@ This fallback is only for teardown and should not be used for `run`, `run --targ
 ## Success Criteria
 1. New projects start pods named `<name>-proxy`, `<name>-nw-sandbox`, and `<name>-agent`.
 2. Runtime DNS, proxy environment variables, jail scripts, and `RUN_REMOTE_SERVER` use the new names.
-3. `cladding run`, `cladding run --target nw-sandbox`, `cladding reload-proxy`, `cladding expose`, `cladding down`, and `cladding destroy` work with the new names.
+3. `cladding exec`, `cladding exec --target nw-sandbox`, `cladding reload-proxy`, `cladding expose`, `cladding down`, and `cladding destroy` work with the new names.
 4. Rendered runtime YAML contains no `proxy-pod`, `sandbox-pod`, `cli-pod`, `sandbox-app`, or `cli-app` references.
 5. Runtime config uses `nw_sandbox`, not `sandbox_commands`.
 6. `cladding check` fails when old renamed config entries are still present.

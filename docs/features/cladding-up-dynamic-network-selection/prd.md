@@ -35,7 +35,7 @@ This change removes the `subnet` configuration dependency from `.cladding/claddi
    - implementation may reuse/extend internals used by `cladding ps` to identify active cladding runtime usage.
    - no required user-facing output changes for `cladding ps`.
 7. Command compatibility updates:
-   - commands that currently derive network settings from config `subnet` (e.g., `up`, `down`, `destroy`, `run`, `reload-proxy`) must derive equivalent settings from runtime-selected/active `cladding-N` network state.
+   - commands that currently derive network settings from config `subnet` (e.g., `up`, `down`, `destroy`, `exec`, `reload-proxy`) must derive equivalent settings from runtime-selected/active `cladding-N` network state.
 8. Exhaustion behavior:
    - if all `cladding-0..255` networks are in use by running cladding projects, `cladding up` fails with a clear actionable error.
 
@@ -90,7 +90,7 @@ This change removes the `subnet` configuration dependency from `.cladding/claddi
 3. Concurrent projects are assigned unique active pool networks.
 4. A stopped project can restart on a different available `cladding-N` network successfully.
 5. When pool is exhausted, error is explicit and actionable.
-6. Existing CLI workflows (`up`, `down`, `run`, `destroy`, `reload-proxy`) remain functional under runtime network resolution.
+6. Existing CLI workflows (`up`, `down`, `exec`, `run`, `destroy`, `reload-proxy`) remain functional under runtime network resolution.
 
 ## Open Questions
 1. For commands run while project pods are not active (`down`, `destroy`, `reload-proxy` edge cases), should missing active network be a hard error with guidance, or should commands attempt best-effort fallback inference?

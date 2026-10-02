@@ -23,7 +23,8 @@
   - `down`
   - `destroy`
   - `run`
-  - `run --target nw-sandbox`
+  - `exec`
+  - `exec --target nw-sandbox`
   - `reload-proxy`
   - `ps`
 - There is no existing nested subcommand pattern, so adding `expose start|stop|list` will introduce the first subcommand group under a top-level command.

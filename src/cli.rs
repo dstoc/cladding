@@ -6,7 +6,7 @@ mod exec;
 mod expose;
 mod inject;
 mod lifecycle;
-mod once;
+mod run;
 
 use anyhow::Context as _;
 use args::{Cli, CommandSpec};
@@ -47,8 +47,8 @@ pub fn run() -> Result<()> {
     let workspace_root = resolve_workspace_root(&cwd);
 
     let config_source = match cli.config {
-        None if matches!(&command, CommandSpec::Once { .. }) && !project_root.is_dir() => {
-            ConfigSource::OnceDefault {
+        None if matches!(&command, CommandSpec::Run { .. }) && !project_root.is_dir() => {
+            ConfigSource::EphemeralDefault {
                 base_dir: cwd.clone(),
             }
         }
@@ -74,8 +74,8 @@ pub fn run() -> Result<()> {
         CommandSpec::Up { verbose } => lifecycle::cmd_up(&context, verbose),
         CommandSpec::Down { verbose } => lifecycle::cmd_down(&context, verbose),
         CommandSpec::Destroy => lifecycle::cmd_destroy(&context),
-        CommandSpec::Run { target, env, args } => exec::cmd_run(&context, target, &env, &args),
-        CommandSpec::Once { args } => once::cmd_once(&context, &args, config_uses_stdin),
+        CommandSpec::Run { args } => run::cmd_run(&context, &args, config_uses_stdin),
+        CommandSpec::Exec { target, env, args } => exec::cmd_exec(&context, target, &env, &args),
         CommandSpec::Logs { target, args } => exec::cmd_logs(&context, target, &args),
         CommandSpec::ReloadProxy => exec::cmd_reload_proxy(&context),
         CommandSpec::Ps => lifecycle::cmd_ps(&context),

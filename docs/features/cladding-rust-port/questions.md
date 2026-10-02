@@ -1,5 +1,9 @@
 # Questions: cladding Rust port
 
+> Historical Q&A. The legacy shell command `run` executed in an existing
+> runtime. Issue #27 assigns that behavior to `exec` and uses `run` to create
+> and remove a temporary runtime.
+
 1. Q: Should the Rust implementation replace the `./cladding` script (same command name/CLI), or ship as a new binary with a wrapper?
    A: Replace it (same command name/CLI).
 

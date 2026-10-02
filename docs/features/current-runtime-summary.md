@@ -18,6 +18,17 @@ This file is the quick reference for the current Cladding runtime.
 - The proxy creates a persistent Baffle session for the agent. It creates a network-sandbox session only when that component is enabled.
 - Cladding does not wait for Baffle sessions to become ready before it starts execution containers. Early requests to the local proxy can fail during startup.
 
+## CLI execution and lifecycle
+`cladding run <command> [args...]` creates a unique temporary runtime, runs
+the command in its agent container, and removes the runtime when the command
+ends. Each invocation uses private runtime and credential paths.
+
+`cladding exec [--target agent|nw-sandbox|fs-sandbox] <command> [args...]`
+runs a command in an already-running project. It defaults to `agent`; a
+sandbox target must be enabled. Direct host execution into either sandbox
+bypasses the agent-side delegation and policy path. The `fs-sandbox` starts
+in `/home/user` unless its configuration adds a workspace mount.
+
 ## Baffle policy and trust
 `cladding init` creates native daemon and session TOML under
 `.cladding/config/proxy/`. Baffle uses `file_only` mode. The agent and network
@@ -67,11 +78,11 @@ CI checks Baffle's direct socket path with rootless Podman and its default OCI r
 - The proxy pod stays on Podman's default runtime.
 - Optional `use_runsc` design details live in `docs/features/cladding-gvisor-runtime/prd.md`.
 - When `use_runsc` is enabled, Cladding passes `--runtime runsc`, `--runtime-flag ignore-cgroups`, `--runtime-flag host-uds=all`, and `--runtime-flag network=none` to the execution container startup command.
-- `cladding expose` does not receive Podman runtime flags; it is a host-side `socat` forwarder that delegates through `cladding run`.
+- `cladding expose` does not receive Podman runtime flags; it is a host-side `socat` forwarder that delegates through `cladding exec`.
 
 ## Blocking `cladding expose`
 - `cladding expose <container-port> [host-port]` runs in the foreground on the host.
-- It binds `127.0.0.1:<host-port>` by default, or the address selected with `--bind-address`, and forwards through `cladding run socat ...` to `127.0.0.1:<container-port>` inside the agent container.
+- It binds `127.0.0.1:<host-port>` by default, or the address selected with `--bind-address`, and forwards through `cladding exec socat ...` to `127.0.0.1:<container-port>` inside the agent container.
 - No persistent expose containers are created.
 
 ## Blocking `cladding inject`

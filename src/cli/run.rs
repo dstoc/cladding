@@ -11,16 +11,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};
 
-pub(super) fn cmd_once(
+pub(super) fn cmd_run(
     source_context: &Context,
     args: &[String],
     config_uses_stdin: bool,
 ) -> Result<()> {
     if args.is_empty() {
-        return Err(Error::message("missing once command"));
+        return Err(Error::message("missing run command"));
     }
 
-    let instance_name = format!("cladding-once-{}", generate_uuid_v4()?);
+    let instance_name = format!("cladding-run-{}", generate_uuid_v4()?);
     println!("starting one-off instance: {instance_name}");
 
     let mut config = source_context.load_config().map_err(|err| {
@@ -30,7 +30,7 @@ pub(super) fn cmd_once(
     })?;
     config.name = instance_name.clone();
 
-    cladding::podman::podman_required("podman (required for cladding once)").map_err(|err| {
+    cladding::podman::podman_required("podman (required for cladding run)").map_err(|err| {
         Error::message(format!(
             "one-off instance '{instance_name}' cannot start: {err}"
         ))
@@ -56,7 +56,7 @@ pub(super) fn cmd_once(
     };
     let context = source_context.with_resolved_config(runtime_root.clone(), config);
 
-    if let Err(startup_error) = lifecycle::prepare_once_runtime_root(&runtime_root) {
+    if let Err(startup_error) = lifecycle::prepare_ephemeral_runtime_root(&runtime_root) {
         let root_cleanup = fs::remove_dir_all(&runtime_root).with_context(|| {
             format!(
                 "failed to remove private runtime root {}",
@@ -78,11 +78,11 @@ pub(super) fn cmd_once(
         )));
     }
 
-    let (startup_result, runtime_create_attempted) = lifecycle::cmd_up_once(&context, false);
+    let (startup_result, runtime_create_attempted) = lifecycle::cmd_up_ephemeral(&context, false);
 
     if let Err(startup_error) = startup_result {
         let cleanup_error = if runtime_create_attempted {
-            cleanup_once_runtime(&context, &runtime_root)
+            cleanup_ephemeral_runtime(&context, &runtime_root)
         } else {
             remove_private_runtime_root(&runtime_root).map_err(Error::from)
         };
@@ -103,9 +103,9 @@ pub(super) fn cmd_once(
 
     let command_result = match signals.received() {
         Some(signal) => Err(signal_status_error(signal)),
-        None => exec::cmd_run_once(&context, args, !config_uses_stdin),
+        None => exec::cmd_run_command(&context, args, !config_uses_stdin),
     };
-    let cleanup_error = cleanup_once_runtime(&context, &runtime_root);
+    let cleanup_error = cleanup_ephemeral_runtime(&context, &runtime_root);
     let signal = signals.finish();
 
     finish_run(
@@ -117,8 +117,8 @@ pub(super) fn cmd_once(
     )
 }
 
-fn cleanup_once_runtime(context: &Context, runtime_root: &Path) -> Result<()> {
-    lifecycle::cmd_down_once(context)?;
+fn cleanup_ephemeral_runtime(context: &Context, runtime_root: &Path) -> Result<()> {
+    lifecycle::cmd_down_ephemeral(context)?;
     remove_private_runtime_root(runtime_root)?;
     Ok(())
 }
@@ -176,7 +176,7 @@ fn preserve_command_status(err: Error, instance_name: &str) -> Error {
 
 fn signal_status_error(signal: i32) -> Error {
     Error::CommandFailed {
-        context: "cladding once",
+        context: "cladding run",
         code: 128 + signal,
     }
 }
@@ -322,9 +322,9 @@ mod tests {
 
     #[test]
     fn private_runtime_root_is_outside_the_source_workspace() {
-        let name = format!("cladding-once-{}", generate_uuid_v4().unwrap());
+        let name = format!("cladding-run-{}", generate_uuid_v4().unwrap());
         let workspace = std::env::temp_dir()
-            .join(format!("cladding-once-workspace-{}", std::process::id()))
+            .join(format!("cladding-run-workspace-{}", std::process::id()))
             .join(&name);
         fs::create_dir_all(&workspace).unwrap();
 
@@ -339,8 +339,8 @@ mod tests {
     #[test]
     fn command_failure_status_wins_over_cleanup_failure() {
         let error = finish_run(
-            "cladding-once-test",
-            Path::new("/tmp/cladding-once-test"),
+            "cladding-run-test",
+            Path::new("/tmp/cladding-run-test"),
             Err(Error::CommandFailed {
                 context: "podman exec",
                 code: 17,
@@ -356,8 +356,8 @@ mod tests {
     #[test]
     fn successful_command_returns_failure_when_cleanup_fails() {
         let error = finish_run(
-            "cladding-once-test",
-            Path::new("/tmp/cladding-once-test"),
+            "cladding-run-test",
+            Path::new("/tmp/cladding-run-test"),
             Ok(()),
             Err(Error::message("podman rm failed")),
             None,
@@ -365,6 +365,6 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.exit_code(), 1);
-        assert!(error.to_string().contains("cladding-once-test"));
+        assert!(error.to_string().contains("cladding-run-test"));
     }
 }

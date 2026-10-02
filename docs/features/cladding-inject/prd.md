@@ -33,12 +33,12 @@ This keeps host-mediated access explicit, temporary, and scoped to one TCP endpo
 ## Problem statement
 The obvious mirror of `cladding expose` does not work.
 
-`cladding expose` can run one host listener and start a fresh `cladding run socat ...` command for each host-side connection:
+`cladding expose` can run one host listener and start a fresh `cladding exec socat ...` command for each host-side connection:
 
 ```text
 host client
   -> host socat TCP-LISTEN:<host-port>
-  -> cladding run socat STDIO TCP:127.0.0.1:<container-port>
+  -> cladding exec socat STDIO TCP:127.0.0.1:<container-port>
   -> agent-local service
 ```
 
@@ -51,7 +51,7 @@ agent client
   -> <host-endpoint> from the host
 ```
 
-The agent cannot call `cladding run`; only the host can. A single `podman exec` stdio stream is also not a good multiplexing boundary for a forked agent-side TCP listener. If multiple accepted agent connections share one `STDIO` endpoint, their byte streams are not isolated.
+The agent cannot call `cladding exec`; only the host can. A single `podman exec` stdio stream is also not a good multiplexing boundary for a forked agent-side TCP listener. If multiple accepted agent connections share one `STDIO` endpoint, their byte streams are not isolated.
 
 The implementation needs a bridge that gives each accepted agent connection a separate stream to a host process, without giving the agent general host networking and without changing the running container's Podman network mode.
 
@@ -145,7 +145,7 @@ Then run two foreground-managed processes:
    socat UNIX-LISTEN:<host-socket>,fork,reuseaddr TCP:<host>:<host-port>
    ```
 
-2. Agent-side localhost listener, started from the host with non-interactive `podman exec` or an equivalent `cladding run` helper:
+2. Agent-side localhost listener, started from the host with non-interactive `podman exec` or an equivalent `cladding exec` helper:
 
    ```bash
    socat TCP-LISTEN:<container-port>,bind=127.0.0.1,fork,reuseaddr \
@@ -336,7 +336,7 @@ Manual integration verification should cover:
 4. In another terminal, verify from the agent:
 
    ```bash
-   cladding run curl -sS http://127.0.0.1:8080/
+   cladding exec curl -sS http://127.0.0.1:8080/
    ```
 
 5. Press Ctrl-C in the `cladding inject` terminal.
@@ -351,4 +351,4 @@ Manual integration verification should cover:
 2. Agent processes can connect to the injected container port while the command is running.
 3. Ctrl-C stops both host-side and agent-side bridge processes.
 4. The feature does not create persistent containers, labels, or detached mappings.
-5. Existing `cladding expose`, `cladding run`, `cladding down`, and `cladding destroy` behavior is unchanged.
+5. Existing `cladding expose`, `cladding exec`, `cladding down`, and `cladding destroy` behavior is unchanged.

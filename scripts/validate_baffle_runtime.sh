@@ -39,15 +39,15 @@ origin_name="$project_name-origin"
 proxy_image="localhost/$project_name-proxy:latest"
 client_image="localhost/$project_name-client:latest"
 origin_image="localhost/$project_name-origin:latest"
-once_pid=
+run_pid=
 phase=initialize
 
 cleanup() {
   status=$?
   trap - EXIT
-  if [ -n "$once_pid" ]; then
-    kill "$once_pid" 2>/dev/null || true
-    wait "$once_pid" 2>/dev/null || true
+  if [ -n "$run_pid" ]; then
+    kill "$run_pid" 2>/dev/null || true
+    wait "$run_pid" 2>/dev/null || true
   fi
   if [ "$status" -ne 0 ]; then
     echo "Baffle runtime integration failed during: $phase" >&2
@@ -513,62 +513,62 @@ test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
 test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 
 phase="verify one-off CA isolation and nonzero-command cleanup"
-mkdir -m 0700 "$temp_root/once-tmp"
+mkdir -m 0700 "$temp_root/run-tmp"
 (
-  TMPDIR="$temp_root/once-tmp" "$cladding_bin" --cladding-dir "$project_root" once -- \
-    /bin/sh -c 'sleep 3; exit 7' > "$temp_root/once.log" 2>&1 &
-  once_child=$!
-  trap 'kill "$once_child" 2>/dev/null || true; wait "$once_child" 2>/dev/null || true' HUP INT TERM
-  if wait "$once_child"; then
-    once_status=0
+  TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -- \
+    /bin/sh -c 'sleep 3; exit 7' > "$temp_root/run.log" 2>&1 &
+  run_child=$!
+  trap 'kill "$run_child" 2>/dev/null || true; wait "$run_child" 2>/dev/null || true' HUP INT TERM
+  if wait "$run_child"; then
+    run_status=0
   else
-    once_status=$?
+    run_status=$?
   fi
   trap - HUP INT TERM
-  printf '%s\n' "$once_status" > "$temp_root/once.status"
+  printf '%s\n' "$run_status" > "$temp_root/run.status"
 ) &
-once_pid=$!
-once_root=
+run_pid=$!
+run_root=
 attempt=0
 while [ "$attempt" -lt 60 ]; do
-  once_root=$(find "$temp_root/once-tmp" -mindepth 2 -maxdepth 4 \
+  run_root=$(find "$temp_root/run-tmp" -mindepth 2 -maxdepth 4 \
     -path '*/credentials/baffle/ca.crt' -print -quit | sed 's|/credentials/baffle/ca.crt$||')
-  if [ -n "$once_root" ]; then
+  if [ -n "$run_root" ]; then
     break
   fi
-  if [ -f "$temp_root/once.status" ]; then
-    cat "$temp_root/once.log" >&2
+  if [ -f "$temp_root/run.status" ]; then
+    cat "$temp_root/run.log" >&2
     echo "one-off runtime exited before creating private credentials" >&2
     exit 1
   fi
   attempt=$((attempt + 1))
   sleep 1
 done
-if [ -z "$once_root" ]; then
+if [ -z "$run_root" ]; then
   echo "one-off runtime did not expose its private CA while active" >&2
   exit 1
 fi
-once_ca=$(sha256sum "$once_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
-test "$once_ca" != "$ca_before"
+run_ca=$(sha256sum "$run_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
+test "$run_ca" != "$ca_before"
 attempt=0
-while [ ! -d "$once_root/credentials/baffle/secrets" ] && [ "$attempt" -lt 30 ]; do
+while [ ! -d "$run_root/credentials/baffle/secrets" ] && [ "$attempt" -lt 30 ]; do
   attempt=$((attempt + 1))
   sleep 1
 done
-test -d "$once_root/credentials/baffle/secrets"
-test -z "$(find "$once_root/credentials/baffle/secrets" -mindepth 1 -print -quit)"
+test -d "$run_root/credentials/baffle/secrets"
+test -z "$(find "$run_root/credentials/baffle/secrets" -mindepth 1 -print -quit)"
 set +e
-wait "$once_pid"
+wait "$run_pid"
 set -e
-once_status=$(cat "$temp_root/once.status")
-once_pid=
-test "$once_status" -eq 7
-test ! -e "$once_root"
-once_name=$(sed -n 's/^starting one-off instance: //p' "$temp_root/once.log" | head -n 1)
-test -n "$once_name"
-if podman ps -a --format '{{.Names}}' | grep -E "^$once_name-(proxy|agent|nw-sandbox)(-instance)?$" >/dev/null; then
+run_status=$(cat "$temp_root/run.status")
+run_pid=
+test "$run_status" -eq 7
+test ! -e "$run_root"
+run_name=$(sed -n 's/^starting one-off instance: //p' "$temp_root/run.log" | head -n 1)
+test -n "$run_name"
+if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sandbox)(-instance)?$" >/dev/null; then
   echo "one-off runtime left a Podman resource behind" >&2
   exit 1
 fi
 
-echo "Baffle policy, HTTPS clients, reload, trust, isolation, CA reuse, and once cleanup passed ($runtime runtime)"
+echo "Baffle policy, HTTPS clients, reload, trust, isolation, CA reuse, and run cleanup passed ($runtime runtime)"

@@ -226,9 +226,9 @@ Raw Podman container names now use the `instance` app container suffix:
 Prefer `cladding` commands over raw Podman names:
 
 ```bash
-cladding run <cmd>
-cladding run --target nw-sandbox <cmd>
-cladding run --target fs-sandbox <cmd>
+cladding exec <cmd>
+cladding exec --target nw-sandbox <cmd>
+cladding exec --target fs-sandbox <cmd>
 cladding logs agent -f
 cladding logs proxy -f
 cladding logs nw-sandbox -f
@@ -256,8 +256,8 @@ run-in-fs-sandbox -- <cmd> [args...]
 From the host, use:
 
 ```bash
-cladding run --target nw-sandbox <cmd> [args...]
-cladding run --target fs-sandbox <cmd> [args...]
+cladding exec --target nw-sandbox <cmd> [args...]
+cladding exec --target fs-sandbox <cmd> [args...]
 ```
 
 In the current CLI, `--target` defaults to `agent`; set it explicitly to run in either sandbox.

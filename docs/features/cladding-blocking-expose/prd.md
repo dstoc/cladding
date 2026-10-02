@@ -9,7 +9,7 @@ The new implementation should be intentionally simple:
 cladding expose <container-port> [host-port]
 ```
 
-starts a foreground listener on `127.0.0.1:<host-port>` and forwards each connection through `cladding run` to `127.0.0.1:<container-port>` inside the agent container. The user stops the expose session with Ctrl-C.
+starts a foreground listener on `127.0.0.1:<host-port>` and forwards each connection through `cladding exec` to `127.0.0.1:<container-port>` inside the agent container. The user stops the expose session with Ctrl-C.
 
 ## Motivation
 `cladding expose` was originally designed around persistent detached expose state:
@@ -85,7 +85,7 @@ should behave like:
 
 ```bash
 socat TCP-LISTEN:15432,bind=127.0.0.1,reuseaddr,fork \
-  EXEC:'cladding run socat STDIO TCP:127.0.0.1:5432'
+  EXEC:'cladding exec socat STDIO TCP:127.0.0.1:5432'
 ```
 
 The previous `cladding expose 3000` case remains supported, but it now blocks and maps `127.0.0.1:3000` on the host to `127.0.0.1:3000` in the agent container.
@@ -116,16 +116,16 @@ Use host `socat` as the first implementation.
 
 The command should not create Podman containers.
 
-The host listener process should run a per-connection `cladding run` command that starts `socat` inside the agent:
+The host listener process should run a per-connection `cladding exec` command that starts `socat` inside the agent:
 
 ```text
 host client
   -> host socat TCP-LISTEN:<host-port>
-  -> cladding run socat STDIO TCP:127.0.0.1:<container-port>
+  -> cladding exec socat STDIO TCP:127.0.0.1:<container-port>
   -> agent-local service
 ```
 
-`cladding run` already uses non-interactive `podman exec -i` when stdin/stdout are not terminals, so it is suitable for raw byte forwarding. It must not allocate a TTY for expose connections.
+`cladding exec` already uses non-interactive `podman exec -i` when stdin/stdout are not terminals, so it is suitable for raw byte forwarding. It must not allocate a TTY for expose connections.
 
 ### Command construction
 Avoid constructing the `EXEC:` command with unescaped user input beyond validated numeric ports.
@@ -143,7 +143,7 @@ It should produce:
 ```text
 socat
 TCP-LISTEN:<host-port>,bind=127.0.0.1,reuseaddr,fork
-EXEC:cladding run socat STDIO TCP\\:127.0.0.1\\:<container-port>
+EXEC:cladding exec socat STDIO TCP\\:127.0.0.1\\:<container-port>
 ```
 
 If the final implementation needs shell quoting for `EXEC:`, keep the quoting in one tested helper.
@@ -153,7 +153,7 @@ The host must have `socat` installed.
 
 The agent image must also have `socat` installed. The default Cladding image already needs `socat` for inline proxy bridges. Custom agent images that want `cladding expose` must include it.
 
-Do not make `cladding check` fail when host `socat` is missing. `socat` is only required for `cladding expose`, not for normal `check`, `up`, `run`, or sandbox execution workflows.
+Do not make `cladding check` fail when host `socat` is missing. `socat` is only required for `cladding expose`, not for normal `check`, `up`, `exec`, `run`, or sandbox execution workflows.
 
 When `cladding expose` cannot find host `socat`, print:
 
@@ -163,7 +163,7 @@ missing: socat (required for cladding expose)
 
 and fail before starting the listener.
 
-If agent-side `socat` is missing, the per-connection `cladding run socat ...` command will fail. That is acceptable for the first implementation, but the error should not be hidden by `cladding expose`.
+If agent-side `socat` is missing, the per-connection `cladding exec socat ...` command will fail. That is acceptable for the first implementation, but the error should not be hidden by `cladding expose`.
 
 ### Signal behavior
 Ctrl-C should stop the foreground host `socat` process and return control to the user.

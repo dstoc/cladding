@@ -1,4 +1,4 @@
-use super::args::{LogsTarget, RunTarget};
+use super::args::{ExecTarget, LogsTarget};
 use super::context::{Context, project_runtime_status};
 use super::{CONTAINER_HOME_DIR, CONTAINER_WORKSPACE_DIR};
 use anyhow::Context as _;
@@ -25,15 +25,15 @@ struct PodmanExec<'a> {
     forward_signals: bool,
 }
 
-pub(super) fn cmd_run(
+pub(super) fn cmd_exec(
     context: &Context,
-    target: RunTarget,
+    target: ExecTarget,
     env_vars: &[String],
     args: &[String],
 ) -> Result<()> {
     let config = context.load_config()?;
     if !target.enabled(&config) {
-        return run_target_disabled(&config, target);
+        return exec_target_disabled(&config, target);
     }
     let container_name =
         runtime_container_name(&project_component_name(&config.name, target.as_str()));
@@ -41,7 +41,7 @@ pub(super) fn cmd_run(
         context,
         &config,
         PodmanExec {
-            command_name: "run",
+            command_name: "exec",
             mount_target: target.mount_target(),
             container_name: &container_name,
             env_vars,
@@ -53,14 +53,18 @@ pub(super) fn cmd_run(
     )
 }
 
-pub(super) fn cmd_run_once(context: &Context, args: &[String], forward_stdin: bool) -> Result<()> {
+pub(super) fn cmd_run_command(
+    context: &Context,
+    args: &[String],
+    forward_stdin: bool,
+) -> Result<()> {
     let config = context.load_config()?;
     let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
     run_podman_exec(
         context,
         &config,
         PodmanExec {
-            command_name: "once",
+            command_name: "run",
             mount_target: MountTarget::Agent,
             container_name: &container_name,
             env_vars: &[],
@@ -72,7 +76,7 @@ pub(super) fn cmd_run_once(context: &Context, args: &[String], forward_stdin: bo
     )
 }
 
-fn run_target_disabled(config: &ExecutionConfig, target: RunTarget) -> Result<()> {
+fn exec_target_disabled(config: &ExecutionConfig, target: ExecTarget) -> Result<()> {
     let target_name = target.as_str();
     let hint = match target.other_sandbox().filter(|other| other.enabled(config)) {
         Some(other) => format!("hint: use '--target {}'", other.as_str()),
@@ -84,7 +88,7 @@ fn run_target_disabled(config: &ExecutionConfig, target: RunTarget) -> Result<()
         config.name
     );
     eprintln!("{hint}");
-    Err(Error::message("selected run target is disabled"))
+    Err(Error::message("selected exec target is disabled"))
 }
 
 pub(super) fn cmd_logs(context: &Context, target: LogsTarget, args: &[String]) -> Result<()> {

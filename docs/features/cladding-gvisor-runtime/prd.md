@@ -170,7 +170,7 @@ Verification should include host integration tests where Podman and runsc are av
 - `cladding check` rejects non-boolean `use_runsc`
 - `cladding check` reports missing `runsc` when `use_runsc` is true
 - `cladding up` creates all enabled components under `runsc`
-- `cladding run -- true` works
+- `cladding exec -- true` works
 - `run-in-nw-sandbox --check -- true` works from the agent
 - `run-in-fs-sandbox --check -- true` works from the agent
 - proxy access still works through the UDS bridge
