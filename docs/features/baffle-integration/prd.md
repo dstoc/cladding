@@ -20,7 +20,7 @@ Each project has one persistent interception CA. Cladding provisions its public 
 - Preserve the existing container model, scoped Unix data-socket paths, client-side `socat` listeners and application proxy URLs.
 - Keep proxy startup and initial session creation inside the proxy container; Cladding owns container and project lifecycles.
 - Support project-scoped TLS interception and daemon-owned header injection without exposing CA private keys or secret values to execution containers.
-- Support normal `cladding up`/`down`/`destroy`, `cladding once`, and explicit `cladding reload-proxy`.
+- Support normal `cladding up`/`down`/`destroy`, `cladding run`, and explicit `cladding reload-proxy`.
 - Produce reproducible packaged Cladding binaries with Baffle embedded and covered by CI and integration tests.
 
 ## Non-goals for phase one
@@ -172,7 +172,7 @@ Users or external secret managers provision one file per Baffle symbolic secret 
 
 The proxy container receives the full credentials directory read-only, with ownership mapped so its trusted UID can read the private files. The agent and network sandbox receive **only the public `ca.crt`**, as a separate read-only mount at `/run/cladding/ca/baffle.crt`. They must not receive the CA private key or injection secret files. Their existing read-only configuration mounts are unaffected.
 
-`cladding once` must retain its current private runtime and cleanup behavior. A one-off instance should have a private CA and runtime socket namespace; when an existing `.cladding` project has been explicitly selected, it may use its separately selected, read-only secret source without copying the secret values. When no project exists, create an ephemeral credentials directory with no injection secrets and remove it with the one-off runtime. The implementation should document any deliberate sharing of an existing project's persistent CA instead of accidentally depending on host paths.
+`cladding run` must retain its current private runtime and cleanup behavior. A one-off instance should have a private CA and runtime socket namespace; when an existing `.cladding` project has been explicitly selected, it may use its separately selected, read-only secret source without copying the secret values. When no project exists, create an ephemeral credentials directory with no injection secrets and remove it with the one-off runtime. The implementation should document any deliberate sharing of an existing project's persistent CA instead of accidentally depending on host paths.
 
 ## Proxy-container startup and supervision
 
@@ -200,7 +200,7 @@ podman exec --user 0 "$container" sh -ec '
 '
 ```
 
-`--user 0` runs as container root; it does not mean Podman `--privileged` or host root. The normal application process retains its configured unprivileged user. Repeat installation for every new execution-container instance, including `cladding once`. If installation fails, report an error and use Cladding's existing ownership-aware cleanup path for resources created by that invocation.
+`--user 0` runs as container root; it does not mean Podman `--privileged` or host root. The normal application process retains its configured unprivileged user. Repeat installation for every new execution-container instance, including `cladding run`. If installation fails, report an error and use Cladding's existing ownership-aware cleanup path for resources created by that invocation.
 
 The existing filesystem sandbox has no proxy egress by default and does not need this CA step. Document custom-image requirements (`update-ca-certificates` or an equivalent), trust-store differences for tools that do not use system roots, and certificate-pinning limitations. Verify `podman exec --user 0` works for both normal and optional `runsc` execution containers. Installing the certificate adds Baffle to the container's general system trust store; that broader trust is an intentional per-project decision.
 
@@ -222,7 +222,7 @@ Keep the existing `cladding reload-proxy` CLI name, but replace the Squid reconf
 
 Baffle applies changed policy and resolved credential values to **newly accepted connections**. Existing connections keep their prior policy and credentials until they close; reload is not immediate credential revocation. The Baffle implementation can reject a non-disruptive reload if old generations/listeners remain pinned. Document these limitations and support diagnosis via proxy logs.
 
-`cladding down`/`destroy` remove the project proxy pod, session sockets and other disposable runtime resources. They must **not** delete the persistent project CA or injection secrets. One-off instances are removed by the current `once` cleanup workflow. Retain existing running-project discovery and collision semantics, adapted to the new expected container set (the old Squid bridge no longer counts).
+`cladding down`/`destroy` remove the project proxy pod, session sockets and other disposable runtime resources. They must **not** delete the persistent project CA or injection secrets. One-off instances are removed by the current `run` cleanup workflow. Retain existing running-project discovery and collision semantics, adapted to the new expected container set (the old Squid bridge no longer counts).
 
 ## Security and compatibility notes
 
@@ -241,10 +241,10 @@ Unit and integration coverage should establish:
 - The agent and enabled network sandbox receive distinct, correctly scoped data sockets; a disabled network sandbox produces no active Baffle session; the filesystem sandbox receives none.
 - Both execution containers can use intercepted HTTPS with a CA installed by `podman exec`; check the default `NODE_USE_SYSTEM_CA=1` behavior and representative curl/Git/Node applications.
 - Exact-host allow/deny, plaintext HTTP rejection, path-restricted interception, header injection and absence of secret material from execution-container mounts and logs.
-- Persistent project CA reuse, invalid/expired CA handling, secrets permissions, and `cladding once` isolation and cleanup.
+- Persistent project CA reuse, invalid/expired CA handling, secrets permissions, and `cladding run` isolation and cleanup.
 - Rootless Podman ownership and direct socket access; test `runsc` and macOS Podman-machine integration where Cladding claims support. Use a minimal trusted proxy-side bridge only if direct mapping cannot pass.
 - Reload reports changed, unchanged and failed sessions correctly, leaves established connections running, and picks up permitted credential changes on new connections.
-- Normal `up`, `down`, `destroy`, `once`, failure cleanup and container inventory without the former Squid sidecar. A test may wait for the proxy to become ready; production Cladding must not add a readiness barrier.
+- Normal `up`, `down`, `destroy`, `run`, failure cleanup and container inventory without the former Squid sidecar. A test may wait for the proxy to become ready; production Cladding must not add a readiness barrier.
 - CI and release artifacts contain an executable, compatible pinned Baffle binary and applicable third-party license/notice material.
 
 Document the user-visible incompatible migration and update the README, architecture/current-runtime summary, command help and configuration examples. Remove or clearly mark superseded Squid documentation rather than describing it as current.
@@ -263,7 +263,7 @@ Every implementation issue should link to this proposal with:
 | `baffle-4` | Build proxy image and container-managed Baffle startup | `baffle-1`, `baffle-2`, `baffle-3` |
 | `baffle-5` | Bind scoped Baffle data sockets and remove Squid bridge | `baffle-4` |
 | `baffle-6` | Install public CA in execution containers | `baffle-2` |
-| `baffle-7` | Integrate Baffle with Cladding runtime and `once` lifecycle | `baffle-4`, `baffle-5`, `baffle-6` |
+| `baffle-7` | Integrate Baffle with Cladding runtime and `run` lifecycle | `baffle-4`, `baffle-5`, `baffle-6` |
 | `baffle-8` | Implement Baffle-backed `cladding reload-proxy` | `baffle-7` |
 | `baffle-9` | Integration and security tests | `baffle-7`, `baffle-8` |
 | `baffle-10` | CI, packaging and release updates | `baffle-3`, `baffle-9` |

@@ -2,7 +2,9 @@
 
 > Historical proposal. The Squid reload and configuration requirements below
 > describe the pre-Baffle runtime. See `README.md` and
-> `docs/features/current-runtime-summary.md` for current behavior.
+> `docs/features/current-runtime-summary.md` for current behavior. This
+> proposal predates issue #27: direct execution in a running project is now
+> `exec`, and `run` creates and removes a temporary runtime.
 
 ## Objective
 Replace the `./cladding` shell script with a Rust binary that preserves the exact CLI, behavior, and semantics while reducing script complexity and removing external tool dependencies (other than `podman`). The binary should be self-contained: it embeds and materializes `Containerfile.cladding`, `config-template/`, and runtime scripts; `pods.yaml` is rendered in-memory and piped to `podman`.
@@ -11,7 +13,7 @@ Replace the `./cladding` shell script with a Rust binary that preserves the exac
 1. New project setup via `./cladding init` creates `.cladding/`, writes `cladding.json`, materializes embedded templates, and provisions the Podman network.
 2. Developers run `./cladding build` to compile `mcp-run` and `run-with-network`, and build default images using the embedded Containerfile.
 3. Teams use `./cladding up` and `./cladding down` to start/stop the pods with the same network, IP, and mount semantics as today.
-4. Users run commands inside the CLI container with `./cladding run <cmd>` preserving cwd-relative logic and TTY behavior.
+4. Users run commands inside the CLI container with `./cladding exec <cmd>` preserving cwd-relative logic and TTY behavior.
 5. Operators reload Squid with `./cladding reload-proxy` after updating allowlists.
 
 ## Functional Requirements
@@ -56,7 +58,7 @@ Replace the `./cladding` shell script with a Rust binary that preserves the exac
    - `run-with-network` (renamed from `run-remote`).
 2. Default images are built with the embedded `Containerfile.cladding` when configured image names equal `localhost/cladding-default:latest`.
 
-### 6. Runtime Execution (`run`)
+### 6. Runtime Execution (`exec`)
 1. Maintains cwd-relative mapping to `/home/user/workspace` inside the CLI container.
 2. Preserves TTY behavior (interactive vs non-interactive).
 3. Maintains env injection of `LANG`, `TERM`, `COLORTERM`, and `FORCE_COLOR` consistent with current script.

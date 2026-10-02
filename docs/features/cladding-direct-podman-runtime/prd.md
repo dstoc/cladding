@@ -164,8 +164,8 @@ Keep the raw container names currently expected by CLI commands:
 
 This avoids changing:
 
-- `cladding run`
-- `cladding run --target nw-sandbox`
+- `cladding exec`
+- `cladding exec --target nw-sandbox`
 - `cladding logs`
 - `cladding reload-proxy`
 - `cladding expose`
@@ -231,9 +231,9 @@ Unit and integration verification should cover:
 - `cladding up` creates the expected pods and containers without `podman play kube`
 - `podman pod ps --filter label=cladding` still reports running projects
 - `cladding ps` reports the same project name and project root
-- `cladding run -- true` works
-- `cladding run --target nw-sandbox -- true` works when enabled
-- `cladding run --target fs-sandbox -- true` works when enabled
+- `cladding exec -- true` works
+- `cladding exec --target nw-sandbox -- true` works when enabled
+- `cladding exec --target fs-sandbox -- true` works when enabled
 - `cladding logs agent` reads `<name>-agent-instance`
 - `cladding reload-proxy` still reconfigures Squid
 - `cladding down` is idempotent

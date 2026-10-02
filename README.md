@@ -8,7 +8,7 @@ Cladding lets you run an agent in a constrained container environment where netw
 
 The proxy startup script validates its mounted inputs, starts Baffle, and creates persistent sessions for the agent and (when enabled) the network sandbox. Cladding does not wait for those sessions before it starts the execution containers, so early proxy requests can fail while Baffle starts. Startup errors appear in the proxy container logs and exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime.
 
-In short: the agent cannot freely access the network. From the host, `cladding run --target nw-sandbox` or `cladding run --target fs-sandbox` runs a command directly in an enabled sandbox. This host-initiated path bypasses the agent-side delegation and policy checks. Commands inside the agent can use `run-in-nw-sandbox` or `run-in-fs-sandbox` to delegate through those checks.
+In short: the agent cannot freely access the network. From the host, `cladding exec --target nw-sandbox` or `cladding exec --target fs-sandbox` runs a command directly in an enabled sandbox. This host-initiated path bypasses the agent-side delegation and policy checks. Commands inside the agent can use `run-in-nw-sandbox` or `run-in-fs-sandbox` to delegate through those checks. `cladding run` creates an isolated, temporary runtime for one command and removes it when the command ends. `cladding exec` enters a runtime that is already running.
 
 ## Getting Started
 
@@ -84,22 +84,22 @@ creates the Baffle configuration and project credentials. `build` creates
 the local images and refreshes the embedded tools. `up` starts the proxy
 pod and enabled execution containers.
 
-* Run commands in the agent container (workdir follows your host `cwd` relative to the directory containing `.cladding`; if it cannot be mapped, the command starts in `/home/user`):
+* Execute commands in the agent container of an already-running project (workdir follows your host `cwd` relative to the directory containing `.cladding`; if it cannot be mapped, the command starts in `/home/user`):
 
   ```bash
-  cladding run codex --yolo
-  cladding run --env GEMINI_API_KEY gemini
+  cladding exec codex --yolo
+  cladding exec --env GEMINI_API_KEY gemini
   ```
 
 * Run one command in a fresh environment and remove it when the command ends:
 
   ```bash
-  cladding --config job.json once -- codex exec "Implement the task"
-  cladding --cladding-dir /tmp/job/.cladding --config - once -- cargo test --workspace
-  cladding once -- codex exec "Implement the task"
+  cladding --config job.json run -- codex exec "Implement the task"
+  cladding --cladding-dir /tmp/job/.cladding --config - run -- cargo test --workspace
+  cladding run codex exec "Implement the task"
   ```
 
-  `once` creates a UUID-named instance and a private runtime directory outside the source workspace. It can use the shared `.cladding` discovery behavior or a supplied configuration without creating runtime state in the source tree. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command after `--` runs with the same agent working-directory and environment rules as `run`. Without `--config -`, `once` keeps the normal `run` stdin and terminal behavior. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It can use the shared `.cladding` discovery behavior or a supplied configuration without creating runtime state in the source tree. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
 
 * Temporarily publish a TCP port from the agent container to the host while the project is running:
 
@@ -131,7 +131,7 @@ Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without th
 
 Use `--config FILE` to load a specific JSON configuration file. Use `--config -` to read the JSON configuration from stdin. When omitted, Cladding loads `cladding.json` from the selected or discovered `.cladding` directory.
 
-Both options are available to the configuration-consuming commands: `build`, `check`, `up`, `down`, `destroy`, `run`, `once`, `logs`, `reload-proxy`, `expose`, and `inject`.
+Both options are available to the configuration-consuming commands: `build`, `check`, `up`, `down`, `destroy`, `run`, `exec`, `logs`, `reload-proxy`, `expose`, and `inject`.
 
 When both options are set, `--config` selects the configuration contents and `--cladding-dir` selects the runtime directory. Relative build paths and mount `hostPath` values resolve from the configuration file's directory. For stdin configuration, they resolve from the parent of the explicitly selected `.cladding` directory, or from the invocation directory when `--cladding-dir` is omitted.
 
@@ -139,7 +139,8 @@ Place shared options before the command when using commands that accept arbitrar
 
 ```bash
 cladding --cladding-dir /tmp/project/.cladding up
-cladding --config ./custom.json run codex --yolo
+cladding --config ./custom.json exec codex --yolo
+cladding --config ./custom.json run -- codex exec "Implement the task"
 cladding --cladding-dir /tmp/project/.cladding down
 cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - check
 ```
@@ -175,7 +176,7 @@ After Cladding creates the agent and enabled network-sandbox containers, it runs
 
 Custom agent and network-sandbox images must support the same initialization command. They need `sh`, `cp`, a writable `/usr/local/share/ca-certificates/` directory, and an `update-ca-certificates` command that adds certificates from that directory to the system trust store. Images with another trust-store layout can provide a compatible command in the image. Cladding does not provide a per-image initialization hook. Applications that use a private CA bundle or another application-specific trust store may need a separate import step. Certificate-pinned applications can reject intercepted connections even when the system trusts the CA.
 
-`cladding down` and `cladding destroy` remove runtime resources but keep the project CA and secrets. `cladding once` creates a separate temporary CA and empty secrets directory, then removes them during cleanup.
+`cladding down` and `cladding destroy` remove runtime resources but keep the project CA and secrets. `cladding run` creates a separate temporary CA and empty secrets directory, then removes them during cleanup.
 
 To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then start the project to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
 
@@ -379,7 +380,8 @@ The filesystem sandbox has no proxy socket mount and no proxy environment by def
 cladding init [name]  # initialize .cladding and config
 cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
-cladding run [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] <cmd> [args...] # run directly in the selected container
+cladding run [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
+cladding exec [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] <cmd> [args...] # execute in the selected container of a running runtime
 cladding expose <containerport> [hostport] [--bind-address <address>] # block while forwarding host address/port to agent containerport
 cladding inject <host-endpoint> [containerport] # block while forwarding agent localhost containerport to a host-reachable endpoint
 cladding reload-proxy
@@ -392,4 +394,4 @@ cladding logs nw-sandbox -f  # follow network sandbox (mcp-run) logs
 cladding logs fs-sandbox -f  # follow filesystem sandbox (mcp-run) logs
 ```
 
-`cladding run` defaults to `agent`. The `nw-sandbox` and `fs-sandbox` targets run directly from the host; they do not use the agent's delegation or policy path. Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to request an allowlisted command through `run-remote` over the component-specific Unix socket. The filesystem sandbox has no workspace mount by default, so a command targeting it starts in `/home/user` unless its configuration adds a workspace mount.
+`cladding exec` defaults to `agent`. Its `nw-sandbox` and `fs-sandbox` targets run directly from the host; they do not use the agent's delegation or policy path. Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to request an allowlisted command through `run-remote` over the component-specific Unix socket. The filesystem sandbox has no workspace mount by default, so a command targeting it starts in `/home/user` unless its configuration adds a workspace mount.

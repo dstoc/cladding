@@ -18,7 +18,7 @@ pub(super) struct Context {
 #[derive(Debug, Clone)]
 pub(super) enum ConfigSource {
     Default,
-    OnceDefault { base_dir: PathBuf },
+    EphemeralDefault { base_dir: PathBuf },
     File(PathBuf),
     Stdin { raw: String, base_dir: PathBuf },
     Resolved(Box<ExecutionConfig>),
@@ -46,9 +46,9 @@ impl Context {
     pub(super) fn load_config(&self) -> Result<ExecutionConfig> {
         match &self.config_source {
             ConfigSource::Default => load_cladding_config_v2(&self.project_root),
-            ConfigSource::OnceDefault { base_dir } => {
+            ConfigSource::EphemeralDefault { base_dir } => {
                 let raw = write_default_cladding_config(
-                    Some("once"),
+                    Some("run"),
                     super::DEFAULT_SANDBOX_BUILD_IMAGE,
                     super::DEFAULT_CLI_BUILD_IMAGE,
                 )?;
@@ -142,7 +142,7 @@ pub(super) fn resolve_project_root(
     match find_project_root(cwd) {
         Some(root) => Ok(root),
         None => match command {
-            CommandSpec::Init { .. } | CommandSpec::Once { .. } => Ok(cwd.join(".cladding")),
+            CommandSpec::Init { .. } | CommandSpec::Run { .. } => Ok(cwd.join(".cladding")),
             CommandSpec::Ps => Ok(cwd.join(".cladding")),
             _ => {
                 eprintln!(
@@ -295,14 +295,14 @@ mod tests {
     }
 
     #[test]
-    fn once_can_select_a_missing_default_directory_without_creating_it() {
-        let temp = create_temp_dir("once-missing-directory");
+    fn run_can_select_a_missing_default_directory_without_creating_it() {
+        let temp = create_temp_dir("run-missing-directory");
         let project_root = temp.join("project");
         fs::create_dir_all(&project_root).unwrap();
         let selected = resolve_project_root(
             &project_root,
             None,
-            &CommandSpec::Once {
+            &CommandSpec::Run {
                 args: vec!["echo".to_string()],
             },
         )
@@ -313,20 +313,20 @@ mod tests {
     }
 
     #[test]
-    fn once_default_config_uses_shared_config_loading_without_persistent_state() {
-        let temp = create_temp_dir("once-default-config");
+    fn run_default_config_uses_shared_config_loading_without_persistent_state() {
+        let temp = create_temp_dir("run-default-config");
         let selected_root = temp.join(".cladding");
         let context = Context::new(
             selected_root.clone(),
             temp.clone(),
-            ConfigSource::OnceDefault {
+            ConfigSource::EphemeralDefault {
                 base_dir: temp.clone(),
             },
         );
 
         let config = context.load_config().unwrap();
 
-        assert_eq!(config.name, "once");
+        assert_eq!(config.name, "run");
         assert!(config.nw_sandbox_enabled());
         assert!(!selected_root.exists());
     }

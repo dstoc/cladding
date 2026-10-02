@@ -284,7 +284,7 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     cmd_up_inner(context, verbose, false, &mut runtime_create_attempted)
 }
 
-pub(super) fn cmd_up_once(context: &Context, verbose: bool) -> (Result<()>, bool) {
+pub(super) fn cmd_up_ephemeral(context: &Context, verbose: bool) -> (Result<()>, bool) {
     let mut runtime_create_attempted = false;
     let result = cmd_up_inner(context, verbose, true, &mut runtime_create_attempted);
     (result, runtime_create_attempted)
@@ -354,7 +354,7 @@ fn cmd_up_inner(
     Ok(())
 }
 
-pub(super) fn prepare_once_runtime_root(project_root: &std::path::Path) -> Result<()> {
+pub(super) fn prepare_ephemeral_runtime_root(project_root: &std::path::Path) -> Result<()> {
     let config_dir = project_root.join("config");
     let home_dir = project_root.join("home");
     let tools_bin_dir = project_root.join("tools/bin");
@@ -390,7 +390,7 @@ pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     }
 }
 
-pub(super) fn cmd_down_once(context: &Context) -> Result<()> {
+pub(super) fn cmd_down_ephemeral(context: &Context) -> Result<()> {
     let config = context.load_config()?;
     let spec = RuntimeSpec::build_with_workspace_root(
         &context.project_root,
@@ -563,23 +563,23 @@ mod tests {
     }
 
     #[test]
-    fn once_prepares_an_isolated_ca_and_empty_secrets_directory() {
+    fn run_prepares_an_isolated_ca_and_empty_secrets_directory() {
         let root =
-            std::env::temp_dir().join(format!("cladding-once-credentials-{}", std::process::id()));
+            std::env::temp_dir().join(format!("cladding-run-credentials-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let persistent_root = root.join("persistent/.cladding");
-        let once_root = root.join("once/.cladding");
+        let ephemeral_root = root.join("ephemeral/.cladding");
         fs::create_dir_all(&persistent_root).unwrap();
-        fs::create_dir_all(&once_root).unwrap();
+        fs::create_dir_all(&ephemeral_root).unwrap();
         cladding::credentials::ensure_baffle_credentials(&persistent_root).unwrap();
 
-        prepare_once_runtime_root(&once_root).unwrap();
+        prepare_ephemeral_runtime_root(&ephemeral_root).unwrap();
 
         let persistent_ca = fs::read(persistent_root.join("credentials/baffle/ca.crt")).unwrap();
-        let once_ca = fs::read(once_root.join("credentials/baffle/ca.crt")).unwrap();
-        assert_ne!(once_ca, persistent_ca);
+        let ephemeral_ca = fs::read(ephemeral_root.join("credentials/baffle/ca.crt")).unwrap();
+        assert_ne!(ephemeral_ca, persistent_ca);
         assert!(
-            fs::read_dir(once_root.join("credentials/baffle/secrets"))
+            fs::read_dir(ephemeral_root.join("credentials/baffle/secrets"))
                 .unwrap()
                 .next()
                 .is_none()

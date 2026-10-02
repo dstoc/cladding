@@ -180,13 +180,13 @@ The agent jailer should allow direct outbound traffic to enabled sandbox endpoin
 If no secondary sandbox is enabled, the agent should not wait for or allow any sandbox endpoint.
 
 ### CLI behavior
-`cladding run` defaults to the agent. Its `--target` option selects the agent, network sandbox, or filesystem sandbox. A selected sandbox must be enabled.
+`cladding exec` defaults to the agent. Its `--target` option selects the agent, network sandbox, or filesystem sandbox. A selected sandbox must be enabled.
 
 Recommended CLI shape:
 
 ```bash
-cladding run --target nw-sandbox <cmd>
-cladding run --target fs-sandbox <cmd>
+cladding exec --target nw-sandbox <cmd>
+cladding exec --target fs-sandbox <cmd>
 ```
 
 The `--target` option is optional and defaults to `agent`. If the selected sandbox is disabled, the command should fail with:
@@ -200,7 +200,7 @@ The existing `run-with-network` helper should be removed as part of this change.
 
 There are two command paths:
 
-- host/user CLI: `cladding run [--target agent|nw-sandbox|fs-sandbox]`, which executes directly in the selected container
+- host/user CLI: `cladding exec [--target agent|nw-sandbox|fs-sandbox]`, which executes directly in the selected container
 - in-agent helpers: `run-in-nw-sandbox` and `run-in-fs-sandbox`
 
 Host runs in either sandbox bypass the agent-side delegation and policy checks. In-agent helpers use those checks.
@@ -377,7 +377,7 @@ Using fixed slots avoids address churn when a project toggles one sandbox on or 
 8. Add `scripts/jail_fs_sandbox.sh` for the filesystem sandbox's outbound restrictions.
 9. Stop installing `run-with-network` into `.cladding/tools/bin`; install `run-remote`, `run-in-nw-sandbox`, and `run-in-fs-sandbox` instead.
 10. Update `check_required_images()` and `check_required_config_files()` in `cladding/src/cli.rs` to consider only enabled components.
-11. Update `cladding run` to select an execution target and fail cleanly when a selected sandbox is disabled.
+11. Update `cladding exec` to select an execution target and fail cleanly when a selected sandbox is disabled.
 12. Update README, examples, and feature docs for the component-object config, target-based mounts, and removal of `run-with-network`.
 
 ## Migration plan
@@ -454,8 +454,8 @@ To add a filesystem sandbox:
 3. A project with `nw_sandbox.enabled=false` renders no nw-sandbox pod, does not require `config/nw_sandbox`, does not set `RUN_NW_SANDBOX_SERVER` or `RUN_REMOTE_SERVER`, and does not make the agent jailer wait for a network sandbox.
 4. A project with enabled `fs_sandbox` renders `<name>-fs-sandbox`, starts `mcp-run`, and points `POLICY_DIR` at `/opt/config/fs_sandbox`.
 5. The agent receives `RUN_FS_SANDBOX_SERVER` only when `fs_sandbox` is enabled.
-6. `cladding run --target fs-sandbox <cmd>` targets the fs-sandbox container when enabled.
-7. `cladding run` defaults to the agent; `cladding run --target nw-sandbox <cmd>` targets the network sandbox when enabled.
+6. `cladding exec --target fs-sandbox <cmd>` targets the fs-sandbox container when enabled.
+7. `cladding exec` defaults to the agent; `cladding exec --target nw-sandbox <cmd>` targets the network sandbox when enabled.
 8. The fs-sandbox pod has no proxy env vars, no proxy host alias, and no jail rule allowing outbound traffic to the proxy.
 9. `RUN_REMOTE_SERVER` is not set for any runtime component.
 10. `mounts[].targets` applies mounts only to the named enabled containers.

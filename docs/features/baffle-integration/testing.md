@@ -5,7 +5,7 @@ from the **baffle-config** GitHub Actions job with rootless Podman.
 
 | Environment | Coverage |
 | --- | --- |
-| Ubuntu, default Podman runtime | Actual Cladding proxy, agent, and network-sandbox containers. The suite checks file-only session startup, exact host, port, and path policy, plaintext HTTP rejection, separate component policies, disabled network-sandbox lifecycle, trust installation, curl, Git, Node.js, token replacement, secret and control-socket isolation, reload snapshots, invalid reloads, persistent CA reuse, shutdown, and once cleanup after a nonzero command. |
+| Ubuntu, default Podman runtime | Actual Cladding proxy, agent, and network-sandbox containers. The suite checks file-only session startup, exact host, port, and path policy, plaintext HTTP rejection, separate component policies, disabled network-sandbox lifecycle, trust installation, curl, Git, Node.js, token replacement, secret and control-socket isolation, reload snapshots, invalid reloads, persistent CA reuse, shutdown, and run cleanup after a nonzero command. |
 | Ubuntu, runsc execution runtime | The same Cladding policy and client suite, with the agent and network sandbox running under runsc. The startup validator also checks scoped UDS access under runsc. |
 | Intel macOS, Podman machine | Linux amd64 Baffle startup with the named-volume UDS relay. The validator checks enabled and disabled sessions, socket permissions and access, daemon shutdown, and relay cleanup. |
 

@@ -20,7 +20,7 @@ impl Fixture {
     fn new() -> Self {
         let unique = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "cladding-run-targets-{}-{unique}",
+            "cladding-exec-targets-{}-{unique}",
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("fixture root should be created");
@@ -61,20 +61,20 @@ impl Fixture {
         }
     }
 
-    fn run(&self, target_args: &[&str], command: &str) -> Output {
+    fn exec(&self, target_args: &[&str], command: &str) -> Output {
         Command::new(env!("CARGO_BIN_EXE_cladding"))
             .current_dir(&self.root)
             .arg("--cladding-dir")
             .arg(&self.cladding_dir)
             .arg("--config")
             .arg(&self.config_path)
-            .arg("run")
+            .arg("exec")
             .args(target_args)
             .args(["echo", command])
             .env("PATH", &self.bin_dir)
             .env("CLADDING_TEST_ARGS", &self.args_path)
             .output()
-            .expect("Cladding run should execute")
+            .expect("Cladding exec should execute")
     }
 }
 
@@ -89,7 +89,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 #[test]
-fn run_executes_directly_in_the_selected_container_with_target_cwd() {
+fn exec_runs_directly_in_the_selected_container_with_target_cwd() {
     let fixture = Fixture::new();
 
     for (target_args, container_name, workdir, command) in [
@@ -118,10 +118,10 @@ fn run_executes_directly_in_the_selected_container_with_target_cwd() {
             "filesystem-sandbox",
         ),
     ] {
-        let output = fixture.run(target_args, command);
+        let output = fixture.exec(target_args, command);
         assert!(
             output.status.success(),
-            "run failed: {}",
+            "exec failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(

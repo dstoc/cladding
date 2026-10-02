@@ -2,7 +2,9 @@
 
 > Historical research notes. Squid references below describe the runtime at
 > the time of the Rust port. Current behavior is documented in
-> `docs/features/current-runtime-summary.md`.
+> `docs/features/current-runtime-summary.md`. The legacy shell command `run`
+> executed in an existing runtime. Issue #27 assigns that behavior to `exec`
+> and uses `run` for a temporary runtime lifecycle.
 
 ## Existing cladding script behavior (./cladding)
 - Entry point: POSIX shell script with subcommands `build`, `init [name]`, `check`, `up`, `down`, `destroy`, `run`, `reload-proxy`, `help`.
@@ -28,7 +30,7 @@
   - `podman play kube --down` on rendered YAML.
 - `destroy`:
   - `podman rm -f` on the three pods by name.
-- `run`:
+- Legacy `run` (now `exec`):
   - Executes command in `agent` container with cwd mapped relative to project root; TTY handling for interactive vs non-interactive.
 - `reload-proxy`:
   - `podman exec` into proxy container to reload Squid config.

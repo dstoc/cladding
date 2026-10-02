@@ -55,14 +55,14 @@ Give each Cladding project one durable Baffle interception CA and a private loca
 - Write newly generated material atomically; reuse a valid existing CA. Report incomplete, invalid or expired material instead of silently replacing it. Document explicit rotation rather than performing implicit rotation.
 - Create an empty `secrets/` directory but do not generate, copy, rewrite, log or place secret values into TOML, environment variables or images. Users or external secret managers create individual files; Baffle authorizes their symbolic identifiers through `[secrets].allowed`.
 - Arrange a read-only private credentials mount for the proxy container with suitable Baffle trusted-UID ownership. Prepare a **separate public-certificate-only** mount for the agent and network sandbox. Neither execution container may receive the CA private key or secret files.
-- Preserve the project's persistent CA and injection secrets across `down` and `destroy`. For `cladding once`, use isolated one-off CA and runtime paths, and remove ephemeral credentials during normal one-off cleanup. If using an explicitly selected project's existing secrets, reference them read-only without copying values and document the deliberate selection.
+- Preserve the project's persistent CA and injection secrets across `down` and `destroy`. For `cladding run`, use isolated one-off CA and runtime paths, and remove ephemeral credentials during normal one-off cleanup. If using an explicitly selected project's existing secrets, reference them read-only without copying values and document the deliberate selection.
 - Keep credentials out of source control and out of the agent's accessible workspace. A newly initialized `.cladding` already has an internal ignore file; document precautions for other project layouts.
 
 ### Acceptance criteria
 
 - Restarting a persistent project reuses the same valid CA; malformed material produces a clear failure and is not overwritten.
 - Proxy-side Baffle can read the CA and explicitly permitted secret files, while execution containers can access only the public certificate.
-- `once` creates and cleans up isolated ephemeral CA material.
+- `run` creates and cleans up isolated ephemeral CA material.
 - Permission, validity, missing-secret and ownership cases have automated coverage.
 
 depends-on: none
@@ -182,7 +182,7 @@ depends-on: baffle-2
 
 ---
 
-## baffle-7 — Integrate Baffle with Cladding lifecycle, including once
+## baffle-7 — Integrate Baffle with Cladding lifecycle, including run
 
 **Context:** [Baffle integration proposal](./prd.md), especially *Target architecture* and *Reload, commands and cleanup*.
 
@@ -195,13 +195,13 @@ Wire the new Baffle proxy image, scoped sockets, persistent credentials and post
 - Update the runtime specification, proxy pod/container inventory, mount construction and required-binary/image/config checks. Remove expectations of the Squid bridge sidecar and its local TCP ports.
 - In `cladding up`, prepare/validate the project CA before any container needing it is created; materialize runtime scripts and create containers through the existing Podman lifecycle. Install the public CA via `podman exec --user 0` after creating each agent/network-sandbox container.
 - Let the proxy container's startup script provision its sessions independently. Cladding must **not** block agent/network-sandbox startup waiting for a Baffle session to become ready. Installation of the CA is synchronous, but Baffle session readiness is not.
-- Integrate the same behavior with `cladding once`, including its unique names, private runtime namespace, noninteractive `--config -` behavior and ownership-aware cleanup. Avoid accidentally reusing a different project's CA or secret source.
-- Preserve running-project discovery, name collision/incomplete-runtime reporting and normal `check`, `build`, `up`, `down`, `destroy` and `once` semantics. `down` and `destroy` remove disposable runtime resources and proxy sessions, not a persistent project's CA or injection credentials.
+- Integrate the same behavior with `cladding run`, including its unique names, private runtime namespace, noninteractive `--config -` behavior and ownership-aware cleanup. Avoid accidentally reusing a different project's CA or secret source.
+- Preserve running-project discovery, name collision/incomplete-runtime reporting and normal `check`, `build`, `up`, `down`, `destroy` and `run` semantics. `down` and `destroy` remove disposable runtime resources and proxy sessions, not a persistent project's CA or injection credentials.
 - On container-creation or CA-installation failure, report the cause and clean up only resources owned by the failing invocation. Do not change unrelated `cladding expose` and `cladding inject` behavior.
 
 ### Acceptance criteria
 
-- The complete proxy/agent/network-sandbox arrangement works under normal `up` and isolated `once` lifecycles.
+- The complete proxy/agent/network-sandbox arrangement works under normal `up` and isolated `run` lifecycles.
 - A normal project restart retains its CA; cleanup removes disposable sockets and containers without deleting persistent credentials.
 - The expected runtime inventory matches the new container set and no longer includes Squid components.
 - CA-installation failures follow existing cleanup conventions; session startup failures remain diagnosable through proxy-container status/logs.
@@ -260,7 +260,7 @@ Exercise Baffle integration end-to-end, beyond isolated command construction and
 ### Acceptance criteria
 
 - Automated integration tests cover the actual Baffle proxy image and representative HTTPS client workloads.
-- Tests catch regressions in socket scoping, secret isolation, trust installation, reload semantics and `once` cleanup.
+- Tests catch regressions in socket scoping, secret isolation, trust installation, reload semantics and `run` cleanup.
 - The supported-platform test matrix and any test-environment limitations are explicitly documented.
 
 depends-on: baffle-7, baffle-8

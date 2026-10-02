@@ -49,19 +49,28 @@ pub(super) enum CommandSpec {
     },
     /// Force-remove running containers
     Destroy,
-    /// Run a command directly in the selected execution container
+    /// Run a command in a temporary runtime, then remove the runtime
     Run {
-        /// Execution target. Sandbox targets run directly from the host and bypass agent-side delegation and policy checks
-        #[arg(long, value_enum, default_value_t = RunTarget::Agent)]
-        target: RunTarget,
-        #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
-        env: Vec<String>,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            value_name = "COMMAND",
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            required = true
+        )]
         args: Vec<String>,
     },
-    /// Run one command in an isolated environment, then remove it
-    Once {
-        #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
+    /// Execute a command in an already-running execution container
+    Exec {
+        /// Execution target. Sandbox targets run directly from the host and bypass agent-side delegation and policy checks
+        #[arg(long, value_enum, default_value_t = ExecTarget::Agent)]
+        target: ExecTarget,
+        #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
+        env: Vec<String>,
+        #[arg(
+            value_name = "COMMAND",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
         args: Vec<String>,
     },
     /// Show logs for a cladding container
@@ -162,13 +171,13 @@ fn parse_inject_port(port: &str, raw: &str) -> std::result::Result<u16, String> 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
-pub(super) enum RunTarget {
+pub(super) enum ExecTarget {
     Agent,
     NwSandbox,
     FsSandbox,
 }
 
-impl RunTarget {
+impl ExecTarget {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Agent => "agent",
@@ -248,6 +257,8 @@ mod tests {
     fn help_summaries_describe_the_baffle_workflow() {
         let mut command = Cli::command();
         for (name, expected) in [
+            ("run", "temporary runtime"),
+            ("exec", "already-running"),
             ("init", "Baffle credentials"),
             ("build", "embedded tools"),
             ("up", "proxy"),
@@ -374,46 +385,40 @@ mod tests {
     }
 
     #[test]
-    fn run_arguments_remain_positional_after_global_options() {
+    fn exec_arguments_remain_positional_after_global_options() {
         let cli = Cli::try_parse_from([
             "cladding",
             "--config",
             "custom.json",
-            "run",
+            "exec",
             "echo",
             "--config",
         ])
-        .expect("run command arguments should remain positional");
+        .expect("exec command arguments should remain positional");
         assert_eq!(cli.config.as_deref(), Some(Path::new("custom.json")));
         match cli.command.expect("command") {
-            CommandSpec::Run { args, .. } => assert_eq!(args, ["echo", "--config"]),
+            CommandSpec::Exec { args, .. } => assert_eq!(args, ["echo", "--config"]),
             other => panic!("unexpected command: {other:?}"),
         }
     }
 
     #[test]
-    fn once_requires_a_command_after_double_dash() {
-        let cli = Cli::try_parse_from([
-            "cladding",
-            "--config",
-            "job.json",
-            "once",
-            "--",
-            "codex",
-            "exec",
-            "--full-auto",
-        ])
-        .expect("once arguments should parse after --");
-
-        assert_eq!(cli.config.as_deref(), Some(Path::new("job.json")));
-        match cli.command.expect("command") {
-            CommandSpec::Once { args } => {
-                assert_eq!(args, ["codex", "exec", "--full-auto"]);
+    fn run_takes_a_command_and_its_arguments() {
+        for argv in [
+            vec!["cladding", "run", "codex", "exec", "--full-auto"],
+            vec!["cladding", "run", "--", "codex", "exec", "--full-auto"],
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("run command should parse");
+            match cli.command.expect("command") {
+                CommandSpec::Run { args } => {
+                    assert_eq!(args, ["codex", "exec", "--full-auto"]);
+                }
+                other => panic!("unexpected command: {other:?}"),
             }
-            other => panic!("unexpected command: {other:?}"),
         }
-        assert!(Cli::try_parse_from(["cladding", "once", "codex"]).is_err());
-        assert!(Cli::try_parse_from(["cladding", "once", "--"]).is_err());
+
+        assert!(Cli::try_parse_from(["cladding", "run"]).is_err());
+        assert!(Cli::try_parse_from(["cladding", "once", "--", "codex"]).is_err());
     }
 
     #[test]
@@ -506,27 +511,28 @@ mod tests {
     }
 
     #[test]
-    fn run_defaults_to_agent_and_accepts_each_closed_target() {
-        let default = Cli::try_parse_from(["cladding", "run", "echo", "hello"])
-            .expect("default run target should parse");
+    fn exec_defaults_to_agent_and_accepts_each_closed_target() {
+        let default = Cli::try_parse_from(["cladding", "exec", "echo", "hello"])
+            .expect("default exec target should parse");
         match default.command.expect("command") {
-            CommandSpec::Run { target, args, .. } => {
-                assert_eq!(target, RunTarget::Agent);
+            CommandSpec::Exec { target, args, .. } => {
+                assert_eq!(target, ExecTarget::Agent);
                 assert_eq!(args, ["echo", "hello"]);
             }
             other => panic!("unexpected command: {other:?}"),
         }
 
         for (value, expected) in [
-            ("agent", RunTarget::Agent),
-            ("nw-sandbox", RunTarget::NwSandbox),
-            ("fs-sandbox", RunTarget::FsSandbox),
+            ("agent", ExecTarget::Agent),
+            ("nw-sandbox", ExecTarget::NwSandbox),
+            ("fs-sandbox", ExecTarget::FsSandbox),
         ] {
-            let cli = Cli::try_parse_from(["cladding", "run", "--target", value, "echo", "--flag"])
-                .expect("valid run target should parse");
+            let cli =
+                Cli::try_parse_from(["cladding", "exec", "--target", value, "echo", "--flag"])
+                    .expect("valid exec target should parse");
 
             match cli.command.expect("command") {
-                CommandSpec::Run { target, args, .. } => {
+                CommandSpec::Exec { target, args, .. } => {
                     assert_eq!(target, expected);
                     assert_eq!(args, ["echo", "--flag"]);
                 }
@@ -534,8 +540,8 @@ mod tests {
             }
         }
 
-        assert!(Cli::try_parse_from(["cladding", "run", "--target", "proxy", "true"]).is_err());
-        assert!(Cli::try_parse_from(["cladding", "run-with-scissors", "true"]).is_err());
+        assert!(Cli::try_parse_from(["cladding", "exec", "--target", "proxy", "true"]).is_err());
+        assert!(Cli::try_parse_from(["cladding", "exec", "--target", "unknown", "true"]).is_err());
     }
 
     #[test]
