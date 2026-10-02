@@ -165,7 +165,7 @@ Keep the raw container names currently expected by CLI commands:
 This avoids changing:
 
 - `cladding run`
-- `cladding run-with-scissors`
+- `cladding run --target nw-sandbox`
 - `cladding logs`
 - `cladding reload-proxy`
 - `cladding expose`
@@ -232,8 +232,8 @@ Unit and integration verification should cover:
 - `podman pod ps --filter label=cladding` still reports running projects
 - `cladding ps` reports the same project name and project root
 - `cladding run -- true` works
-- `cladding run-with-scissors --target nw-sandbox -- true` works when enabled
-- `cladding run-with-scissors --target fs-sandbox -- true` works when enabled
+- `cladding run --target nw-sandbox -- true` works when enabled
+- `cladding run --target fs-sandbox -- true` works when enabled
 - `cladding logs agent` reads `<name>-agent-instance`
 - `cladding reload-proxy` still reconfigures Squid
 - `cladding down` is idempotent

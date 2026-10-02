@@ -49,8 +49,11 @@ pub(super) enum CommandSpec {
     },
     /// Force-remove running containers
     Destroy,
-    /// Run a command in the agent container
+    /// Run a command directly in the selected execution container
     Run {
+        /// Execution target. Sandbox targets run directly from the host and bypass agent-side delegation and policy checks
+        #[arg(long, value_enum, default_value_t = RunTarget::Agent)]
+        target: RunTarget,
         #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
         env: Vec<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -59,15 +62,6 @@ pub(super) enum CommandSpec {
     /// Run one command in an isolated environment, then remove it
     Once {
         #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Run a command in the sandbox container
-    RunWithScissors {
-        #[arg(long, value_enum, default_value_t = RunWithScissorsTarget::NwSandbox)]
-        target: RunWithScissorsTarget,
-        #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
-        env: Vec<String>,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Show logs for a cladding container
@@ -168,37 +162,42 @@ fn parse_inject_port(port: &str, raw: &str) -> std::result::Result<u16, String> 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
-pub(super) enum RunWithScissorsTarget {
+pub(super) enum RunTarget {
+    Agent,
     NwSandbox,
     FsSandbox,
 }
 
-impl RunWithScissorsTarget {
+impl RunTarget {
     pub(super) fn as_str(self) -> &'static str {
         match self {
+            Self::Agent => "agent",
             Self::NwSandbox => "nw-sandbox",
             Self::FsSandbox => "fs-sandbox",
         }
     }
 
-    pub(super) fn config_key(self) -> &'static str {
-        match self {
-            Self::NwSandbox => "nw_sandbox",
-            Self::FsSandbox => "fs_sandbox",
-        }
-    }
-
     pub(super) fn enabled(self, config: &ExecutionConfig) -> bool {
         match self {
+            Self::Agent => true,
             Self::NwSandbox => config.nw_sandbox_enabled(),
             Self::FsSandbox => config.fs_sandbox_enabled(),
         }
     }
 
-    pub(super) fn other(self) -> Self {
+    pub(super) fn mount_target(self) -> cladding::config::MountTarget {
         match self {
-            Self::NwSandbox => Self::FsSandbox,
-            Self::FsSandbox => Self::NwSandbox,
+            Self::Agent => cladding::config::MountTarget::Agent,
+            Self::NwSandbox => cladding::config::MountTarget::NwSandbox,
+            Self::FsSandbox => cladding::config::MountTarget::FsSandbox,
+        }
+    }
+
+    pub(super) fn other_sandbox(self) -> Option<Self> {
+        match self {
+            Self::Agent => None,
+            Self::NwSandbox => Some(Self::FsSandbox),
+            Self::FsSandbox => Some(Self::NwSandbox),
         }
     }
 }
@@ -507,16 +506,36 @@ mod tests {
     }
 
     #[test]
-    fn run_with_scissors_target_parses() {
-        let cli = Cli::try_parse_from(["cladding", "run-with-scissors", "--target", "fs-sandbox"])
-            .expect("cli parse");
-
-        match cli.command.expect("command") {
-            CommandSpec::RunWithScissors { target, .. } => {
-                assert_eq!(target, RunWithScissorsTarget::FsSandbox);
+    fn run_defaults_to_agent_and_accepts_each_closed_target() {
+        let default = Cli::try_parse_from(["cladding", "run", "echo", "hello"])
+            .expect("default run target should parse");
+        match default.command.expect("command") {
+            CommandSpec::Run { target, args, .. } => {
+                assert_eq!(target, RunTarget::Agent);
+                assert_eq!(args, ["echo", "hello"]);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+
+        for (value, expected) in [
+            ("agent", RunTarget::Agent),
+            ("nw-sandbox", RunTarget::NwSandbox),
+            ("fs-sandbox", RunTarget::FsSandbox),
+        ] {
+            let cli = Cli::try_parse_from(["cladding", "run", "--target", value, "echo", "--flag"])
+                .expect("valid run target should parse");
+
+            match cli.command.expect("command") {
+                CommandSpec::Run { target, args, .. } => {
+                    assert_eq!(target, expected);
+                    assert_eq!(args, ["echo", "--flag"]);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+
+        assert!(Cli::try_parse_from(["cladding", "run", "--target", "proxy", "true"]).is_err());
+        assert!(Cli::try_parse_from(["cladding", "run-with-scissors", "true"]).is_err());
     }
 
     #[test]

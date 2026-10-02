@@ -1,4 +1,4 @@
-use super::args::{LogsTarget, RunWithScissorsTarget};
+use super::args::{LogsTarget, RunTarget};
 use super::context::{Context, project_runtime_status};
 use super::{CONTAINER_HOME_DIR, CONTAINER_WORKSPACE_DIR};
 use anyhow::Context as _;
@@ -25,15 +25,24 @@ struct PodmanExec<'a> {
     forward_signals: bool,
 }
 
-pub(super) fn cmd_run(context: &Context, env_vars: &[String], args: &[String]) -> Result<()> {
+pub(super) fn cmd_run(
+    context: &Context,
+    target: RunTarget,
+    env_vars: &[String],
+    args: &[String],
+) -> Result<()> {
     let config = context.load_config()?;
-    let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
+    if !target.enabled(&config) {
+        return run_target_disabled(&config, target);
+    }
+    let container_name =
+        runtime_container_name(&project_component_name(&config.name, target.as_str()));
     run_podman_exec(
         context,
         &config,
         PodmanExec {
             command_name: "run",
-            mount_target: MountTarget::Agent,
+            mount_target: target.mount_target(),
             container_name: &container_name,
             env_vars,
             args,
@@ -63,60 +72,11 @@ pub(super) fn cmd_run_once(context: &Context, args: &[String], forward_stdin: bo
     )
 }
 
-pub(super) fn cmd_run_with_scissors(
-    context: &Context,
-    target: RunWithScissorsTarget,
-    env_vars: &[String],
-    args: &[String],
-) -> Result<()> {
-    let config = context.load_config()?;
-    let (container_name, mount_target) = match target {
-        RunWithScissorsTarget::NwSandbox => {
-            if !target.enabled(&config) {
-                return run_with_scissors_target_disabled(&config, target);
-            }
-            (
-                runtime_container_name(&project_component_name(&config.name, "nw-sandbox")),
-                MountTarget::NwSandbox,
-            )
-        }
-        RunWithScissorsTarget::FsSandbox => {
-            if !target.enabled(&config) {
-                return run_with_scissors_target_disabled(&config, target);
-            }
-            (
-                runtime_container_name(&project_component_name(&config.name, "fs-sandbox")),
-                MountTarget::FsSandbox,
-            )
-        }
-    };
-    run_podman_exec(
-        context,
-        &config,
-        PodmanExec {
-            command_name: "run-with-scissors",
-            mount_target,
-            container_name: &container_name,
-            env_vars,
-            args,
-            allow_interactive: true,
-            forward_stdin: true,
-            forward_signals: false,
-        },
-    )
-}
-
-fn run_with_scissors_target_disabled(
-    config: &ExecutionConfig,
-    target: RunWithScissorsTarget,
-) -> Result<()> {
+fn run_target_disabled(config: &ExecutionConfig, target: RunTarget) -> Result<()> {
     let target_name = target.as_str();
-    let target_key = target.config_key();
-    let other = target.other();
-    let hint = match (other.enabled(config), target.enabled(config)) {
-        (true, false) => format!("hint: use '--target {}'", other.as_str()),
-        (false, false) => "hint: enable 'nw_sandbox.enabled' or 'fs_sandbox.enabled'".to_string(),
-        _ => format!("hint: enable '{target_key}.enabled' or choose a different target"),
+    let hint = match target.other_sandbox().filter(|other| other.enabled(config)) {
+        Some(other) => format!("hint: use '--target {}'", other.as_str()),
+        None => "hint: enable 'nw_sandbox.enabled' or 'fs_sandbox.enabled'".to_string(),
     };
 
     eprintln!(
@@ -124,9 +84,7 @@ fn run_with_scissors_target_disabled(
         config.name
     );
     eprintln!("{hint}");
-    Err(Error::message(
-        "selected run-with-scissors target is disabled",
-    ))
+    Err(Error::message("selected run target is disabled"))
 }
 
 pub(super) fn cmd_logs(context: &Context, target: LogsTarget, args: &[String]) -> Result<()> {
@@ -391,6 +349,12 @@ fn resolve_container_workdir(
         return Ok(PathBuf::from(CONTAINER_HOME_DIR));
     }
 
+    // The filesystem sandbox has no workspace mount by default. Do not point
+    // it at the agent's workspace path unless its config adds a real mount.
+    if target == MountTarget::FsSandbox {
+        return Ok(PathBuf::from(CONTAINER_HOME_DIR));
+    }
+
     let Ok(workdir_rel) = cwd.strip_prefix(project_dir) else {
         return Ok(PathBuf::from(CONTAINER_HOME_DIR));
     };
@@ -470,6 +434,73 @@ mod tests {
 
         let resolved =
             resolve_container_workdir(&config, &project_dir, &nested_dir, MountTarget::Agent)
+                .expect("workdir");
+        assert_eq!(
+            resolved,
+            PathBuf::from(CONTAINER_WORKSPACE_DIR).join("src/module")
+        );
+    }
+
+    #[test]
+    fn resolve_container_workdir_does_not_assume_a_fs_sandbox_workspace_mount() {
+        let temp = create_temp_dir("fs-sandbox-no-workspace");
+        let project_dir = temp.join("workspace");
+        let nested_dir = project_dir.join("src/module");
+        fs::create_dir_all(&nested_dir).expect("create nested dir");
+
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+                build: None,
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            proxy: None,
+            mounts: Vec::new(),
+        };
+
+        let resolved =
+            resolve_container_workdir(&config, &project_dir, &nested_dir, MountTarget::FsSandbox)
+                .expect("workdir");
+        assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
+    }
+
+    #[test]
+    fn resolve_container_workdir_maps_an_explicit_fs_sandbox_workspace_mount() {
+        let temp = create_temp_dir("fs-sandbox-custom-workspace");
+        let project_dir = temp.join("project");
+        let custom_root = project_dir.join("workspace");
+        let nested_dir = custom_root.join("src/module");
+        fs::create_dir_all(&nested_dir).expect("create nested dir");
+
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+                build: None,
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            proxy: None,
+            mounts: vec![ResolvedMountConfig {
+                mount_path: CONTAINER_WORKSPACE_DIR.to_string(),
+                host_path: Some(custom_root),
+                volume: None,
+                mount_type: MountType::Bind,
+                tmpfs_size_bytes: None,
+                read_only: false,
+                targets: vec![MountTarget::FsSandbox],
+                ignore: false,
+            }],
+        };
+
+        let resolved =
+            resolve_container_workdir(&config, &project_dir, &nested_dir, MountTarget::FsSandbox)
                 .expect("workdir");
         assert_eq!(
             resolved,
