@@ -159,7 +159,7 @@ With `podman play kube`, Podman may continue deriving raw container names from t
 - old: `<cli_pod_name>-cli-app`
 - new: derived from `<agent_name>` and `agent`
 
-`cladding run-with-scissors` should execute in the network sandbox container:
+`cladding run --target nw-sandbox` should execute in the network sandbox container:
 
 - old: `<sandbox_pod_name>-sandbox-app`
 - new: derived from `<sandbox_name>` and `nw-sandbox`
@@ -255,7 +255,7 @@ For cleanup only, commands may include best-effort legacy name removal for:
 - `<name>-sandbox-pod`
 - `<name>-cli-pod`
 
-This fallback is only for teardown and should not be used for `run`, `run-with-scissors`, proxy reload, or new pod startup.
+This fallback is only for teardown and should not be used for `run`, `run --target nw-sandbox`, proxy reload, or new pod startup.
 
 ## Non-Goals
 1. Changing the shared Podman network pool names (`cladding-N`) or subnet allocation.
@@ -298,7 +298,7 @@ This fallback is only for teardown and should not be used for `run`, `run-with-s
 ## Success Criteria
 1. New projects start pods named `<name>-proxy`, `<name>-nw-sandbox`, and `<name>-agent`.
 2. Runtime DNS, proxy environment variables, jail scripts, and `RUN_REMOTE_SERVER` use the new names.
-3. `cladding run`, `cladding run-with-scissors`, `cladding reload-proxy`, `cladding expose`, `cladding down`, and `cladding destroy` work with the new names.
+3. `cladding run`, `cladding run --target nw-sandbox`, `cladding reload-proxy`, `cladding expose`, `cladding down`, and `cladding destroy` work with the new names.
 4. Rendered runtime YAML contains no `proxy-pod`, `sandbox-pod`, `cli-pod`, `sandbox-app`, or `cli-app` references.
 5. Runtime config uses `nw_sandbox`, not `sandbox_commands`.
 6. `cladding check` fails when old renamed config entries are still present.

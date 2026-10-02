@@ -8,7 +8,7 @@ Cladding lets you run an agent in a constrained container environment where netw
 
 The proxy startup script validates its mounted inputs, starts Baffle, and creates persistent sessions for the agent and (when enabled) the network sandbox. Cladding does not wait for those sessions before it starts the execution containers, so early proxy requests can fail while Baffle starts. Startup errors appear in the proxy container logs and exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime.
 
-In short: the agent cannot freely access the network; users can run sandbox commands from the host with [`cladding run-with-scissors`](#useful-commands), while commands running inside the agent can delegate to sandbox containers with `run-in-nw-sandbox` or `run-in-fs-sandbox`.
+In short: the agent cannot freely access the network. From the host, `cladding run --target nw-sandbox` or `cladding run --target fs-sandbox` runs a command directly in an enabled sandbox. This host-initiated path bypasses the agent-side delegation and policy checks. Commands inside the agent can use `run-in-nw-sandbox` or `run-in-fs-sandbox` to delegate through those checks.
 
 ## Getting Started
 
@@ -131,7 +131,7 @@ Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without th
 
 Use `--config FILE` to load a specific JSON configuration file. Use `--config -` to read the JSON configuration from stdin. When omitted, Cladding loads `cladding.json` from the selected or discovered `.cladding` directory.
 
-Both options are available to the configuration-consuming commands: `build`, `check`, `up`, `down`, `destroy`, `run`, `once`, `run-with-scissors`, `logs`, `reload-proxy`, `expose`, and `inject`.
+Both options are available to the configuration-consuming commands: `build`, `check`, `up`, `down`, `destroy`, `run`, `once`, `logs`, `reload-proxy`, `expose`, and `inject`.
 
 When both options are set, `--config` selects the configuration contents and `--cladding-dir` selects the runtime directory. Relative build paths and mount `hostPath` values resolve from the configuration file's directory. For stdin configuration, they resolve from the parent of the explicitly selected `.cladding` directory, or from the invocation directory when `--cladding-dir` is omitted.
 
@@ -379,8 +379,7 @@ The filesystem sandbox has no proxy socket mount and no proxy environment by def
 cladding init [name]  # initialize .cladding and config
 cladding check        # verify required paths/images
 cladding ps           # list running cladding projects
-cladding run [--env KEY[=VALUE] ...] [cmd] # run a command in the agent container
-cladding run-with-scissors [--target nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] [cmd] # run a command in an enabled sandbox container
+cladding run [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] <cmd> [args...] # run directly in the selected container
 cladding expose <containerport> [hostport] [--bind-address <address>] # block while forwarding host address/port to agent containerport
 cladding inject <host-endpoint> [containerport] # block while forwarding agent localhost containerport to a host-reachable endpoint
 cladding reload-proxy
@@ -393,4 +392,4 @@ cladding logs nw-sandbox -f  # follow network sandbox (mcp-run) logs
 cladding logs fs-sandbox -f  # follow filesystem sandbox (mcp-run) logs
 ```
 
-Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to ask an enabled sandbox to run an allowlisted command. These wrappers call `run-remote` over the component-specific Unix socket injected into the agent environment.
+`cladding run` defaults to `agent`. The `nw-sandbox` and `fs-sandbox` targets run directly from the host; they do not use the agent's delegation or policy path. Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to request an allowlisted command through `run-remote` over the component-specific Unix socket. The filesystem sandbox has no workspace mount by default, so a command targeting it starts in `/home/user` unless its configuration adds a workspace mount.

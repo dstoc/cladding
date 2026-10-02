@@ -74,11 +74,8 @@ pub fn run() -> Result<()> {
         CommandSpec::Up { verbose } => lifecycle::cmd_up(&context, verbose),
         CommandSpec::Down { verbose } => lifecycle::cmd_down(&context, verbose),
         CommandSpec::Destroy => lifecycle::cmd_destroy(&context),
-        CommandSpec::Run { env, args } => exec::cmd_run(&context, &env, &args),
+        CommandSpec::Run { target, env, args } => exec::cmd_run(&context, target, &env, &args),
         CommandSpec::Once { args } => once::cmd_once(&context, &args, config_uses_stdin),
-        CommandSpec::RunWithScissors { target, env, args } => {
-            exec::cmd_run_with_scissors(&context, target, &env, &args)
-        }
         CommandSpec::Logs { target, args } => exec::cmd_logs(&context, target, &args),
         CommandSpec::ReloadProxy => exec::cmd_reload_proxy(&context),
         CommandSpec::Ps => lifecycle::cmd_ps(&context),

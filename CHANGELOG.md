@@ -112,7 +112,7 @@
 * `up` and `run` check project status, error on conflict ([ecc4737](https://github.com/dstoc/cladding/commit/ecc47373f3180c49ab3f435e7bae4a14f8d1ef5c))
 * add `cladding ps` ([6a9c13c](https://github.com/dstoc/cladding/commit/6a9c13ca895e315dc609b912278280ad23f61899))
 * add cladding expose &lt;cli-port&gt; [host-port] ([a661cb5](https://github.com/dstoc/cladding/commit/a661cb5a392fef05aee3c4731a368e7bedb474a8))
-* add run-with-scissors ([7ca34f6](https://github.com/dstoc/cladding/commit/7ca34f6bb278da9ef71b92c3ccf73a3d251c6435))
+* add direct host runs in enabled sandboxes ([7ca34f6](https://github.com/dstoc/cladding/commit/7ca34f6bb278da9ef71b92c3ccf73a3d251c6435))
 * add sandbox-only mounts ([91c94c6](https://github.com/dstoc/cladding/commit/91c94c65c644028da03222d323fda13b323178dd))
 * add user configurable volumes/mounts ([bbca499](https://github.com/dstoc/cladding/commit/bbca499dba705b8475ea91e08781e4d0a7fb6764))
 * allocate network dynamically during `up` ([433418b](https://github.com/dstoc/cladding/commit/433418b4cfa1260bb77958327800dd0defcfb2e0))

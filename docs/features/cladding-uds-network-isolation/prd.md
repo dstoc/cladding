@@ -341,7 +341,7 @@ Project runtime discovery should continue to use pod labels:
 Commands that currently resolve the active network should instead resolve the running project directly by labels and expected component names. For example:
 
 - `cladding run` should find `<name>-agent-instance`
-- `cladding run-with-scissors` should find the selected sandbox instance
+- `cladding run --target nw-sandbox` should find the selected sandbox instance
 - `cladding logs` should find the selected component instance
 - `cladding expose` should find the running agent pod by label/name and attach the expose sidecar to it
 
