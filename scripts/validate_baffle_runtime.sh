@@ -212,7 +212,7 @@ printf '%s' "cladding-test-old-value" > "$project_root/credentials/baffle/secret
 printf '%s' "cladding-test-new-value" > "$project_root/credentials/baffle/secrets/test-token-new"
 chmod 0644 "$project_root/credentials/baffle/secrets/test-token-old"
 chmod 0600 "$project_root/credentials/baffle/secrets/test-token-new"
-jq --arg image "$proxy_image" '.proxy = {image: $image}' \
+jq --arg image "$proxy_image" '.proxy.image = $image' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 

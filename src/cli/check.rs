@@ -127,12 +127,16 @@ pub(super) fn check_required_config_files(
         }
     }
 
-    let mut session_configs = vec![("agent", config.agent_session_config())];
+    let mut session_configs = vec![("agent", config.agent_session_config(), "agent/proxy.sock")];
     if config.nw_sandbox_enabled() {
-        session_configs.push(("network sandbox", config.nw_sandbox_session_config()));
+        session_configs.push((
+            "network sandbox",
+            config.nw_sandbox_session_config(),
+            "nw-sandbox/proxy.sock",
+        ));
     }
-    for (component, name) in session_configs {
-        if let Err(reason) = validate_selected_session_config(&dst, name) {
+    for (component, name, expected_socket_name) in session_configs {
+        if let Err(reason) = validate_selected_session_config(&dst, name, expected_socket_name) {
             eprintln!("invalid: {component} Baffle session config '{name}': {reason}");
             invalid_sessions = true;
         }
@@ -155,7 +159,11 @@ pub(super) fn check_required_config_files(
     Ok(())
 }
 
-fn validate_selected_session_config(config_dir: &Path, name: &str) -> anyhow::Result<()> {
+fn validate_selected_session_config(
+    config_dir: &Path,
+    name: &str,
+    expected_socket_name: &str,
+) -> anyhow::Result<()> {
     cladding::config::validate_session_config_path(name)
         .map_err(|reason| anyhow::anyhow!("{reason}"))?;
 
@@ -217,7 +225,7 @@ fn validate_selected_session_config(config_dir: &Path, name: &str) -> anyhow::Re
     }
     let contents = fs::read_to_string(&canonical_selected)
         .map_err(|error| anyhow::anyhow!("cannot read selected session config: {error}"))?;
-    cladding::config::validate_baffle_session_config(&contents)
+    cladding::config::validate_baffle_session_config_for_socket(&contents, expected_socket_name)
 }
 
 fn validate_baffle_session_path_metadata(
@@ -522,7 +530,11 @@ mod tests {
         let sessions = root.join("config/proxy/sessions");
         fs::create_dir_all(&sessions).unwrap();
         fs::write(root.join("config/proxy/daemon.toml"), "[daemon]\n").unwrap();
-        fs::write(sessions.join("agent-custom.toml"), "version = 2\n").unwrap();
+        fs::write(
+            sessions.join("agent-custom.toml"),
+            "version = 2\nsocket_name = 'agent/proxy.sock'\n",
+        )
+        .unwrap();
 
         let mut config = execution_config(false, false, Vec::new());
         config.proxy = Some(cladding::config::ExecutionProxyConfig {
@@ -549,10 +561,14 @@ mod tests {
         fs::create_dir_all(sessions.join("restricted")).unwrap();
         fs::create_dir_all(root.join("config/nw_sandbox")).unwrap();
         fs::write(root.join("config/proxy/daemon.toml"), "[daemon]\n").unwrap();
-        fs::write(sessions.join("agent-custom.toml"), "version = 2\n").unwrap();
+        fs::write(
+            sessions.join("agent-custom.toml"),
+            "version = 2\nsocket_name = 'agent/proxy.sock'\n",
+        )
+        .unwrap();
         fs::write(
             sessions.join("restricted/nw.toml"),
-            "version = 2\nunmatched = 'tunnel'\n",
+            "version = 2\nsocket_name = 'nw-sandbox/proxy.sock'\nunmatched = 'tunnel'\n",
         )
         .unwrap();
 
@@ -576,6 +592,57 @@ mod tests {
             fs::set_permissions(&selected, fs::Permissions::from_mode(0o644)).unwrap();
         }
         fs::write(sessions.join("restricted/nw.toml"), "version = 1\n").unwrap();
+        assert!(check_required_config_files(&context, &config).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn check_rejects_selected_sessions_with_the_other_components_socket() {
+        let root = create_temp_dir("selected-session-socket-name");
+        let sessions = root.join("config/proxy/sessions");
+        fs::create_dir_all(sessions.join("restricted")).unwrap();
+        fs::create_dir_all(root.join("config/nw_sandbox")).unwrap();
+        fs::write(root.join("config/proxy/daemon.toml"), "[daemon]\n").unwrap();
+        let agent_session = sessions.join("agent-custom.toml");
+        let sandbox_session = sessions.join("restricted/nw.toml");
+        fs::write(
+            &agent_session,
+            "version = 2\nsocket_name = 'agent/proxy.sock'\n",
+        )
+        .unwrap();
+        fs::write(
+            &sandbox_session,
+            "version = 2\nsocket_name = 'nw-sandbox/proxy.sock'\n",
+        )
+        .unwrap();
+
+        let mut config = execution_config(true, false, Vec::new());
+        config.proxy = Some(cladding::config::ExecutionProxyConfig {
+            image: DEFAULT_PROXY_IMAGE.to_string(),
+            build: None,
+            agent_session_config: "agent-custom.toml".to_string(),
+            nw_sandbox_session_config: "restricted/nw.toml".to_string(),
+        });
+        let context = Context::default_for_project(root.clone());
+        assert!(check_required_config_files(&context, &config).is_ok());
+
+        fs::write(
+            &agent_session,
+            "version = 2\nsocket_name = 'nw-sandbox/proxy.sock'\n",
+        )
+        .unwrap();
+        assert!(check_required_config_files(&context, &config).is_err());
+
+        fs::write(
+            &agent_session,
+            "version = 2\nsocket_name = 'agent/proxy.sock'\n",
+        )
+        .unwrap();
+        fs::write(
+            &sandbox_session,
+            "version = 2\nsocket_name = 'agent/proxy.sock'\n",
+        )
+        .unwrap();
         assert!(check_required_config_files(&context, &config).is_err());
         fs::remove_dir_all(root).unwrap();
     }

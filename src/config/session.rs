@@ -61,6 +61,22 @@ fn default_ports() -> Vec<u16> {
 ///
 /// Baffle validates the same policy again when it creates the live session.
 pub fn validate_baffle_session_config(input: &str) -> anyhow::Result<()> {
+    validate_baffle_session_config_inner(input, None)
+}
+
+/// Validate a native version 2 Baffle session and require its data socket to
+/// match the socket mounted for the selected Cladding component.
+pub fn validate_baffle_session_config_for_socket(
+    input: &str,
+    expected_socket_name: &str,
+) -> anyhow::Result<()> {
+    validate_baffle_session_config_inner(input, Some(expected_socket_name))
+}
+
+fn validate_baffle_session_config_inner(
+    input: &str,
+    expected_socket_name: Option<&str>,
+) -> anyhow::Result<()> {
     let document: SessionDocument = toml::from_str(input)
         .map_err(|_| anyhow::anyhow!("invalid Baffle session TOML syntax or field value"))?;
     if document.version != 2 {
@@ -71,6 +87,17 @@ pub fn validate_baffle_session_config(input: &str) -> anyhow::Result<()> {
 
     if let Some(socket_name) = document.socket_name.as_deref() {
         validate_socket_name(socket_name)?;
+    }
+    if let Some(expected_socket_name) = expected_socket_name {
+        match document.socket_name.as_deref() {
+            Some(socket_name) if socket_name == expected_socket_name => {}
+            Some(socket_name) => anyhow::bail!(
+                "Baffle session socket_name must be '{expected_socket_name}' for this component (found '{socket_name}')"
+            ),
+            None => anyhow::bail!(
+                "Baffle session must set socket_name = '{expected_socket_name}' for this component"
+            ),
+        }
     }
 
     let mut hosts = HashSet::new();
