@@ -1,7 +1,8 @@
 use super::mounts::parse_mounts_v2;
 use super::types::{
-    DEFAULT_COMPONENT_IMAGE, DEFAULT_PROXY_IMAGE, ExecutionComponentConfig, ExecutionConfig,
-    ExecutionProxyConfig, ImageBuildConfig,
+    DEFAULT_AGENT_SESSION_CONFIG, DEFAULT_COMPONENT_IMAGE, DEFAULT_NW_SANDBOX_SESSION_CONFIG,
+    DEFAULT_PROXY_IMAGE, ExecutionComponentConfig, ExecutionConfig, ExecutionProxyConfig,
+    ImageBuildConfig,
 };
 use crate::error::{Error, Result};
 use anyhow::Context as _;
@@ -275,7 +276,7 @@ fn parse_proxy_object(
         Error::message("invalid cladding.json")
     })?;
 
-    let allowed = ["image", "build"];
+    let allowed = ["image", "build", "agent", "nw_sandbox"];
     for field in object.keys() {
         if !allowed.contains(&field.as_str()) {
             eprintln!("error: cladding.json unknown key: proxy.{field}");
@@ -285,6 +286,18 @@ fn parse_proxy_object(
     }
 
     let build = parse_build_config(object.get("build"), key, config_path)?;
+    let agent_session_config = parse_proxy_session_config(
+        object.get("agent"),
+        "proxy.agent",
+        DEFAULT_AGENT_SESSION_CONFIG,
+        config_path,
+    )?;
+    let nw_sandbox_session_config = parse_proxy_session_config(
+        object.get("nw_sandbox"),
+        "proxy.nw_sandbox",
+        DEFAULT_NW_SANDBOX_SESSION_CONFIG,
+        config_path,
+    )?;
     let image = if let Some(value) = object.get("image") {
         let Some(image) = value.as_str() else {
             eprintln!("error: cladding.json invalid field 'proxy.image' (expected string)");
@@ -303,7 +316,78 @@ fn parse_proxy_object(
         DEFAULT_PROXY_IMAGE.to_string()
     };
 
-    Ok(Some(ExecutionProxyConfig { image, build }))
+    Ok(Some(ExecutionProxyConfig {
+        image,
+        build,
+        agent_session_config,
+        nw_sandbox_session_config,
+    }))
+}
+
+fn parse_proxy_session_config(
+    raw: Option<&serde_json::Value>,
+    field: &str,
+    default: &str,
+    config_path: &Path,
+) -> Result<String> {
+    let Some(raw) = raw else {
+        return Ok(default.to_string());
+    };
+    let Some(object) = raw.as_object() else {
+        eprintln!("error: cladding.json field '{field}' must be an object");
+        eprintln!("file: {}", config_path.display());
+        return Err(Error::message("invalid cladding.json"));
+    };
+
+    for key in object.keys() {
+        if key != "session_config" {
+            eprintln!("error: cladding.json unknown key: {field}.{key}");
+            eprintln!("file: {}", config_path.display());
+            return Err(Error::message("invalid cladding.json"));
+        }
+    }
+
+    let Some(value) = object.get("session_config") else {
+        return Ok(default.to_string());
+    };
+    let Some(value) = value.as_str().filter(|value| !value.is_empty()) else {
+        eprintln!(
+            "error: cladding.json field '{field}.session_config' must be a non-empty relative path"
+        );
+        eprintln!("file: {}", config_path.display());
+        return Err(Error::message("invalid cladding.json"));
+    };
+
+    validate_session_config_path(value).map_err(|reason| {
+        eprintln!("error: cladding.json field '{field}.session_config' {reason}");
+        eprintln!("file: {}", config_path.display());
+        Error::message("invalid cladding.json")
+    })?;
+    Ok(value.to_string())
+}
+
+pub fn validate_session_config_path(value: &str) -> std::result::Result<(), &'static str> {
+    use std::path::Component;
+
+    let path = Path::new(value);
+    let bytes = value.as_bytes();
+    let has_windows_drive_prefix =
+        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
+    if value.is_empty()
+        || value.starts_with('/')
+        || has_windows_drive_prefix
+        || value.contains(['\\', '\0'])
+        || path.is_absolute()
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("must be a relative path without absolute, dot, or parent components");
+    }
+    Ok(())
 }
 
 fn parse_build_config(
@@ -469,7 +553,65 @@ mod tests {
         assert_eq!(config.fs_sandbox_image(), "fs:image");
         assert!(config.mounts.is_empty());
         assert_eq!(config.proxy_image(), DEFAULT_PROXY_IMAGE);
+        assert_eq!(config.agent_session_config(), DEFAULT_AGENT_SESSION_CONFIG);
+        assert_eq!(
+            config.nw_sandbox_session_config(),
+            DEFAULT_NW_SANDBOX_SESSION_CONFIG
+        );
         assert!(config.agent.build.is_none());
+    }
+
+    #[test]
+    fn load_cladding_config_selects_independent_proxy_session_files() {
+        let temp = create_temp_dir("proxy-session-selection");
+        fs::write(
+            temp.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "agent": { "image": "agent:image" },
+  "nw_sandbox": { "enabled": true },
+  "proxy": {
+    "agent": { "session_config": "policies/agent.toml" },
+    "nw_sandbox": { "session_config": "restricted.toml" }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cladding_config_v2(&temp).unwrap();
+
+        assert_eq!(config.agent_session_config(), "policies/agent.toml");
+        assert_eq!(config.nw_sandbox_session_config(), "restricted.toml");
+        assert!(config.nw_sandbox_enabled());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn load_cladding_config_rejects_unsafe_proxy_session_paths() {
+        let temp = create_temp_dir("unsafe-proxy-session-path");
+        for session_config in [
+            "/tmp/agent.toml",
+            "../outside.toml",
+            "nested/../../outside.toml",
+            "./agent.toml",
+            "nested//agent.toml",
+            r#"nested\\agent.toml"#,
+            "C:/outside.toml",
+        ] {
+            let raw = format!(
+                r#"{{
+  "name": "demo",
+  "agent": {{ "image": "agent:image" }},
+  "proxy": {{ "agent": {{ "session_config": {session_config:?} }} }}
+}}"#
+            );
+            fs::write(temp.join("cladding.json"), raw).unwrap();
+            assert!(
+                load_cladding_config_v2(&temp).is_err(),
+                "accepted unsafe session path {session_config}"
+            );
+        }
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

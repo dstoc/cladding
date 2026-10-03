@@ -117,12 +117,24 @@ pub(super) fn check_required_config_files(
 ) -> Result<()> {
     let dst = context.project_root.join("config");
     let mut missing = false;
+    let mut invalid_sessions = false;
 
     for name in required_config_entries(config) {
-        let path = dst.join(name);
+        let path = dst.join(&name);
         if !path.exists() {
             eprintln!("missing: config/{name} ({})", path.display());
             missing = true;
+        }
+    }
+
+    let mut session_configs = vec![("agent", config.agent_session_config())];
+    if config.nw_sandbox_enabled() {
+        session_configs.push(("network sandbox", config.nw_sandbox_session_config()));
+    }
+    for (component, name) in session_configs {
+        if let Err(reason) = validate_selected_session_config(&dst, name) {
+            eprintln!("invalid: {component} Baffle session config '{name}': {reason}");
+            invalid_sessions = true;
         }
     }
 
@@ -133,7 +145,105 @@ pub(super) fn check_required_config_files(
         );
         return Err(Error::message("missing config files"));
     }
+    if invalid_sessions {
+        eprintln!(
+            "hint: select a valid version 2 Baffle session TOML file under config/proxy/sessions"
+        );
+        return Err(Error::message("invalid Baffle session config"));
+    }
 
+    Ok(())
+}
+
+fn validate_selected_session_config(config_dir: &Path, name: &str) -> anyhow::Result<()> {
+    cladding::config::validate_session_config_path(name)
+        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+
+    let config_metadata = fs::symlink_metadata(config_dir)
+        .map_err(|error| anyhow::anyhow!("cannot inspect {}: {error}", config_dir.display()))?;
+    if config_metadata.file_type().is_symlink() || !config_metadata.is_dir() {
+        anyhow::bail!(
+            "config path is not a real directory: {}",
+            config_dir.display()
+        );
+    }
+    validate_baffle_session_path_metadata(&config_metadata, true)?;
+
+    let sessions_dir = config_dir.join("proxy/sessions");
+    let mut current = config_dir.to_path_buf();
+    for component in ["proxy", "sessions"] {
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|error| anyhow::anyhow!("cannot inspect {}: {error}", current.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!(
+                "session config directory is not a real directory: {}",
+                current.display()
+            );
+        }
+        validate_baffle_session_path_metadata(&metadata, true)?;
+    }
+
+    let canonical_sessions_dir = fs::canonicalize(&sessions_dir)
+        .map_err(|error| anyhow::anyhow!("cannot resolve {}: {error}", sessions_dir.display()))?;
+    let relative = Path::new(name);
+    let mut selected = sessions_dir.clone();
+    for (index, component) in relative.components().enumerate() {
+        let std::path::Component::Normal(component) = component else {
+            anyhow::bail!("session config path contains an unsafe component");
+        };
+        selected.push(component);
+        let metadata = fs::symlink_metadata(&selected)
+            .map_err(|error| anyhow::anyhow!("cannot inspect {}: {error}", selected.display()))?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("session config path contains a symlink");
+        }
+        if index + 1 == relative.components().count() {
+            if !metadata.is_file() {
+                anyhow::bail!("selected session config is not a regular file");
+            }
+            validate_baffle_session_path_metadata(&metadata, false)?;
+        } else if !metadata.is_dir() {
+            anyhow::bail!("session config parent is not a directory");
+        } else {
+            validate_baffle_session_path_metadata(&metadata, true)?;
+        }
+    }
+
+    let canonical_selected = fs::canonicalize(&selected)
+        .map_err(|error| anyhow::anyhow!("cannot resolve {}: {error}", selected.display()))?;
+    if !canonical_selected.starts_with(&canonical_sessions_dir) {
+        anyhow::bail!("selected session config resolves outside the sessions directory");
+    }
+    let contents = fs::read_to_string(&canonical_selected)
+        .map_err(|error| anyhow::anyhow!("cannot read selected session config: {error}"))?;
+    cladding::config::validate_baffle_session_config(&contents)
+}
+
+fn validate_baffle_session_path_metadata(
+    metadata: &fs::Metadata,
+    is_directory: bool,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let uid = metadata.uid();
+    let trusted_uid = unsafe { libc::geteuid() };
+    if uid != 0 && uid != trusted_uid {
+        anyhow::bail!("Baffle session paths must be owned by root or the current user");
+    }
+
+    let mode = metadata.permissions().mode();
+    if mode & 0o022 != 0 {
+        anyhow::bail!("Baffle session paths must not be group- or world-writable");
+    }
+    let has_read_access = if is_directory {
+        mode & 0o500 == 0o500
+    } else {
+        mode & 0o444 != 0
+    };
+    if !has_read_access {
+        anyhow::bail!("Baffle session path does not have the required read access");
+    }
     Ok(())
 }
 
@@ -156,18 +266,23 @@ fn check_legacy_config_entries(context: &Context) -> bool {
     legacy
 }
 
-fn required_config_entries(config: &ExecutionConfig) -> Vec<&'static str> {
+fn required_config_entries(config: &ExecutionConfig) -> Vec<String> {
     let mut entries = vec![
-        "proxy/daemon.toml",
-        "proxy/sessions/agent.toml",
-        "proxy/sessions/nw-sandbox.toml",
+        "proxy/daemon.toml".to_string(),
+        format!("proxy/sessions/{}", config.agent_session_config()),
     ];
     if config.nw_sandbox_enabled() {
-        entries.push("nw_sandbox");
+        entries.push(format!(
+            "proxy/sessions/{}",
+            config.nw_sandbox_session_config()
+        ));
+    }
+    if config.nw_sandbox_enabled() {
+        entries.push("nw_sandbox".to_string());
     }
     if config.fs_sandbox_enabled() {
-        entries.push("fs_sandbox");
-        entries.push("fs_sandbox/main.rego");
+        entries.push("fs_sandbox".to_string());
+        entries.push("fs_sandbox/main.rego".to_string());
     }
     entries
 }
@@ -361,9 +476,8 @@ mod tests {
         assert_eq!(
             required_config_entries(&config),
             vec![
-                "proxy/daemon.toml",
-                "proxy/sessions/agent.toml",
-                "proxy/sessions/nw-sandbox.toml",
+                "proxy/daemon.toml".to_string(),
+                "proxy/sessions/agent.toml".to_string(),
             ]
         );
     }
@@ -380,10 +494,10 @@ mod tests {
         assert_eq!(
             required_config_entries(&config),
             vec![
-                "proxy/daemon.toml",
-                "proxy/sessions/agent.toml",
-                "proxy/sessions/nw-sandbox.toml",
-                "nw_sandbox",
+                "proxy/daemon.toml".to_string(),
+                "proxy/sessions/agent.toml".to_string(),
+                "proxy/sessions/nw-sandbox.toml".to_string(),
+                "nw_sandbox".to_string(),
             ]
         );
     }
@@ -394,13 +508,95 @@ mod tests {
         assert_eq!(
             required_config_entries(&config),
             vec![
-                "proxy/daemon.toml",
-                "proxy/sessions/agent.toml",
-                "proxy/sessions/nw-sandbox.toml",
-                "fs_sandbox",
-                "fs_sandbox/main.rego",
+                "proxy/daemon.toml".to_string(),
+                "proxy/sessions/agent.toml".to_string(),
+                "fs_sandbox".to_string(),
+                "fs_sandbox/main.rego".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn check_uses_independent_selected_session_files_and_skips_disabled_sandbox_file() {
+        let root = create_temp_dir("selected-session-files");
+        let sessions = root.join("config/proxy/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(root.join("config/proxy/daemon.toml"), "[daemon]\n").unwrap();
+        fs::write(sessions.join("agent-custom.toml"), "version = 2\n").unwrap();
+
+        let mut config = execution_config(false, false, Vec::new());
+        config.proxy = Some(cladding::config::ExecutionProxyConfig {
+            image: DEFAULT_PROXY_IMAGE.to_string(),
+            build: None,
+            agent_session_config: "agent-custom.toml".to_string(),
+            nw_sandbox_session_config: "missing-restricted.toml".to_string(),
+        });
+
+        let context = Context::default_for_project(root.clone());
+        assert!(check_required_config_files(&context, &config).is_ok());
+        assert!(
+            !required_config_entries(&config)
+                .iter()
+                .any(|entry| entry.ends_with("missing-restricted.toml"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn check_requires_and_validates_the_selected_enabled_sandbox_session() {
+        let root = create_temp_dir("enabled-selected-session");
+        let sessions = root.join("config/proxy/sessions");
+        fs::create_dir_all(sessions.join("restricted")).unwrap();
+        fs::create_dir_all(root.join("config/nw_sandbox")).unwrap();
+        fs::write(root.join("config/proxy/daemon.toml"), "[daemon]\n").unwrap();
+        fs::write(sessions.join("agent-custom.toml"), "version = 2\n").unwrap();
+        fs::write(
+            sessions.join("restricted/nw.toml"),
+            "version = 2\nunmatched = 'tunnel'\n",
+        )
+        .unwrap();
+
+        let mut config = execution_config(true, false, Vec::new());
+        config.proxy = Some(cladding::config::ExecutionProxyConfig {
+            image: DEFAULT_PROXY_IMAGE.to_string(),
+            build: None,
+            agent_session_config: "agent-custom.toml".to_string(),
+            nw_sandbox_session_config: "restricted/nw.toml".to_string(),
+        });
+        let context = Context::default_for_project(root.clone());
+
+        assert!(check_required_config_files(&context, &config).is_ok());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let selected = sessions.join("restricted/nw.toml");
+            fs::set_permissions(&selected, fs::Permissions::from_mode(0o666)).unwrap();
+            assert!(check_required_config_files(&context, &config).is_err());
+            fs::set_permissions(&selected, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        fs::write(sessions.join("restricted/nw.toml"), "version = 1\n").unwrap();
+        assert!(check_required_config_files(&context, &config).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_rejects_session_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = create_temp_dir("selected-session-symlink");
+        let sessions = root.join("config/proxy/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(root.join("config/proxy/daemon.toml"), "[daemon]\n").unwrap();
+        let outside = root.join("outside.toml");
+        fs::write(&outside, "version = 2\n").unwrap();
+        symlink(&outside, sessions.join("agent.toml")).unwrap();
+
+        let config = execution_config(false, false, Vec::new());
+        let context = Context::default_for_project(root.clone());
+        assert!(check_required_config_files(&context, &config).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

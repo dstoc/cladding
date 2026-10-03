@@ -19,10 +19,8 @@ serde_json = "1.0.149"
 signal-hook = "0.3.17"
 thiserror = "2.0.18"
 time = "0.3.55"
-x509-parser = { version = "0.18.1", features = ["verify"] }
-
-[dev-dependencies]
 toml = "1.1.6"
+x509-parser = { version = "0.18.1", features = ["verify"] }
 
 [workspace]
 members = ["crates/mcp-run"]

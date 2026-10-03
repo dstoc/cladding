@@ -1,0 +1,4 @@
+version = 2
+persistent = true
+socket_name = "agent/proxy.sock"
+unmatched = "deny"

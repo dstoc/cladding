@@ -685,6 +685,8 @@ mod tests {
         config.proxy = Some(ExecutionProxyConfig {
             image: "localhost/proxy:latest".to_string(),
             build: Some(build("/tmp/proxy", "enabled")),
+            agent_session_config: "agent.toml".to_string(),
+            nw_sandbox_session_config: "nw-sandbox.toml".to_string(),
         });
 
         let plan = plan_image_builds(&config).unwrap();
@@ -702,6 +704,8 @@ mod tests {
         config.proxy = Some(ExecutionProxyConfig {
             image: "localhost/custom-proxy:latest".to_string(),
             build: None,
+            agent_session_config: "agent.toml".to_string(),
+            nw_sandbox_session_config: "nw-sandbox.toml".to_string(),
         });
 
         assert!(plan_image_builds(&config).unwrap().is_empty());
@@ -752,14 +756,33 @@ mod tests {
         let first_runtime = root.join("run-one/.cladding");
         let second_runtime = root.join("run-two/.cladding");
         let source_session = source_root.join("config/proxy/sessions/agent.toml");
+        let selected_agent_session = source_root.join("config/proxy/sessions/custom/agent.toml");
+        let selected_nw_session = source_root.join("config/proxy/sessions/restricted/network.toml");
         let source_policy = source_root.join("config/nw_sandbox/main.rego");
         let session_snapshot =
             "version = 2\npersistent = true\nunmatched = \"deny\"\n\n[rules.\"example.com\"]\n";
         let policy_snapshot = "package cladding.snapshot\nallow := true\n";
         fs::create_dir_all(source_session.parent().unwrap()).unwrap();
+        fs::create_dir_all(selected_agent_session.parent().unwrap()).unwrap();
+        fs::create_dir_all(selected_nw_session.parent().unwrap()).unwrap();
         fs::create_dir_all(source_policy.parent().unwrap()).unwrap();
         fs::write(&source_session, session_snapshot).unwrap();
+        fs::write(&selected_agent_session, "version = 2\nunmatched = 'deny'\n").unwrap();
+        fs::write(&selected_nw_session, "version = 2\nunmatched = 'tunnel'\n").unwrap();
         fs::write(&source_policy, policy_snapshot).unwrap();
+        fs::write(
+            source_root.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "agent": {},
+  "nw_sandbox": { "enabled": true },
+  "proxy": {
+    "agent": { "session_config": "custom/agent.toml" },
+    "nw_sandbox": { "session_config": "restricted/network.toml" }
+  }
+}"#,
+        )
+        .unwrap();
         fs::create_dir_all(&first_runtime).unwrap();
         fs::create_dir_all(&second_runtime).unwrap();
 
@@ -795,12 +818,43 @@ mod tests {
                 .is_file()
         );
         assert_eq!(
+            fs::read_to_string(first_config.join("proxy/sessions/custom/agent.toml")).unwrap(),
+            "version = 2\nunmatched = 'deny'\n"
+        );
+        assert_eq!(
+            fs::read_to_string(first_config.join("proxy/sessions/restricted/network.toml"))
+                .unwrap(),
+            "version = 2\nunmatched = 'tunnel'\n"
+        );
+
+        let mut run_config = cladding::config::load_cladding_config_v2(&source_root).unwrap();
+        run_config.name = "cladding-run-test".to_string();
+        let run_spec = RuntimeSpec::build_with_workspace_root(&first_runtime, &root, &run_config);
+        let proxy = &run_spec.proxy.containers[0];
+        assert!(proxy.env.iter().any(|variable| {
+            variable.name == "CLADDING_AGENT_SESSION_CONFIG"
+                && variable.value == "custom/agent.toml"
+        }));
+        assert!(proxy.env.iter().any(|variable| {
+            variable.name == "CLADDING_NW_SANDBOX_SESSION_CONFIG"
+                && variable.value == "restricted/network.toml"
+        }));
+        assert!(proxy.mounts.iter().any(|mount| {
+            mount.mount_path == "/opt/config"
+                && matches!(
+                    &mount.source,
+                    cladding::runtime::RuntimeMountSource::HostPath { path }
+                        if path == &first_config
+                )
+        }));
+        assert_eq!(
             fs::read_to_string(&source_session).unwrap(),
             session_snapshot
         );
         assert_eq!(fs::read_to_string(&source_policy).unwrap(), policy_snapshot);
 
         fs::write(&source_session, "project changed after run start\n").unwrap();
+        fs::write(&selected_agent_session, "project changed selected policy\n").unwrap();
         fs::write(&source_policy, "project policy changed after run start\n").unwrap();
         assert_eq!(
             fs::read_to_string(&first_session).unwrap(),
@@ -809,6 +863,14 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&second_session).unwrap(),
             session_snapshot
+        );
+        assert_eq!(
+            fs::read_to_string(first_config.join("proxy/sessions/custom/agent.toml")).unwrap(),
+            "version = 2\nunmatched = 'deny'\n"
+        );
+        assert_eq!(
+            fs::read_to_string(second_config.join("proxy/sessions/custom/agent.toml")).unwrap(),
+            "version = 2\nunmatched = 'deny'\n"
         );
 
         fs::write(&first_session, "run one changed its private copy\n").unwrap();

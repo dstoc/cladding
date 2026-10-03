@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 pub const DEFAULT_COMPONENT_IMAGE: &str = "localhost/cladding-default:latest";
 pub const DEFAULT_PROXY_IMAGE: &str = "localhost/cladding-proxy:latest";
+pub const DEFAULT_AGENT_SESSION_CONFIG: &str = "agent.toml";
+pub const DEFAULT_NW_SANDBOX_SESSION_CONFIG: &str = "nw-sandbox.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageBuildConfig {
@@ -22,6 +24,8 @@ pub struct ExecutionComponentConfig {
 pub struct ExecutionProxyConfig {
     pub image: String,
     pub build: Option<ImageBuildConfig>,
+    pub agent_session_config: String,
+    pub nw_sandbox_session_config: String,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +133,20 @@ impl ExecutionConfig {
             .as_ref()
             .map(|proxy| proxy.image.as_str())
             .unwrap_or(DEFAULT_PROXY_IMAGE)
+    }
+
+    pub fn agent_session_config(&self) -> &str {
+        self.proxy
+            .as_ref()
+            .map(|proxy| proxy.agent_session_config.as_str())
+            .unwrap_or(DEFAULT_AGENT_SESSION_CONFIG)
+    }
+
+    pub fn nw_sandbox_session_config(&self) -> &str {
+        self.proxy
+            .as_ref()
+            .map(|proxy| proxy.nw_sandbox_session_config.as_str())
+            .unwrap_or(DEFAULT_NW_SANDBOX_SESSION_CONFIG)
     }
 
     pub fn nw_sandbox_enabled(&self) -> bool {
