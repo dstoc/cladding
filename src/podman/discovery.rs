@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 
-use super::command::{ensure_success_output, trace_command};
+use super::command::{
+    ensure_success_output, ensure_success_output_with_diagnostics, forward_output, trace_command,
+};
 
 pub fn podman_required(message: &str) -> Result<()> {
     if command_exists("podman") {
@@ -17,7 +19,7 @@ pub fn podman_required(message: &str) -> Result<()> {
     }
 }
 
-pub fn runsc_available(verbose: bool) -> Result<bool> {
+pub fn runsc_available(verbose: bool, quiet_helpers: bool) -> Result<bool> {
     if command_exists("runsc") {
         return Ok(true);
     }
@@ -32,6 +34,9 @@ pub fn runsc_available(verbose: bool) -> Result<bool> {
     let output = cmd.output().with_context(|| "failed to run podman info")?;
 
     if !output.status.success() {
+        if quiet_helpers {
+            ensure_success_output_with_diagnostics(&output, "podman info")?;
+        }
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let message = if stderr.is_empty() {
             "failed to inspect podman runtimes".to_string()
@@ -39,6 +44,10 @@ pub fn runsc_available(verbose: bool) -> Result<bool> {
             format!("failed to inspect podman runtimes: {stderr}")
         };
         return Err(Error::message(message));
+    }
+
+    if verbose {
+        forward_output(&output)?;
     }
 
     let runtimes: Value = serde_json::from_slice(&output.stdout)
@@ -72,8 +81,8 @@ pub struct RunningProject {
     pub pod_count: usize,
 }
 
-pub fn list_running_projects(verbose: bool) -> Result<Vec<RunningProject>> {
-    let items = list_running_pod_items(verbose)?;
+pub fn list_running_projects(verbose: bool, quiet_helpers: bool) -> Result<Vec<RunningProject>> {
+    let items = list_running_pod_items(verbose, quiet_helpers)?;
     let mut projects: HashMap<(String, String), usize> = HashMap::new();
     for item in items {
         let key = (item.name, item.project_root);
@@ -121,7 +130,7 @@ struct RunningPodItem {
     project_root: String,
 }
 
-fn list_running_pod_items(verbose: bool) -> Result<Vec<RunningPodItem>> {
+fn list_running_pod_items(verbose: bool, quiet_helpers: bool) -> Result<Vec<RunningPodItem>> {
     let mut cmd = Command::new("podman");
     cmd.args([
         "pod",
@@ -139,7 +148,14 @@ fn list_running_pod_items(verbose: bool) -> Result<Vec<RunningPodItem>> {
         .with_context(|| "failed to run podman pod ps")?;
 
     if !output.status.success() {
+        if quiet_helpers {
+            ensure_success_output_with_diagnostics(&output, "podman pod ps")?;
+        }
         return ensure_success_output(&output, "podman pod ps").map(|_| Vec::new());
+    }
+
+    if verbose {
+        forward_output(&output)?;
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

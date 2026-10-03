@@ -26,6 +26,36 @@ fn build_check_up_and_run_follow_the_persistent_and_ephemeral_ca_lifecycles() {
         &podman,
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$CLADDING_PODMAN_LOG"
+case "$1:$2" in
+  pod:create|pod:rm|run:*|exec:--user|rm:-f)
+    if [ "$CLADDING_TEST_HELPER_NOISE" = "1" ]; then
+      printf 'helper stdout: %s %s\n' "$1" "$2"
+      printf 'helper stderr: %s %s\n' "$1" "$2" >&2
+    fi
+    ;;
+esac
+if [ "$CLADDING_TEST_HELPER_NOISE" = "1" ]; then
+  for argument in "$@"; do
+    if [ "$argument" = "-d" ]; then
+      printf 'container-id: fake-podman-id\\n'
+      break
+    fi
+  done
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--user" ]; then
+  if [ "$CLADDING_TEST_FAIL_CA_INSTALL" = "1" ]; then
+    exit 42
+  fi
+  exit 0
+fi
+if [ "$1" = "exec" ]; then
+  printf '%s' "${CLADDING_TEST_USER_STDOUT:-}"
+  printf '%s' "${CLADDING_TEST_USER_STDERR:-}" >&2
+  exit 0
+fi
+if [ "$1" = "rm" ] && [ "$CLADDING_TEST_FAIL_CLEANUP" = "1" ]; then
+  exit 43
+fi
 if [ "$1" = "pod" ] && [ "$2" = "ps" ]; then
   if [ -f "$CLADDING_PODMAN_STATE" ]; then
     project_name=$(sed -n '1p' "$CLADDING_PODMAN_STATE")
@@ -162,9 +192,26 @@ exit 0
         "--cladding-dir",
         project_root.to_str().unwrap(),
         "run",
-        "true",
+        "sh",
+        "-c",
+        "printf user-output; printf user-error >&2",
     ]);
-    assert_success(run_before_build.output().unwrap());
+    run_before_build
+        .env("CLADDING_TEST_HELPER_NOISE", "1")
+        .env("CLADDING_TEST_USER_STDOUT", "user-output")
+        .env("CLADDING_TEST_USER_STDERR", "user-error");
+    let run_before_build_output = run_before_build.output().unwrap();
+    assert_success(run_before_build_output.clone());
+    assert_eq!(
+        String::from_utf8_lossy(&run_before_build_output.stdout),
+        "user-output",
+        "quiet run should preserve only the user command's stdout"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_before_build_output.stderr),
+        "user-error",
+        "quiet run should preserve only the user command's stderr"
+    );
     assert!(
         read_log(&podman_log).contains("[rules.\"example.com\"]"),
         "cladding run did not pass the project agent session policy to its private runtime"
@@ -201,7 +248,7 @@ exit 0
     );
     let podman_state = podman_log.with_extension("state");
     if podman_state.exists() {
-        fs::remove_file(podman_state).unwrap();
+        fs::remove_file(&podman_state).unwrap();
     }
 
     let ca_init_count_before_build = read_log(&podman_log)
@@ -338,9 +385,90 @@ exit 0
         "--cladding-dir",
         project_root.to_str().unwrap(),
         "run",
+        "--verbose",
+        "--",
+        "sh",
+        "-c",
+        "printf user-output; printf user-error >&2",
+    ]);
+    run.env("CLADDING_TEST_HELPER_NOISE", "1")
+        .env("CLADDING_TEST_USER_STDOUT", "user-output")
+        .env("CLADDING_TEST_USER_STDERR", "user-error");
+    let verbose_run_output = run.output().unwrap();
+    assert_success(verbose_run_output.clone());
+    let verbose_stdout = String::from_utf8_lossy(&verbose_run_output.stdout);
+    let verbose_stderr = String::from_utf8_lossy(&verbose_run_output.stderr);
+    assert!(verbose_stdout.contains("starting one-off instance:"));
+    assert!(verbose_stdout.contains("helper stdout: pod create"));
+    assert!(verbose_stdout.contains("container-id: fake-podman-id"));
+    assert!(verbose_stdout.contains("user-output"));
+    assert!(verbose_stderr.contains("helper stderr:"));
+    assert!(verbose_stderr.contains("cleaning up one-off instance:"));
+    assert!(verbose_stderr.contains("user-error"));
+
+    if podman_state.exists() {
+        fs::remove_file(&podman_state).unwrap();
+    }
+    let mut failing_run = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    failing_run.args([
+        "--cladding-dir",
+        project_root.to_str().unwrap(),
+        "run",
         "true",
     ]);
-    assert_success(run.output().unwrap());
+    failing_run
+        .env("CLADDING_TEST_HELPER_NOISE", "1")
+        .env("CLADDING_TEST_FAIL_CA_INSTALL", "1");
+    let failing_run_output = failing_run.output().unwrap();
+    assert!(!failing_run_output.status.success());
+    let failure_stderr = String::from_utf8_lossy(&failing_run_output.stderr);
+    assert!(
+        failure_stderr.contains("Baffle CA installation failed (exit code 42)"),
+        "unexpected helper failure output: {failure_stderr}"
+    );
+    assert!(failure_stderr.contains("stdout:\nhelper stdout: exec --user"));
+    assert!(failure_stderr.contains("stderr:\nhelper stderr: exec --user"));
+    assert!(!failure_stderr.contains("user-error"));
+
+    if podman_state.exists() {
+        fs::remove_file(&podman_state).unwrap();
+    }
+    let mut cleanup_failure_run = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    cleanup_failure_run.args([
+        "--cladding-dir",
+        project_root.to_str().unwrap(),
+        "run",
+        "sh",
+        "-c",
+        "printf user-output",
+    ]);
+    cleanup_failure_run
+        .env("CLADDING_TEST_HELPER_NOISE", "1")
+        .env("CLADDING_TEST_USER_STDOUT", "user-output")
+        .env("CLADDING_TEST_FAIL_CLEANUP", "1");
+    let cleanup_failure_output = cleanup_failure_run.output().unwrap();
+    assert!(!cleanup_failure_output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&cleanup_failure_output.stdout),
+        "user-output"
+    );
+    let cleanup_failure_stderr = String::from_utf8_lossy(&cleanup_failure_output.stderr);
+    assert!(cleanup_failure_stderr.contains("cleanup failed for one-off instance"));
+    assert!(cleanup_failure_stderr.contains("podman rm failed (exit code 43)"));
+    assert!(cleanup_failure_stderr.contains("stdout:\nhelper stdout: rm -f"));
+    assert!(cleanup_failure_stderr.contains("stderr:\nhelper stderr: rm -f"));
     assert_eq!(
         fs::read(project_root.join("credentials/baffle/ca.crt")).unwrap(),
         certificate

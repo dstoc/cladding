@@ -15,7 +15,7 @@ pub(super) fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
     socat_required("expose")?;
 
     let config = context.load_config()?;
-    let status = project_runtime_status(context, &config, false)?;
+    let status = project_runtime_status(context, &config, false, false)?;
     if !status.already_running {
         eprintln!("error: cladding project '{}' is not running", config.name);
         eprintln!("hint: run 'cladding up'");

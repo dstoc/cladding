@@ -562,7 +562,7 @@ test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 phase="verify one-off CA isolation and nonzero-command cleanup"
 mkdir -m 0700 "$temp_root/run-tmp"
 (
-  TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -- \
+  TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v -- \
     /bin/sh -c 'sleep 3; exit 7' > "$temp_root/run.log" 2>&1 &
   run_child=$!
   trap 'kill "$run_child" 2>/dev/null || true; wait "$run_child" 2>/dev/null || true' HUP INT TERM

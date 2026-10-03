@@ -11,8 +11,8 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use super::command::{
-    PodmanRuntimeOptions, ensure_success, ensure_success_output, podman_command_with_options,
-    trace_command,
+    PodmanRuntimeOptions, ensure_success_output, ensure_success_output_with_diagnostics,
+    forward_output, podman_command_with_options, run_helper_command, trace_command,
 };
 use super::mounts::{append_mount_args, generated_empty_mask_dirs};
 
@@ -44,22 +44,22 @@ impl RuntimeInventory {
 }
 
 /// Direct runtime helpers for creating and cleaning up Podman resources.
-pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+pub fn runtime_create(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     prepare_runtime_socket_dirs(spec)?;
     ensure_runtime_empty_mask_dir(spec)?;
-    ensure_proxy_relay_volumes(spec, verbose)?;
+    ensure_proxy_relay_volumes(spec, verbose, quiet_helpers)?;
 
     for pod in runtime_pods(spec) {
         if pod.placement == RuntimePlacement::Pod {
-            pod_create(pod.use_runsc, pod, verbose)?;
+            pod_create(pod.use_runsc, pod, verbose, quiet_helpers)?;
         }
     }
 
     for pod in runtime_pods(spec) {
         for container in &pod.containers {
-            container_run(pod.use_runsc, pod, container, verbose)?;
+            container_run(pod.use_runsc, pod, container, verbose, quiet_helpers)?;
             if should_install_baffle_ca(spec, pod) {
-                install_baffle_ca(container, verbose)?;
+                install_baffle_ca(container, verbose, quiet_helpers)?;
             }
         }
     }
@@ -69,7 +69,7 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
 
 /// Initialize the project CA with the same Baffle binary, daemon config, and
 /// credentials mount that the proxy runtime will use.
-pub fn initialize_baffle_ca(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+pub fn initialize_baffle_ca(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cmd = build_baffle_ca_init_command(spec);
     trace_command(&cmd, verbose);
     let output = cmd.output().with_context(|| {
@@ -78,6 +78,18 @@ pub fn initialize_baffle_ca(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
             spec.project_name
         )
     })?;
+    if output.status.success() {
+        if verbose {
+            forward_output(&output)?;
+        }
+        return Ok(());
+    }
+    if quiet_helpers {
+        return ensure_success_output_with_diagnostics(&output, "Baffle CA initialization");
+    }
+    if verbose {
+        forward_output(&output)?;
+    }
     ensure_success_output(&output, "Baffle CA initialization")
 }
 
@@ -121,14 +133,18 @@ fn build_baffle_ca_init_command(spec: &RuntimeSpec) -> Command {
     cmd
 }
 
-pub fn runtime_inventory(spec: &RuntimeSpec, verbose: bool) -> Result<RuntimeInventory> {
+pub fn runtime_inventory(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<RuntimeInventory> {
     let mut expected_count = 0;
     let mut resources = Vec::new();
 
     for pod in runtime_pods(spec) {
         if pod.placement == RuntimePlacement::Pod {
             expected_count += 1;
-            if let Some(state) = inspect_resource_state("pod", &pod.name, verbose)? {
+            if let Some(state) = inspect_resource_state("pod", &pod.name, verbose, quiet_helpers)? {
                 resources.push(RuntimeResource {
                     kind: "pod",
                     name: pod.name.clone(),
@@ -139,7 +155,9 @@ pub fn runtime_inventory(spec: &RuntimeSpec, verbose: bool) -> Result<RuntimeInv
 
         for container in &pod.containers {
             expected_count += 1;
-            if let Some(state) = inspect_resource_state("container", &container.name, verbose)? {
+            if let Some(state) =
+                inspect_resource_state("container", &container.name, verbose, quiet_helpers)?
+            {
                 resources.push(RuntimeResource {
                     kind: "container",
                     name: container.name.clone(),
@@ -155,26 +173,26 @@ pub fn runtime_inventory(spec: &RuntimeSpec, verbose: bool) -> Result<RuntimeInv
     })
 }
 
-pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     for pod in runtime_pods(spec) {
         for container in &pod.containers {
-            container_rm(&container.name, verbose)?;
+            container_rm(&container.name, verbose, quiet_helpers)?;
         }
         // For standalone components this is best-effort cleanup for projects
         // started by older builds where execution components were still pods.
-        pod_rm(&pod.name, verbose)?;
+        pod_rm(&pod.name, verbose, quiet_helpers)?;
     }
 
-    remove_proxy_relay_volumes(spec, verbose)
+    remove_proxy_relay_volumes(spec, verbose, quiet_helpers)
 }
 
 /// Clean up resources only when their Podman labels identify this runtime.
 /// This is used by one-off startup and teardown paths so a name collision
 /// cannot cause cleanup to remove another project's resources.
-pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
-    let inventory = runtime_inventory(spec, verbose)?;
+pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
+    let inventory = runtime_inventory(spec, verbose, quiet_helpers)?;
     if inventory.is_empty() {
-        return remove_proxy_relay_volumes(spec, verbose);
+        return remove_proxy_relay_volumes(spec, verbose, quiet_helpers);
     }
     let exists = |kind: &str, name: &str| {
         inventory
@@ -187,7 +205,7 @@ pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     for pod in runtime_pods(spec) {
         let pod_exists = pod.placement == RuntimePlacement::Pod && exists("pod", &pod.name);
         let pod_owned = if pod_exists {
-            resource_labels_match("pod", &pod.name, spec)?
+            resource_labels_match("pod", &pod.name, spec, verbose, quiet_helpers)?
         } else {
             false
         };
@@ -195,7 +213,13 @@ pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
             owned_resources.insert(("pod".to_string(), pod.name.clone()), pod_owned);
         }
         let pod_id = if pod_owned {
-            Some(inspect_value("pod", &pod.name, "{{.Id}}", verbose)?)
+            Some(inspect_value(
+                "pod",
+                &pod.name,
+                "{{.Id}}",
+                verbose,
+                quiet_helpers,
+            )?)
         } else {
             None
         };
@@ -205,13 +229,22 @@ pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
             }
 
             let owned = match pod.placement {
-                RuntimePlacement::Standalone => {
-                    resource_labels_match("container", &container.name, spec)?
-                }
+                RuntimePlacement::Standalone => resource_labels_match(
+                    "container",
+                    &container.name,
+                    spec,
+                    verbose,
+                    quiet_helpers,
+                )?,
                 RuntimePlacement::Pod => {
                     if let Some(pod_id) = pod_id.as_deref() {
-                        let container_pod =
-                            inspect_value("container", &container.name, "{{.Pod}}", verbose)?;
+                        let container_pod = inspect_value(
+                            "container",
+                            &container.name,
+                            "{{.Pod}}",
+                            verbose,
+                            quiet_helpers,
+                        )?;
                         container_pod == pod_id || container_pod == pod.name
                     } else {
                         false
@@ -228,7 +261,7 @@ pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
             .copied()
             .unwrap_or(false)
     }) {
-        return runtime_cleanup(spec, verbose);
+        return runtime_cleanup(spec, verbose, quiet_helpers);
     }
 
     let mut cleanup_error = None;
@@ -259,7 +292,7 @@ pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
                 );
                 continue;
             }
-            let result = container_rm(&container.name, verbose);
+            let result = container_rm(&container.name, verbose, quiet_helpers);
             if result.is_err() {
                 pod_cleanup_failed = true;
             }
@@ -268,7 +301,10 @@ pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
 
         if pod_exists {
             if pod_owned && !pod_cleanup_failed {
-                record_cleanup_result(&mut cleanup_error, pod_rm(&pod.name, verbose));
+                record_cleanup_result(
+                    &mut cleanup_error,
+                    pod_rm(&pod.name, verbose, quiet_helpers),
+                );
             } else if !pod_owned {
                 record_cleanup_result(
                     &mut cleanup_error,
@@ -301,10 +337,14 @@ fn proxy_relay_volume_names(spec: &RuntimeSpec) -> Vec<String> {
     names.into_iter().collect()
 }
 
-fn ensure_proxy_relay_volumes(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+fn ensure_proxy_relay_volumes(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
     for name in proxy_relay_volume_names(spec) {
-        if inspect_resource_state("volume", &name, verbose)?.is_some() {
-            if !proxy_relay_volume_labels_match(&name, spec)? {
+        if inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_some() {
+            if !proxy_relay_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
                 return Err(Error::message(format!(
                     "refusing to use Podman volume '{name}' because it is not owned by project '{}'",
                     spec.project_name
@@ -318,18 +358,33 @@ fn ensure_proxy_relay_volumes(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
         let output = cmd
             .output()
             .with_context(|| format!("failed to create Podman relay volume '{name}'"))?;
-        ensure_success_output(&output, "podman volume create")?;
+        if !output.status.success() {
+            if quiet_helpers {
+                ensure_success_output_with_diagnostics(&output, "podman volume create")?;
+            }
+            if verbose {
+                forward_output(&output)?;
+            }
+            ensure_success_output(&output, "podman volume create")?;
+        }
+        if verbose {
+            forward_output(&output)?;
+        }
     }
 
     Ok(())
 }
 
-fn remove_proxy_relay_volumes(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+fn remove_proxy_relay_volumes(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
     for name in proxy_relay_volume_names(spec) {
-        if inspect_resource_state("volume", &name, verbose)?.is_none() {
+        if inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_none() {
             continue;
         }
-        if !proxy_relay_volume_labels_match(&name, spec)? {
+        if !proxy_relay_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
             return Err(Error::message(format!(
                 "refusing to remove Podman volume '{name}' because it is not owned by project '{}'",
                 spec.project_name
@@ -341,8 +396,20 @@ fn remove_proxy_relay_volumes(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
         let output = cmd
             .output()
             .with_context(|| format!("failed to remove Podman relay volume '{name}'"))?;
-        if output.status.success() || remove_output_is_missing_volume(&output) {
+        if output.status.success() {
+            if verbose {
+                forward_output(&output)?;
+            }
             continue;
+        }
+        if remove_output_is_missing_volume(&output) {
+            continue;
+        }
+        if quiet_helpers {
+            ensure_success_output_with_diagnostics(&output, "podman volume rm")?;
+        }
+        if verbose {
+            forward_output(&output)?;
         }
         ensure_success_output(&output, "podman volume rm")?;
     }
@@ -350,8 +417,13 @@ fn remove_proxy_relay_volumes(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn proxy_relay_volume_labels_match(name: &str, spec: &RuntimeSpec) -> Result<bool> {
-    let labels = inspect_value("volume", name, "{{json .Labels}}", false)?;
+fn proxy_relay_volume_labels_match(
+    name: &str,
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<bool> {
+    let labels = inspect_value("volume", name, "{{json .Labels}}", verbose, quiet_helpers)?;
     let labels: serde_json::Value = serde_json::from_str(&labels)
         .with_context(|| format!("failed to parse labels for Podman volume {name}"))?;
 
@@ -402,12 +474,18 @@ fn record_cleanup_result(target: &mut Option<crate::error::Error>, result: Resul
     }
 }
 
-fn resource_labels_match(kind: &str, name: &str, spec: &RuntimeSpec) -> Result<bool> {
+fn resource_labels_match(
+    kind: &str,
+    name: &str,
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<bool> {
     let format = match kind {
         "container" => "{{json .Config.Labels}}",
         _ => "{{json .Labels}}",
     };
-    let labels = inspect_value(kind, name, format, false)?;
+    let labels = inspect_value(kind, name, format, verbose, quiet_helpers)?;
     let labels: serde_json::Value = serde_json::from_str(&labels)
         .with_context(|| format!("failed to parse labels for {kind} {name}"))?;
 
@@ -419,28 +497,58 @@ fn resource_labels_match(kind: &str, name: &str, spec: &RuntimeSpec) -> Result<b
             == Some(spec.project_root.to_string_lossy().as_ref()))
 }
 
-fn inspect_value(kind: &str, name: &str, format: &str, verbose: bool) -> Result<String> {
+fn inspect_value(
+    kind: &str,
+    name: &str,
+    format: &str,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<String> {
     let mut cmd = Command::new("podman");
     cmd.args([kind, "inspect", "--format", format, name]);
     trace_command(&cmd, verbose);
     let output = cmd
         .output()
         .with_context(|| format!("failed to inspect {kind} {name}"))?;
-    ensure_success_output(&output, "podman inspect")?;
+    if quiet_helpers {
+        ensure_success_output_with_diagnostics(&output, "podman inspect")?;
+    } else {
+        ensure_success_output(&output, "podman inspect")?;
+    }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn inspect_resource_state(kind: &'static str, name: &str, verbose: bool) -> Result<Option<String>> {
+fn inspect_resource_state(
+    kind: &'static str,
+    name: &str,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<Option<String>> {
     let mut exists_cmd = build_resource_exists_command(kind, name);
     trace_command(&exists_cmd, verbose);
-    let exists = exists_cmd
-        .status()
-        .with_context(|| format!("failed to check whether {kind} exists: {name}"))?;
+    let exists_output = if quiet_helpers {
+        Some(
+            exists_cmd
+                .output()
+                .with_context(|| format!("failed to check whether {kind} exists: {name}"))?,
+        )
+    } else {
+        None
+    };
+    let exists = match &exists_output {
+        Some(output) => output.status,
+        None => exists_cmd
+            .status()
+            .with_context(|| format!("failed to check whether {kind} exists: {name}"))?,
+    };
 
     match exists.code() {
         Some(1) => return Ok(None),
         Some(0) => {}
         _ => {
+            if let Some(output) = &exists_output {
+                ensure_success_output_with_diagnostics(output, "podman exists")?;
+            }
             eprintln!("error: failed to check whether {kind} exists: {name}");
             return Err(crate::error::Error::message(format!(
                 "podman {kind} exists failed"
@@ -454,6 +562,9 @@ fn inspect_resource_state(kind: &'static str, name: &str, verbose: bool) -> Resu
         .output()
         .with_context(|| format!("failed to inspect {kind}: {name}"))?;
     if !output.status.success() {
+        if quiet_helpers {
+            ensure_success_output_with_diagnostics(&output, "podman inspect")?;
+        }
         return ensure_success_output(&output, "podman inspect").map(|_| None);
     }
 
@@ -479,26 +590,39 @@ fn build_resource_inspect_command(kind: &str, name: &str) -> Command {
     cmd
 }
 
-pub fn pod_create(use_runsc: bool, pod: &RuntimePod, verbose: bool) -> Result<()> {
+pub fn pod_create(
+    use_runsc: bool,
+    pod: &RuntimePod,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
     let mut cmd = build_pod_create_command(use_runsc, pod);
-    trace_command(&cmd, verbose);
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to run podman pod create for {}", pod.name))?;
-    ensure_success(status, "podman pod create")
+    run_helper_command(&mut cmd, verbose, quiet_helpers, "podman pod create")
 }
 
-pub fn pod_rm(pod_name: &str, verbose: bool) -> Result<()> {
+pub fn pod_rm(pod_name: &str, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cmd = build_pod_rm_command(pod_name);
     trace_command(&cmd, verbose);
     let output = cmd
         .output()
         .with_context(|| format!("failed to run podman pod rm for {pod_name}"))?;
 
-    if output.status.success() || remove_output_is_missing_pod(&output) {
+    if output.status.success() {
+        if verbose {
+            forward_output(&output)?;
+        }
+        return Ok(());
+    }
+    if remove_output_is_missing_pod(&output) {
         return Ok(());
     }
 
+    if quiet_helpers {
+        ensure_success_output_with_diagnostics(&output, "podman pod rm")?;
+    }
+    if verbose {
+        forward_output(&output)?;
+    }
     ensure_success_output(&output, "podman pod rm")
 }
 
@@ -507,16 +631,10 @@ pub fn container_run(
     pod: &RuntimePod,
     container: &RuntimeContainer,
     verbose: bool,
+    quiet_helpers: bool,
 ) -> Result<()> {
     let mut cmd = build_container_run_command(use_runsc, pod, container);
-    trace_command(&cmd, verbose);
-    let status = cmd.status().with_context(|| {
-        format!(
-            "failed to run podman container {} in pod {} with --init",
-            container.name, pod.name
-        )
-    })?;
-    ensure_success(status, "podman run --init")
+    run_helper_command(&mut cmd, verbose, quiet_helpers, "podman run")
 }
 
 fn should_install_baffle_ca(spec: &RuntimeSpec, pod: &RuntimePod) -> bool {
@@ -527,30 +645,26 @@ fn should_install_baffle_ca(spec: &RuntimeSpec, pod: &RuntimePod) -> bool {
             .is_some_and(|sandbox| sandbox.name == pod.name)
 }
 
-fn install_baffle_ca(container: &RuntimeContainer, verbose: bool) -> Result<()> {
+fn install_baffle_ca(
+    container: &RuntimeContainer,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
     let mut cmd = build_baffle_ca_install_command(&container.name);
-    trace_command(&cmd, verbose);
-    let status = cmd.status().with_context(|| {
-        format!(
-            "failed to run Baffle CA installation in execution container '{}'",
+    run_helper_command(
+        &mut cmd,
+        verbose,
+        quiet_helpers,
+        "Baffle CA installation",
+    )
+    .inspect_err(|_err| {
+        eprintln!(
+            "error: failed to install the Baffle CA in execution container '{}'",
             container.name
-        )
-    })?;
-    if status.success() {
-        return Ok(());
-    }
-
-    let code = status.code().unwrap_or(1);
-    eprintln!(
-        "error: failed to install the Baffle CA in execution container '{}'",
-        container.name
-    );
-    eprintln!(
-        "hint: ensure the image provides sh, cp, and update-ca-certificates with a writable system trust store"
-    );
-    Err(Error::CommandFailed {
-        context: "Baffle CA installation",
-        code,
+        );
+        eprintln!(
+            "hint: ensure the image provides sh, cp, and update-ca-certificates with a writable system trust store"
+        );
     })
 }
 
@@ -568,17 +682,29 @@ fn build_baffle_ca_install_command(container_name: &str) -> Command {
     cmd
 }
 
-pub fn container_rm(container_name: &str, verbose: bool) -> Result<()> {
+pub fn container_rm(container_name: &str, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cmd = build_container_rm_command(container_name);
     trace_command(&cmd, verbose);
     let output = cmd
         .output()
         .with_context(|| format!("failed to run podman rm for {container_name}"))?;
 
-    if output.status.success() || remove_output_is_missing_container(&output) {
+    if output.status.success() {
+        if verbose {
+            forward_output(&output)?;
+        }
+        return Ok(());
+    }
+    if remove_output_is_missing_container(&output) {
         return Ok(());
     }
 
+    if quiet_helpers {
+        ensure_success_output_with_diagnostics(&output, "podman rm")?;
+    }
+    if verbose {
+        forward_output(&output)?;
+    }
     ensure_success_output(&output, "podman rm")
 }
 

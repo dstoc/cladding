@@ -15,7 +15,14 @@ pub(super) fn cmd_check(context: &Context) -> Result<()> {
     let legacy_config_entries_present = check_legacy_config_entries(context);
     let config = context.load_config()?;
     let spec = context.runtime_spec(&config)?;
-    check_project_readiness(context, &config, &spec, false, BaffleCaReadiness::Validate)?;
+    check_project_readiness(
+        context,
+        &config,
+        &spec,
+        false,
+        false,
+        BaffleCaReadiness::Validate,
+    )?;
     if legacy_config_entries_present {
         return Err(Error::message("legacy config entries"));
     }
@@ -36,14 +43,15 @@ pub(super) fn check_project_readiness(
     config: &ExecutionConfig,
     spec: &RuntimeSpec,
     verbose: bool,
+    quiet_helpers: bool,
     baffle_ca: BaffleCaReadiness,
 ) -> Result<()> {
     check_required_binaries(context, config)?;
-    check_runsc_runtime(config, verbose)?;
+    check_runsc_runtime(config, verbose, quiet_helpers)?;
     check_required_config_files(context, config)?;
-    check_required_images(config, verbose)?;
+    check_required_images(config, verbose, quiet_helpers)?;
     check_baffle_ca_readiness(&context.project_root, baffle_ca, || {
-        initialize_baffle_ca(spec, verbose).map_err(anyhow::Error::new)
+        initialize_baffle_ca(spec, verbose, quiet_helpers).map_err(anyhow::Error::new)
     })?;
     check_required_host_paths(spec)
 }
@@ -321,7 +329,11 @@ pub(super) fn check_required_host_paths(spec: &RuntimeSpec) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn check_required_images(config: &ExecutionConfig, verbose: bool) -> Result<()> {
+pub(super) fn check_required_images(
+    config: &ExecutionConfig,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
     let mut missing = false;
     let mut images = vec![
         ("agent", config.agent_image()),
@@ -342,11 +354,48 @@ pub(super) fn check_required_images(config: &ExecutionConfig, verbose: bool) -> 
         let mut cmd = Command::new("podman");
         cmd.args(["image", "exists", image]);
         cladding::podman::trace_command(&cmd, verbose);
-        let status = cmd.status();
+        let output = if quiet_helpers {
+            Some(cmd.output())
+        } else {
+            None
+        };
+        let status = match output {
+            Some(Ok(output)) => Some((output.status, Some(output))),
+            Some(Err(err)) => {
+                eprintln!("error: failed to check image {image}: {err}");
+                return Err(Error::message("failed to check image"));
+            }
+            None => match cmd.status() {
+                Ok(status) => Some((status, None)),
+                Err(err) => {
+                    eprintln!("error: failed to check image {image}: {err}");
+                    return Err(Error::message("failed to check image"));
+                }
+            },
+        };
 
         match status {
-            Ok(status) if status.success() => {}
-            Ok(_) => {
+            Some((status, _)) if status.success() => {}
+            Some((_, Some(output))) => {
+                eprintln!("missing: image {image}");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stdout.trim().is_empty() {
+                    eprintln!("podman image exists stdout:\n{}", stdout.trim_end());
+                }
+                if !stderr.trim().is_empty() {
+                    eprintln!("podman image exists stderr:\n{}", stderr.trim_end());
+                }
+                if image_is_buildable_by_cladding(config, image) {
+                    eprintln!("hint: run cladding build");
+                } else {
+                    eprintln!(
+                        "hint: pull/tag image '{image}', or set cladding.json {label}.image to a supported build target and run cladding build"
+                    );
+                }
+                missing = true;
+            }
+            Some((_, None)) => {
                 eprintln!("missing: image {image}");
                 if image_is_buildable_by_cladding(config, image) {
                     eprintln!("hint: run cladding build");
@@ -357,10 +406,7 @@ pub(super) fn check_required_images(config: &ExecutionConfig, verbose: bool) -> 
                 }
                 missing = true;
             }
-            Err(err) => {
-                eprintln!("error: failed to check image {image}: {err}");
-                return Err(Error::message("failed to check image"));
-            }
+            None => unreachable!("status is populated for each image check"),
         }
     }
 
@@ -371,12 +417,16 @@ pub(super) fn check_required_images(config: &ExecutionConfig, verbose: bool) -> 
     Ok(())
 }
 
-pub(super) fn check_runsc_runtime(config: &ExecutionConfig, verbose: bool) -> Result<()> {
+pub(super) fn check_runsc_runtime(
+    config: &ExecutionConfig,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
     if !config.use_runsc {
         return Ok(());
     }
 
-    match runsc_available(verbose) {
+    match runsc_available(verbose, quiet_helpers) {
         Ok(true) => Ok(()),
         Ok(false) => {
             eprintln!(
