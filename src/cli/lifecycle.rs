@@ -63,11 +63,7 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
         }
     }
 
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     prepare_persistent_baffle_ca(&context.project_root, || {
         initialize_baffle_ca(&spec, false).map_err(anyhow::Error::new)
     })?;
@@ -312,11 +308,7 @@ fn cmd_up_inner(
 ) -> Result<()> {
     let config = context.load_config()?;
     let status = project_runtime_status(context, &config, verbose)?;
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     let inventory = runtime_inventory(&spec, verbose)?;
 
     if status.already_running && inventory.is_fully_running() {
@@ -487,11 +479,7 @@ fn prepare_baffle_runtime(project_root: &std::path::Path) -> Result<()> {
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     let config = context.load_config()?;
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose));
 
@@ -513,11 +501,7 @@ pub(super) fn cmd_down_ephemeral(context: &Context) -> Result<()> {
 
 pub(super) fn cmd_destroy(context: &Context) -> Result<()> {
     let config = context.load_config()?;
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false));
 

@@ -37,6 +37,71 @@ pub fn validate_baffle_ca(project_root: &Path) -> Result<()> {
     ensure_baffle_credentials_inner(project_root, None, true).map_err(Error::from)
 }
 
+/// Validate a project's Baffle secret directory for use as a read-only runtime mount.
+///
+/// Unlike `ensure_baffle_credentials`, this does not create or change project files.
+/// A missing directory means the project has no secret source.
+pub fn validate_baffle_secrets_source(project_root: &Path) -> Result<Option<PathBuf>> {
+    let credentials_dir = project_root.join(CREDENTIALS_DIR);
+    let baffle_dir = credentials_dir.join(BAFFLE_DIR);
+    let secrets_dir = baffle_dir.join(SECRETS_DIR);
+
+    for path in [&credentials_dir, &baffle_dir, &secrets_dir] {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(Error::from(anyhow::Error::new(error).context(format!(
+                    "failed to inspect Baffle secret source {}",
+                    path.display()
+                ))));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(Error::message(format!(
+                "Baffle secret source path is not a regular directory: {}",
+                path.display()
+            )));
+        }
+        require_current_owner(path).map_err(Error::from)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o777 != 0o700 {
+                return Err(Error::message(format!(
+                    "Baffle secret source directory must have mode 0700: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    for entry in fs::read_dir(&secrets_dir).map_err(anyhow::Error::from)? {
+        let entry = entry.map_err(anyhow::Error::from)?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(anyhow::Error::from)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(Error::message(format!(
+                "Baffle secret source entry must be a regular file: {}",
+                path.display()
+            )));
+        }
+        require_current_owner(&path).map_err(Error::from)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o777 != 0o600 {
+                return Err(Error::message(format!(
+                    "Baffle secret source file must have mode 0600: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    Ok(Some(secrets_dir))
+}
+
 fn ensure_baffle_credentials_inner(
     project_root: &Path,
     initialize_ca: Option<&mut dyn FnMut() -> anyhow::Result<()>>,
@@ -900,6 +965,21 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn read_only_secret_source_is_validated_without_copying_or_changing_values() {
+        let root = temp_project();
+        ensure_baffle_credentials(&root).unwrap();
+        let secret_path = root.join("credentials/baffle/secrets/api-token");
+        fs::write(&secret_path, b"project secret value").unwrap();
+        set_mode(&secret_path, 0o600).unwrap();
+
+        let source = validate_baffle_secrets_source(&root).unwrap();
+
+        assert_eq!(source, Some(root.join("credentials/baffle/secrets")));
+        assert_eq!(fs::read(secret_path).unwrap(), b"project secret value");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn wrong_credential_owner_is_reported() {
@@ -926,6 +1006,10 @@ mod tests {
 
         let error = ensure_baffle_credentials(&root).unwrap_err().to_string();
         assert!(error.contains("regular file"), "{error}");
+        let source_error = validate_baffle_secrets_source(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(source_error.contains("regular file"), "{source_error}");
         fs::remove_dir_all(root).unwrap();
     }
 

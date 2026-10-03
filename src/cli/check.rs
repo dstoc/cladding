@@ -14,11 +14,7 @@ use std::process::Command;
 pub(super) fn cmd_check(context: &Context) -> Result<()> {
     let legacy_config_entries_present = check_legacy_config_entries(context);
     let config = context.load_config()?;
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     check_project_readiness(context, &config, &spec, false, BaffleCaReadiness::Validate)?;
     if legacy_config_entries_present {
         return Err(Error::message("legacy config entries"));

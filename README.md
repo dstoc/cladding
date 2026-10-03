@@ -201,8 +201,10 @@ Custom agent and network-sandbox images must support the same initialization com
 
 `cladding down` and `cladding destroy` remove runtime resources but keep the
 project CA and secrets. `cladding run` initializes a separate temporary CA and
-empty secrets directory before it creates the runtime, then removes them during
-cleanup.
+empty private secrets directory before it creates the runtime, then removes
+them during cleanup. For a selected project, the proxy mounts that project's
+secrets directory separately as read-only; it does not copy secret values into
+the temporary runtime. A run without a project has no injection secrets.
 
 To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then run `cladding build` to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
 
