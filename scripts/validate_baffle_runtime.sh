@@ -653,6 +653,15 @@ podman exec "$run_agent" /bin/sh -ec \
   'test -x /opt/tools/bin/baffle && test -f /opt/tools/run-symlink-marker'
 podman exec "$run_proxy" /bin/sh -ec \
   'test -s /opt/credentials/baffle/ca.crt && test -f /opt/credentials/baffle/secrets/test-token-old'
+podman inspect "$run_proxy" | jq -e \
+  --arg expected "CLADDING_AGENT_SESSION_CONFIG=$agent_session_config" \
+  '.[0].Config.Env | any(. == $expected)' >/dev/null
+run_sessions=$(podman exec "$run_proxy" /opt/tools/bin/baffle list)
+printf '%s\n' "$run_sessions" | grep -F 'agent/proxy.sock' >/dev/null
+if printf '%s\n' "$run_sessions" | grep -F 'nw-sandbox/proxy.sock' >/dev/null; then
+  echo "one-off Baffle runtime created a network-sandbox session while disabled" >&2
+  exit 1
+fi
 run_ca=$(podman exec "$run_proxy" sha256sum /opt/credentials/baffle/ca.crt | cut -d ' ' -f 1)
 if [ "$run_ca" != "$ca_before" ]; then
   echo "one-off proxy is not using the persistent project CA" >&2
