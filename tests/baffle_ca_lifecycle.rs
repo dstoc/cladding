@@ -110,6 +110,41 @@ exit 0
     ]);
     assert_success(init.output().unwrap());
 
+    let mut run_before_build = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    run_before_build.args([
+        "--cladding-dir",
+        project_root.to_str().unwrap(),
+        "run",
+        "true",
+    ]);
+    assert_success(run_before_build.output().unwrap());
+    assert!(
+        !project_root.join("credentials/baffle/ca.crt").exists(),
+        "ephemeral run must not initialize the persistent project CA"
+    );
+    assert!(
+        !project_root.join("credentials/baffle/ca-key.pem").exists(),
+        "ephemeral run must not create the persistent project CA key"
+    );
+    let podman_state = podman_log.with_extension("state");
+    if podman_state.exists() {
+        fs::remove_file(podman_state).unwrap();
+    }
+
+    let ca_init_count_before_build = read_log(&podman_log)
+        .lines()
+        .filter(|line| line.starts_with("run --rm "))
+        .count();
+    assert_eq!(
+        ca_init_count_before_build, 1,
+        "ephemeral run should initialize its private CA before project build"
+    );
     let mut build = cli(
         &root,
         &bin_dir,
@@ -121,11 +156,15 @@ exit 0
     assert_success(build.output().unwrap());
     let certificate = fs::read(project_root.join("credentials/baffle/ca.crt")).unwrap();
     let private_key = fs::read(project_root.join("credentials/baffle/ca-key.pem")).unwrap();
-    let first_build_runs = read_log(&podman_log)
+    let ca_init_count_after_build = read_log(&podman_log)
         .lines()
-        .filter(|line| line.starts_with("run "))
+        .filter(|line| line.starts_with("run --rm "))
         .count();
-    assert_eq!(first_build_runs, 1, "build should initialize CA once");
+    assert_eq!(
+        ca_init_count_after_build,
+        ca_init_count_before_build + 1,
+        "build should initialize the project CA once"
+    );
 
     let mut second_build = cli(
         &root,
@@ -139,9 +178,9 @@ exit 0
     assert_eq!(
         read_log(&podman_log)
             .lines()
-            .filter(|line| line.starts_with("run "))
+            .filter(|line| line.starts_with("run --rm "))
             .count(),
-        1,
+        ca_init_count_after_build,
         "a repeated build must reuse the CA"
     );
     assert_eq!(
@@ -190,14 +229,18 @@ exit 0
     up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
     let up_result = up.output().unwrap();
     assert!(!up_result.status.success());
-    assert!(String::from_utf8_lossy(&up_result.stderr).contains("incomplete Baffle CA"));
+    let up_stderr = String::from_utf8_lossy(&up_result.stderr);
+    assert!(
+        up_stderr.contains("incomplete Baffle CA"),
+        "up failed for an unexpected reason: {up_stderr}"
+    );
     let up_calls = read_log(&podman_log);
     assert!(
         !up_calls.contains("pod create"),
         "up created a pod before CA validation"
     );
     assert!(
-        !up_calls.contains("container run"),
+        !up_calls.lines().any(|line| line.starts_with("run --name ")),
         "up started a container before CA validation"
     );
     assert!(
