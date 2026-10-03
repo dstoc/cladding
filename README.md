@@ -87,11 +87,13 @@ access the Baffle control socket, CA private key, or injection credentials.
   ```
 
 The normal setup order is `cladding init`, edit the files under
-`.cladding/config/`, then run `cladding build` and `cladding up`. `init`
-creates the Baffle configuration and private credential storage. On the first
-`up`, Cladding initializes the project CA from Baffle's daemon configuration
-before it creates the proxy pod or execution containers. `build` creates the
-local images and refreshes the embedded tools.
+`.cladding/config/`, then run `cladding build`, `cladding check`, and
+`cladding up`. `init` creates the Baffle configuration and private credential
+storage. `build` creates local images, refreshes embedded tools, and initializes
+the persistent project CA when it is not initialized. Later builds validate
+and reuse the same CA. `check` and `up` validate the CA and never initialize or
+rotate it. Run `cladding build` to initialize a missing CA before starting the
+project.
 
 * Execute commands in the agent container of an already-running project (workdir follows your host `cwd` relative to the directory containing `.cladding`; if it cannot be mapped, the command starts in `/home/user`):
 
@@ -159,7 +161,8 @@ cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - chec
 ### Project CA and injection credentials
 
 `cladding init` prepares private Baffle credential storage under
-`.cladding/credentials/baffle/`. On the first `cladding up`, Cladding runs
+`.cladding/credentials/baffle/` without creating a CA. On the first successful
+`cladding build`, Cladding runs
 `baffle ca init --config /opt/config/proxy/daemon.toml` in the selected proxy
 image. Baffle reads the CA paths from that daemon configuration and creates:
 
@@ -172,7 +175,9 @@ image. Baffle reads the CA paths from that daemon configuration and creates:
 
 The generated CA uses an ECDSA P-256 key and expires 365 days after creation.
 Baffle creates the private key with mode `0600` and the public certificate
-with mode `0644`. Cladding validates the pair and reuses it on later starts.
+with mode `0644`. Cladding validates and reuses the pair on later builds.
+`cladding check` and `cladding up` validate the same CA state before startup;
+they do not initialize or rotate the persistent CA.
 If either file is missing, malformed, expired, or does not match its partner,
 Cladding reports an error and leaves the material in place. It does not rotate
 the CA automatically. The credentials directories use mode `0700`, and
@@ -199,7 +204,7 @@ project CA and secrets. `cladding run` initializes a separate temporary CA and
 empty secrets directory before it creates the runtime, then removes them during
 cleanup.
 
-To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then start the project to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
+To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then run `cladding build` to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
 
 New `.cladding` directories contain an internal ignore file. For an existing project layout, confirm that the repository ignores `.cladding/credentials/` before provisioning credentials. Never commit `ca-key.pem` or secret files.
 
@@ -398,8 +403,9 @@ The filesystem sandbox has no proxy socket mount and no proxy environment by def
 ## Useful Commands
 
 ```bash
-cladding init [name]  # initialize .cladding and config
-cladding check        # verify required paths/images
+cladding init [name]  # create .cladding config and runtime layout
+cladding build       # build images, refresh embedded tools, initialize persistent Baffle CA
+cladding check        # verify project prerequisites, including the persistent Baffle CA
 cladding ps           # list running cladding projects
 cladding run [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
 cladding exec [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] <cmd> [args...] # execute in the selected container of a running runtime
@@ -409,7 +415,7 @@ cladding reload-proxy
 cladding logs [agent|proxy|nw-sandbox|fs-sandbox] [podman logs args...] # view container logs
 cladding down         # stop managed containers and the proxy pod
 cladding destroy      # force-remove running containers
-cladding up           # starts the containers
+cladding up           # validate prerequisites and start the containers
 cladding logs proxy -f       # follow proxy logs
 cladding logs nw-sandbox -f  # follow network sandbox (mcp-run) logs
 cladding logs fs-sandbox -f  # follow filesystem sandbox (mcp-run) logs

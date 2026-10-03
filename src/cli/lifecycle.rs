@@ -1,7 +1,4 @@
-use super::check::{
-    check_required_binaries, check_required_config_files, check_required_host_paths,
-    check_required_images, check_runsc_runtime,
-};
+use super::check::{BaffleCaReadiness, check_project_readiness};
 use super::context::{Context, project_runtime_status};
 use super::{DEFAULT_CLADDING_BUILD_IMAGE, DEFAULT_CLI_BUILD_IMAGE, DEFAULT_SANDBOX_BUILD_IMAGE};
 use anyhow::Context as _;
@@ -66,7 +63,24 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
         }
     }
 
+    let spec = RuntimeSpec::build_with_workspace_root(
+        &context.project_root,
+        &context.workspace_root,
+        &config,
+    );
+    prepare_persistent_baffle_ca(&context.project_root, || {
+        initialize_baffle_ca(&spec, false).map_err(anyhow::Error::new)
+    })?;
+
     Ok(())
+}
+
+fn prepare_persistent_baffle_ca(
+    project_root: &std::path::Path,
+    initialize_ca: impl FnMut() -> anyhow::Result<()>,
+) -> Result<()> {
+    prepare_baffle_runtime(project_root)?;
+    cladding::credentials::ensure_baffle_ca(project_root, initialize_ca)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,17 +347,15 @@ fn cmd_up_inner(
         return Err(Error::message("incomplete or stopped runtime"));
     }
 
-    check_required_binaries(context, &config)?;
-    check_runsc_runtime(&config, verbose)?;
-    check_required_images(&config, verbose)?;
-    check_required_config_files(context, &config)?;
+    let baffle_ca = if fail_if_already_running {
+        BaffleCaReadiness::Initialize
+    } else {
+        BaffleCaReadiness::Validate
+    };
+    check_project_readiness(context, &config, &spec, verbose, baffle_ca)?;
     prepare_baffle_runtime(&context.project_root)?;
-    cladding::credentials::ensure_baffle_ca(&context.project_root, || {
-        initialize_baffle_ca(&spec, verbose).map_err(anyhow::Error::new)
-    })?;
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
-    check_required_host_paths(&spec)?;
     *runtime_create_attempted = true;
     if let Err(startup_error) = runtime_create(&spec, verbose) {
         if !fail_if_already_running
@@ -450,8 +462,10 @@ fn record_cleanup_result(target: &mut Option<Error>, result: Result<()>) {
 mod tests {
     use super::*;
     use cladding::config::{ExecutionComponentConfig, ExecutionProxyConfig, ResolvedMountConfig};
+    use rcgen::{BasicConstraints, DnType, IsCa, KeyPair, KeyUsagePurpose};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use time::{Duration, OffsetDateTime};
 
     fn config() -> ExecutionConfig {
         ExecutionConfig {
@@ -479,6 +493,54 @@ mod tests {
             context: PathBuf::from(context),
             args: BTreeMap::from([("FEATURE".to_string(), feature.to_string())]),
         }
+    }
+
+    #[test]
+    fn build_ca_setup_initializes_once_and_reuses_existing_material() {
+        let root = std::env::temp_dir().join(format!("cladding-build-ca-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let baffle_dir = root.join("credentials/baffle");
+        let mut initializer_calls = 0;
+
+        prepare_persistent_baffle_ca(&root, || {
+            initializer_calls += 1;
+            write_test_ca(&baffle_dir)
+        })
+        .unwrap();
+        assert_eq!(initializer_calls, 1);
+        let certificate = fs::read(baffle_dir.join("ca.crt")).unwrap();
+        let private_key = fs::read(baffle_dir.join("ca-key.pem")).unwrap();
+
+        prepare_persistent_baffle_ca(&root, || {
+            initializer_calls += 1;
+            anyhow::bail!("build must reuse an existing CA")
+        })
+        .unwrap();
+
+        assert_eq!(initializer_calls, 1);
+        assert_eq!(fs::read(baffle_dir.join("ca.crt")).unwrap(), certificate);
+        assert_eq!(
+            fs::read(baffle_dir.join("ca-key.pem")).unwrap(),
+            private_key
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_test_ca(baffle_dir: &std::path::Path) -> anyhow::Result<()> {
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Baffle Interception CA");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.not_before = OffsetDateTime::now_utc() - Duration::days(1);
+        params.not_after = OffsetDateTime::now_utc() + Duration::days(3650);
+        let key_pair = KeyPair::generate()?;
+        let certificate = params.self_signed(&key_pair)?;
+        fs::write(baffle_dir.join("ca.crt"), certificate.pem())?;
+        fs::write(baffle_dir.join("ca-key.pem"), key_pair.serialize_pem())?;
+        Ok(())
     }
 
     #[test]
