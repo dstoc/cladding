@@ -1,6 +1,6 @@
 # PRD: Direct Podman Runtime Management
 
-> Status: Historical. This proposal describes the migration to direct Podman management; the current runtime now uses a proxy pod plus standalone execution containers and is summarized in `docs/features/current-runtime-summary.md`.
+> Status: Historical. This proposal describes the migration to direct Podman management. The current runtime uses standalone proxy and execution containers and is summarized in `docs/features/current-runtime-summary.md`.
 
 ## Objective
 Replace `podman play kube` runtime startup/teardown with explicit Podman pod and container commands while preserving the current Cladding runtime model:
@@ -10,7 +10,7 @@ Replace `podman play kube` runtime startup/teardown with explicit Podman pod and
 - app container names remain `<pod-name>-instance`
 - existing labels continue to drive `cladding ps`, active network detection, cleanup, and expose proxy ownership
 
-This is a runtime orchestration change, not a product behavior change. The current implementation has since moved past the kube-era and now uses a proxy pod plus standalone execution containers, so treat the rest of this document as migration history rather than current guidance.
+This is a runtime orchestration change, not a product behavior change. The current implementation has since moved past the kube-era and now uses standalone containers for the proxy and execution components, so treat the rest of this document as migration history rather than current guidance.
 
 ## Motivation
 Cladding currently renders Kubernetes-style YAML from `cladding/src/pods.rs` and starts/stops it through `cladding/src/podman.rs::podman_play_kube`.

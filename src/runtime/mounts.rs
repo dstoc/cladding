@@ -1,6 +1,8 @@
 use super::sockets::is_generated_runtime_mount_path;
 use super::sockets::{RUNTIME_PROXY_MOUNT_PATH, RUNTIME_PROXY_SOCKET_DIR};
-use super::types::{RuntimeCustomMount, RuntimeMount, RuntimeMountSource, RuntimePod, RuntimeSpec};
+use super::types::{
+    RuntimeComponent, RuntimeCustomMount, RuntimeMount, RuntimeMountSource, RuntimeSpec,
+};
 use crate::config::{MountTarget, MountType, ResolvedMountConfig};
 use std::collections::BTreeSet;
 use std::fs;
@@ -12,11 +14,11 @@ impl RuntimeSpec {
 
         collect_required_host_paths(&self.proxy, &mut paths);
         collect_required_host_paths(&self.agent, &mut paths);
-        if let Some(pod) = &self.nw_sandbox {
-            collect_required_host_paths(pod, &mut paths);
+        if let Some(component) = &self.nw_sandbox {
+            collect_required_host_paths(component, &mut paths);
         }
-        if let Some(pod) = &self.fs_sandbox {
-            collect_required_host_paths(pod, &mut paths);
+        if let Some(component) = &self.fs_sandbox {
+            collect_required_host_paths(component, &mut paths);
         }
 
         paths.into_iter().collect()
@@ -321,8 +323,8 @@ fn canonical_or_normalized(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| normalize_path(path))
 }
 
-fn collect_required_host_paths(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) {
-    for container in &pod.containers {
+fn collect_required_host_paths(component: &RuntimeComponent, paths: &mut BTreeSet<PathBuf>) {
+    for container in &component.containers {
         for mount in &container.mounts {
             match &mount.source {
                 RuntimeMountSource::HostPath { path }

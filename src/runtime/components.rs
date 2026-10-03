@@ -13,8 +13,8 @@ use super::sockets::{
     build_proxy_relay_volume_mount, build_scoped_socket_mount, runtime_socket_mount_path,
 };
 use super::types::{
-    RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeMount, RuntimeNames,
-    RuntimePlacement, RuntimePod, RuntimeSpec, RuntimeUserNamespace,
+    RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeMount,
+    RuntimeNames, RuntimeSpec, RuntimeUserNamespace,
 };
 use crate::config::{ExecutionConfig, MountTarget};
 use std::collections::BTreeMap;
@@ -51,8 +51,9 @@ impl RuntimeSpec {
             build_custom_mounts(&project_root, &runtime_root, &config.name, &config.mounts);
         let names = RuntimeNames::from_config(config);
 
-        let proxy = build_proxy_pod(&project_root, &runtime_root, config, &names, &custom_mounts);
-        let agent = build_agent_pod(
+        let proxy =
+            build_proxy_component(&project_root, &runtime_root, config, &names, &custom_mounts);
+        let agent = build_agent_component(
             &project_root,
             &workspace_root,
             &runtime_root,
@@ -61,7 +62,7 @@ impl RuntimeSpec {
             &custom_mounts,
         );
         let nw_sandbox = names.nw_sandbox_name.as_ref().map(|component_name| {
-            build_nw_sandbox_pod(
+            build_nw_sandbox_component(
                 &project_root,
                 &workspace_root,
                 &runtime_root,
@@ -71,7 +72,7 @@ impl RuntimeSpec {
             )
         });
         let fs_sandbox = names.fs_sandbox_name.as_ref().map(|component_name| {
-            build_fs_sandbox_pod(
+            build_fs_sandbox_component(
                 &project_root,
                 &runtime_root,
                 config,
@@ -94,13 +95,13 @@ impl RuntimeSpec {
     }
 }
 
-fn build_proxy_pod(
+fn build_proxy_component(
     project_root: &Path,
     runtime_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
-) -> RuntimePod {
+) -> RuntimeComponent {
     let mut mounts = build_proxy_mounts(project_root, runtime_root, custom_mounts);
     if cfg!(target_os = "macos") {
         mounts.push(build_proxy_relay_volume_mount(
@@ -150,9 +151,8 @@ fn build_proxy_pod(
         tty: false,
     }];
 
-    RuntimePod {
+    RuntimeComponent {
         name: names.proxy_name.clone(),
-        placement: RuntimePlacement::Pod,
         use_runsc: false,
         labels: build_labels(&config.name, project_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
@@ -161,14 +161,14 @@ fn build_proxy_pod(
     }
 }
 
-fn build_agent_pod(
+fn build_agent_component(
     project_root: &Path,
     workspace_root: &Path,
     runtime_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
-) -> RuntimePod {
+) -> RuntimeComponent {
     let mut mounts = apply_custom_mounts(
         build_agent_mounts(project_root, workspace_root, runtime_root, custom_mounts),
         custom_mounts,
@@ -245,9 +245,8 @@ fn build_agent_pod(
         });
     }
 
-    RuntimePod {
+    RuntimeComponent {
         name: names.agent_name.clone(),
-        placement: RuntimePlacement::Standalone,
         use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "agent"),
         network_name: NETWORK_NONE.to_string(),
@@ -269,14 +268,14 @@ fn build_agent_pod(
     }
 }
 
-fn build_nw_sandbox_pod(
+fn build_nw_sandbox_component(
     project_root: &Path,
     workspace_root: &Path,
     runtime_root: &Path,
     config: &ExecutionConfig,
     component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
-) -> RuntimePod {
+) -> RuntimeComponent {
     let mut mounts = apply_custom_mounts(
         build_sandbox_mounts(project_root, workspace_root, runtime_root, custom_mounts),
         custom_mounts,
@@ -336,9 +335,8 @@ fn build_nw_sandbox_pod(
         value: no_proxy,
     });
 
-    RuntimePod {
+    RuntimeComponent {
         name: component_name.to_string(),
-        placement: RuntimePlacement::Standalone,
         use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "nw-sandbox"),
         network_name: NETWORK_NONE.to_string(),
@@ -379,14 +377,14 @@ fn build_proxy_data_socket_mount(
     }
 }
 
-fn build_fs_sandbox_pod(
+fn build_fs_sandbox_component(
     project_root: &Path,
     runtime_root: &Path,
     config: &ExecutionConfig,
     _names: &RuntimeNames,
     component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
-) -> RuntimePod {
+) -> RuntimeComponent {
     let mut mounts = apply_custom_mounts(
         build_fs_sandbox_mounts(project_root, custom_mounts),
         custom_mounts,
@@ -398,9 +396,8 @@ fn build_fs_sandbox_pod(
         RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH,
     ));
 
-    RuntimePod {
+    RuntimeComponent {
         name: component_name.to_string(),
-        placement: RuntimePlacement::Standalone,
         use_runsc: config.use_runsc,
         labels: build_labels(&config.name, project_root, "fs-sandbox"),
         network_name: NETWORK_NONE.to_string(),
@@ -448,8 +445,8 @@ fn build_no_proxy() -> String {
     ["localhost", LOOPBACK].join(",")
 }
 
-fn runtime_container_name(pod_name: &str) -> String {
-    format!("{pod_name}-instance")
+fn runtime_container_name(component_name: &str) -> String {
+    format!("{component_name}-instance")
 }
 
 #[cfg(test)]
@@ -491,8 +488,9 @@ mod tests {
         }
     }
 
-    fn container<'a>(pod: &'a RuntimePod, name: &str) -> &'a RuntimeContainer {
-        pod.containers
+    fn container<'a>(component: &'a RuntimeComponent, name: &str) -> &'a RuntimeContainer {
+        component
+            .containers
             .iter()
             .find(|container| container.name == name)
             .expect("container")
@@ -539,19 +537,25 @@ mod tests {
             Some("/tmp/project/.cladding")
         );
         assert_eq!(spec.proxy.network_name, "default");
-        assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
         assert_eq!(spec.agent.network_name, "none");
         assert_eq!(spec.proxy.user_namespace, RuntimeUserNamespace::KeepId);
         assert_eq!(spec.agent.user_namespace, RuntimeUserNamespace::KeepId);
-        assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert_eq!(spec.proxy.containers.len(), 1);
         assert_eq!(spec.agent.containers.len(), 1);
         assert_eq!(
-            spec.nw_sandbox.as_ref().expect("nw pod").containers.len(),
+            spec.nw_sandbox
+                .as_ref()
+                .expect("network sandbox")
+                .containers
+                .len(),
             1
         );
         assert_eq!(
-            spec.fs_sandbox.as_ref().expect("fs pod").containers.len(),
+            spec.fs_sandbox
+                .as_ref()
+                .expect("filesystem sandbox")
+                .containers
+                .len(),
             1
         );
         assert_eq!(spec.proxy.containers[0].name, "demo-proxy-instance");
@@ -578,11 +582,19 @@ mod tests {
         );
         assert_eq!(spec.agent.containers[0].name, "demo-agent-instance");
         assert_eq!(
-            spec.nw_sandbox.as_ref().expect("nw pod").containers[0].name,
+            spec.nw_sandbox
+                .as_ref()
+                .expect("network sandbox")
+                .containers[0]
+                .name,
             "demo-nw-sandbox-instance"
         );
         assert_eq!(
-            spec.fs_sandbox.as_ref().expect("fs pod").containers[0].name,
+            spec.fs_sandbox
+                .as_ref()
+                .expect("filesystem sandbox")
+                .containers[0]
+                .name,
             "demo-fs-sandbox-instance"
         );
 
@@ -613,12 +625,12 @@ mod tests {
         let agent = container(&spec.agent, "demo-agent-instance");
         assert!(!mount_paths(agent).contains("/run/baffle"));
         let nw = container(
-            spec.nw_sandbox.as_ref().expect("nw pod"),
+            spec.nw_sandbox.as_ref().expect("network sandbox"),
             "demo-nw-sandbox-instance",
         );
         assert!(!mount_paths(nw).contains("/run/baffle"));
         let fs = container(
-            spec.fs_sandbox.as_ref().expect("fs pod"),
+            spec.fs_sandbox.as_ref().expect("filesystem sandbox"),
             "demo-fs-sandbox-instance",
         );
         assert!(!mount_paths(fs).contains("/run/baffle"));
@@ -728,7 +740,11 @@ mod tests {
             assert!(container.name != "demo-fs-sandbox-run-server");
         }
         assert_eq!(
-            spec.fs_sandbox.as_ref().expect("fs pod").containers[0].image,
+            spec.fs_sandbox
+                .as_ref()
+                .expect("filesystem sandbox")
+                .containers[0]
+                .image,
             "fs:image"
         );
         assert_eq!(
@@ -808,7 +824,11 @@ mod tests {
         assert_eq!(spec.proxy.containers.len(), 1);
         assert_eq!(spec.agent.containers.len(), 1);
         assert_eq!(
-            spec.nw_sandbox.as_ref().expect("nw pod").containers.len(),
+            spec.nw_sandbox
+                .as_ref()
+                .expect("network sandbox")
+                .containers
+                .len(),
             1
         );
         assert!(
@@ -988,7 +1008,7 @@ mod tests {
             );
         }
 
-        for (pod, container, own_socket, other_socket) in [
+        for (component, container, own_socket, other_socket) in [
             (
                 &spec.agent,
                 agent,
@@ -1006,8 +1026,8 @@ mod tests {
             assert!(paths.contains(own_socket));
             assert!(!paths.contains(other_socket));
             assert!(!paths.contains("/run/cladding/proxy"));
-            assert_eq!(pod.network_name, "none");
-            assert_eq!(pod.user_namespace, RuntimeUserNamespace::KeepId);
+            assert_eq!(component.network_name, "none");
+            assert_eq!(component.user_namespace, RuntimeUserNamespace::KeepId);
             assert!(
                 container
                     .command
@@ -1055,10 +1075,8 @@ mod tests {
         let proxy = container(&spec.proxy, "demo-proxy-instance");
 
         assert!(spec.use_runsc);
-        assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
         assert!(!spec.proxy.use_runsc);
         assert_eq!(env_value(proxy, "CLADDING_SANDBOX_NAME"), None);
-        assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert!(spec.agent.use_runsc);
         assert_eq!(spec.agent.user_namespace, RuntimeUserNamespace::KeepId);
     }
@@ -1068,19 +1086,14 @@ mod tests {
         let config = execution_config(true, true, Vec::new(), true);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
 
-        assert_eq!(spec.proxy.placement, RuntimePlacement::Pod);
         assert!(!spec.proxy.use_runsc);
-        assert_eq!(spec.agent.placement, RuntimePlacement::Standalone);
         assert!(spec.agent.use_runsc);
-        assert_eq!(
-            spec.nw_sandbox.as_ref().expect("nw pod").placement,
-            RuntimePlacement::Standalone
+        assert!(spec.nw_sandbox.as_ref().expect("network sandbox").use_runsc);
+        assert!(
+            spec.fs_sandbox
+                .as_ref()
+                .expect("filesystem sandbox")
+                .use_runsc
         );
-        assert!(spec.nw_sandbox.as_ref().expect("nw pod").use_runsc);
-        assert_eq!(
-            spec.fs_sandbox.as_ref().expect("fs pod").placement,
-            RuntimePlacement::Standalone
-        );
-        assert!(spec.fs_sandbox.as_ref().expect("fs pod").use_runsc);
     }
 }

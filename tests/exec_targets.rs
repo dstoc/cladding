@@ -38,15 +38,16 @@ impl Fixture {
         fs::create_dir_all(&bin_dir).expect("mock binary directory should be created");
         let args_path = root.join("podman-args.txt");
         let podman_path = bin_dir.join("podman");
-        let running_pods = serde_json::json!([{
+        let running_containers = serde_json::json!([{
             "Labels": {
+                "app": "agent",
                 "cladding": "demo",
                 "project_root": cladding_dir.display().to_string(),
             }
         }]);
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = pod ] && [ \"$2\" = ps ]; then\nprintf '%s\\n' {}\nexit 0\nfi\nprintf '%s\\n' \"$@\" > \"$CLADDING_TEST_ARGS\"\nexit 0\n",
-            shell_quote(&running_pods.to_string())
+            "#!/bin/sh\nif [ \"$1\" = container ] && [ \"$2\" = ps ]; then\nprintf '%s\\n' {}\nexit 0\nfi\nprintf '%s\\n' \"$@\" > \"$CLADDING_TEST_ARGS\"\nexit 0\n",
+            shell_quote(&running_containers.to_string())
         );
         fs::write(&podman_path, script).expect("mock Podman should be written");
         fs::set_permissions(&podman_path, fs::Permissions::from_mode(0o755))
