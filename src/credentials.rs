@@ -1,12 +1,10 @@
 use crate::error::{Error, Result};
 use anyhow::{Context as _, bail};
-use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
-};
+use rcgen::KeyPair;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use time::{Duration, OffsetDateTime};
+use time::OffsetDateTime;
 use x509_parser::pem::parse_x509_pem;
 
 const CREDENTIALS_DIR: &str = "credentials";
@@ -14,17 +12,29 @@ const BAFFLE_DIR: &str = "baffle";
 const SECRETS_DIR: &str = "secrets";
 const CERTIFICATE_FILE: &str = "ca.crt";
 const PRIVATE_KEY_FILE: &str = "ca-key.pem";
-const CA_VALIDITY_DAYS: i64 = 3650;
+const CA_INIT_PENDING_FILE: &str = ".ca-init-pending";
 
-/// Ensure the project has a private Baffle credentials directory and a valid CA.
+/// Ensure the project has a private Baffle credentials directory.
 ///
-/// An existing CA is never replaced. Missing files inside an existing `baffle`
-/// directory are treated as an incomplete CA and require explicit operator action.
+/// Existing CA material is validated and never replaced. Only a newly created
+/// credentials directory is allowed to defer CA creation until runtime startup.
 pub fn ensure_baffle_credentials(project_root: &Path) -> Result<()> {
-    ensure_baffle_credentials_inner(project_root).map_err(Error::from)
+    ensure_baffle_credentials_inner(project_root, None).map_err(Error::from)
 }
 
-fn ensure_baffle_credentials_inner(project_root: &Path) -> anyhow::Result<()> {
+/// Ensure valid CA material exists, using the supplied Baffle initializer only
+/// for the pending first bootstrap when neither configured CA file exists.
+pub fn ensure_baffle_ca(
+    project_root: &Path,
+    mut initialize_ca: impl FnMut() -> anyhow::Result<()>,
+) -> Result<()> {
+    ensure_baffle_credentials_inner(project_root, Some(&mut initialize_ca)).map_err(Error::from)
+}
+
+fn ensure_baffle_credentials_inner(
+    project_root: &Path,
+    initialize_ca: Option<&mut dyn FnMut() -> anyhow::Result<()>>,
+) -> anyhow::Result<()> {
     let credentials_root = project_root.join(CREDENTIALS_DIR);
     ensure_private_directory(&credentials_root)?;
     let _lock = acquire_credentials_lock(&credentials_root)?;
@@ -41,9 +51,6 @@ fn ensure_baffle_credentials_inner(project_root: &Path) -> anyhow::Result<()> {
             }
             require_current_owner(&baffle_dir)?;
             set_mode(&baffle_dir, 0o700)?;
-            validate_existing_ca(&baffle_dir)?;
-            ensure_secrets_directory(&baffle_dir)?;
-            secure_secret_files(&baffle_dir.join(SECRETS_DIR))?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             create_credentials_atomically(&credentials_root, &baffle_dir)?;
@@ -56,6 +63,28 @@ fn ensure_baffle_credentials_inner(project_root: &Path) -> anyhow::Result<()> {
                 )
             });
         }
+    }
+
+    let ca_exists = path_exists_without_following(&baffle_dir.join(CERTIFICATE_FILE))?
+        || path_exists_without_following(&baffle_dir.join(PRIVATE_KEY_FILE))?;
+    let ca_init_pending =
+        !ca_exists && path_exists_without_following(&baffle_dir.join(CA_INIT_PENDING_FILE))?;
+    if ca_exists {
+        validate_existing_ca(&baffle_dir)?;
+        remove_ca_init_pending_marker(&baffle_dir)?;
+    } else if ca_init_pending {
+        validate_ca_init_pending_marker(&baffle_dir)?;
+    } else {
+        validate_existing_ca(&baffle_dir)?;
+    }
+
+    let secrets_dir = ensure_secrets_directory(&baffle_dir)?;
+    secure_secret_files(&secrets_dir)?;
+
+    if ca_init_pending && let Some(initialize_ca) = initialize_ca {
+        initialize_ca()?;
+        validate_existing_ca(&baffle_dir)?;
+        remove_ca_init_pending_marker(&baffle_dir)?;
     }
 
     Ok(())
@@ -181,6 +210,27 @@ fn validate_existing_ca(baffle_dir: &Path) -> anyhow::Result<()> {
     })
 }
 
+fn validate_ca_init_pending_marker(baffle_dir: &Path) -> anyhow::Result<()> {
+    let path = baffle_dir.join(CA_INIT_PENDING_FILE);
+    require_regular_file(&path)?;
+    require_current_owner(&path)?;
+    set_mode(&path, 0o600)
+}
+
+fn remove_ca_init_pending_marker(baffle_dir: &Path) -> anyhow::Result<()> {
+    let path = baffle_dir.join(CA_INIT_PENDING_FILE);
+    match fs::remove_file(&path) {
+        Ok(()) => sync_directory(baffle_dir),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to remove Baffle CA initialization marker {}",
+                path.display()
+            )
+        }),
+    }
+}
+
 fn path_exists_without_following(path: &Path) -> anyhow::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -202,7 +252,6 @@ fn require_regular_file(path: &Path) -> anyhow::Result<()> {
 }
 
 fn create_credentials_atomically(credentials_root: &Path, baffle_dir: &Path) -> anyhow::Result<()> {
-    let (certificate_pem, private_key_pem) = generate_ca_material()?;
     let staging_dir = credentials_root.join(format!(
         ".baffle-init-{}-{}",
         std::process::id(),
@@ -210,17 +259,7 @@ fn create_credentials_atomically(credentials_root: &Path, baffle_dir: &Path) -> 
     ));
     create_directory(&staging_dir, 0o700)?;
     let cleanup = StagingDirectory(staging_dir.clone());
-
-    write_new_file(
-        &staging_dir.join(CERTIFICATE_FILE),
-        certificate_pem.as_bytes(),
-        0o644,
-    )?;
-    write_new_file(
-        &staging_dir.join(PRIVATE_KEY_FILE),
-        private_key_pem.as_bytes(),
-        0o600,
-    )?;
+    write_new_file(&staging_dir.join(CA_INIT_PENDING_FILE), b"", 0o600)?;
     let secrets_dir = staging_dir.join(SECRETS_DIR);
     create_directory(&secrets_dir, 0o700)?;
     sync_directory(&secrets_dir)?;
@@ -360,34 +399,6 @@ impl Drop for StagingDirectory {
     }
 }
 
-fn generate_ca_material() -> anyhow::Result<(String, String)> {
-    generate_ca_material_with_validity(
-        OffsetDateTime::now_utc() - Duration::days(1),
-        OffsetDateTime::now_utc() + Duration::days(CA_VALIDITY_DAYS),
-    )
-}
-
-fn generate_ca_material_with_validity(
-    not_before: OffsetDateTime,
-    not_after: OffsetDateTime,
-) -> anyhow::Result<(String, String)> {
-    let mut params = CertificateParams::default();
-    params.distinguished_name = DistinguishedName::new();
-    params
-        .distinguished_name
-        .push(DnType::CommonName, "Cladding Baffle Project CA");
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    params.not_before = not_before;
-    params.not_after = not_after;
-
-    let key_pair = KeyPair::generate().context("failed to generate Baffle CA signing key")?;
-    let certificate = params
-        .self_signed(&key_pair)
-        .context("failed to generate Baffle CA certificate")?;
-    Ok((certificate.pem(), key_pair.serialize_pem()))
-}
-
 fn validate_ca_material(certificate_pem: &[u8], private_key_pem: &str) -> anyhow::Result<()> {
     let (remaining, pem) =
         parse_x509_pem(certificate_pem).context("CA certificate is not valid PEM")?;
@@ -437,6 +448,18 @@ fn validate_ca_material(certificate_pem: &[u8], private_key_pem: &str) -> anyhow
     Ok(())
 }
 
+fn create_directory(path: &Path, mode: u32) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(mode).create(path)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(path)?;
+    set_mode(path, mode)
+}
+
 fn write_new_file(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -452,18 +475,6 @@ fn write_new_file(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<()>
         .with_context(|| format!("failed to write {}", path.display()))?;
     file.sync_all()
         .with_context(|| format!("failed to sync {}", path.display()))?;
-    set_mode(path, mode)
-}
-
-fn create_directory(path: &Path, mode: u32) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(mode).create(path)?;
-    }
-    #[cfg(not(unix))]
-    fs::create_dir(path)?;
     set_mode(path, mode)
 }
 
@@ -495,7 +506,11 @@ fn sync_directory(_path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyUsagePurpose,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
+    use time::Duration;
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -511,9 +526,42 @@ mod tests {
 
     fn write_existing_ca(baffle_dir: &Path, not_before: OffsetDateTime, not_after: OffsetDateTime) {
         fs::create_dir_all(baffle_dir.join(SECRETS_DIR)).unwrap();
-        let (certificate, key) = generate_ca_material_with_validity(not_before, not_after).unwrap();
+        let (certificate, key) =
+            generate_test_ca_material_with_validity(not_before, not_after).unwrap();
         fs::write(baffle_dir.join(CERTIFICATE_FILE), certificate).unwrap();
         fs::write(baffle_dir.join(PRIVATE_KEY_FILE), key).unwrap();
+    }
+
+    fn write_generated_ca(baffle_dir: &Path) {
+        let (certificate, key) = generate_test_ca_material().unwrap();
+        fs::write(baffle_dir.join(CERTIFICATE_FILE), certificate).unwrap();
+        fs::write(baffle_dir.join(PRIVATE_KEY_FILE), key).unwrap();
+    }
+
+    fn generate_test_ca_material() -> anyhow::Result<(String, String)> {
+        generate_test_ca_material_with_validity(
+            OffsetDateTime::now_utc() - Duration::days(1),
+            OffsetDateTime::now_utc() + Duration::days(3650),
+        )
+    }
+
+    fn generate_test_ca_material_with_validity(
+        not_before: OffsetDateTime,
+        not_after: OffsetDateTime,
+    ) -> anyhow::Result<(String, String)> {
+        let mut params = CertificateParams::default();
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Baffle Interception CA");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.not_before = not_before;
+        params.not_after = not_after;
+
+        let key_pair = KeyPair::generate()?;
+        let certificate = params.self_signed(&key_pair)?;
+        Ok((certificate.pem(), key_pair.serialize_pem()))
     }
 
     #[cfg(unix)]
@@ -523,16 +571,15 @@ mod tests {
     }
 
     #[test]
-    fn creates_private_baffle_credentials_and_reuses_a_valid_ca() {
+    fn creates_private_baffle_credentials_without_generating_a_ca() {
         let root = temp_project();
         ensure_baffle_credentials(&root).unwrap();
 
         let baffle_dir = root.join("credentials/baffle");
         let cert_path = baffle_dir.join(CERTIFICATE_FILE);
         let key_path = baffle_dir.join(PRIVATE_KEY_FILE);
-        let cert_before = fs::read(&cert_path).unwrap();
-        let key_before = fs::read(&key_path).unwrap();
-        validate_ca_material(&cert_before, std::str::from_utf8(&key_before).unwrap()).unwrap();
+        assert!(!cert_path.exists());
+        assert!(!key_path.exists());
         assert!(
             fs::read_dir(baffle_dir.join(SECRETS_DIR))
                 .unwrap()
@@ -540,21 +587,13 @@ mod tests {
                 .is_none()
         );
 
-        ensure_baffle_credentials(&root).unwrap();
-        assert_eq!(fs::read(&cert_path).unwrap(), cert_before);
-        assert_eq!(fs::read(&key_path).unwrap(), key_before);
-
         #[cfg(unix)]
         {
             assert_eq!(mode(&root.join("credentials")), 0o700);
             assert_eq!(mode(&baffle_dir), 0o700);
             assert_eq!(mode(&baffle_dir.join(SECRETS_DIR)), 0o700);
-            assert_eq!(mode(&cert_path), 0o644);
-            assert_eq!(mode(&key_path), 0o600);
             use std::os::unix::fs::MetadataExt as _;
             let owner = unsafe { libc::geteuid() };
-            assert_eq!(fs::metadata(&cert_path).unwrap().uid(), owner);
-            assert_eq!(fs::metadata(&key_path).unwrap().uid(), owner);
             assert_eq!(
                 fs::metadata(baffle_dir.join(SECRETS_DIR)).unwrap().uid(),
                 owner
@@ -571,6 +610,124 @@ mod tests {
                 .collect()
         );
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn baffle_initializer_runs_once_and_existing_ca_is_reused() {
+        let root = temp_project();
+        let baffle_dir = root.join("credentials/baffle");
+        let mut init_count = 0;
+        ensure_baffle_ca(&root, || {
+            init_count += 1;
+            write_generated_ca(&baffle_dir);
+            Ok(())
+        })
+        .unwrap();
+
+        let cert_path = baffle_dir.join(CERTIFICATE_FILE);
+        let key_path = baffle_dir.join(PRIVATE_KEY_FILE);
+        let cert_before = fs::read(&cert_path).unwrap();
+        let key_before = fs::read(&key_path).unwrap();
+        ensure_baffle_ca(&root, || {
+            init_count += 1;
+            Err(anyhow::anyhow!(
+                "initializer must not run for existing CA material"
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(init_count, 1);
+        assert_eq!(fs::read(cert_path).unwrap(), cert_before);
+        assert_eq!(fs::read(key_path).unwrap(), key_before);
+        assert!(!baffle_dir.join(CA_INIT_PENDING_FILE).exists());
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&baffle_dir.join(CERTIFICATE_FILE)), 0o644);
+            assert_eq!(mode(&baffle_dir.join(PRIVATE_KEY_FILE)), 0o600);
+            use std::os::unix::fs::MetadataExt as _;
+            let owner = unsafe { libc::geteuid() };
+            assert_eq!(
+                fs::metadata(baffle_dir.join(CERTIFICATE_FILE))
+                    .unwrap()
+                    .uid(),
+                owner
+            );
+            assert_eq!(
+                fs::metadata(baffle_dir.join(PRIVATE_KEY_FILE))
+                    .unwrap()
+                    .uid(),
+                owner
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_ca_after_success_is_reported_without_reinitializing() {
+        let root = temp_project();
+        let baffle_dir = root.join("credentials/baffle");
+        ensure_baffle_ca(&root, || {
+            write_generated_ca(&baffle_dir);
+            Ok(())
+        })
+        .unwrap();
+        fs::remove_file(baffle_dir.join(CERTIFICATE_FILE)).unwrap();
+        fs::remove_file(baffle_dir.join(PRIVATE_KEY_FILE)).unwrap();
+
+        let mut init_count = 0;
+        let error = ensure_baffle_ca(&root, || {
+            init_count += 1;
+            Ok(())
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(init_count, 0);
+        assert!(error.contains("incomplete Baffle CA"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn baffle_initializer_errors_are_reported_without_ca_files() {
+        let root = temp_project();
+        let error = ensure_baffle_ca(&root, || {
+            Err(anyhow::anyhow!("proxy image could not initialize CA"))
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("proxy image could not initialize CA"),
+            "{error}"
+        );
+        let baffle_dir = root.join("credentials/baffle");
+        assert!(!baffle_dir.join(CERTIFICATE_FILE).exists());
+        assert!(!baffle_dir.join(PRIVATE_KEY_FILE).exists());
+        assert!(baffle_dir.join(CA_INIT_PENDING_FILE).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_baffle_initialization_can_retry_without_existing_ca_files() {
+        let root = temp_project();
+        let first_error = ensure_baffle_ca(&root, || {
+            Err(anyhow::anyhow!("temporary proxy startup failure"))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(first_error.contains("temporary proxy startup failure"));
+
+        let baffle_dir = root.join("credentials/baffle");
+        ensure_baffle_ca(&root, || {
+            write_generated_ca(&baffle_dir);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(baffle_dir.join(CERTIFICATE_FILE).is_file());
+        assert!(baffle_dir.join(PRIVATE_KEY_FILE).is_file());
+        assert!(!baffle_dir.join(CA_INIT_PENDING_FILE).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -615,7 +772,7 @@ mod tests {
         let baffle_dir = root.join("credentials/baffle");
         fs::create_dir_all(baffle_dir.join(SECRETS_DIR)).unwrap();
         let certificate = b"not a certificate";
-        let (_, key) = generate_ca_material().unwrap();
+        let (_, key) = generate_test_ca_material().unwrap();
         let cert_path = baffle_dir.join(CERTIFICATE_FILE);
         let key_path = baffle_dir.join(PRIVATE_KEY_FILE);
         fs::write(&cert_path, certificate).unwrap();
@@ -634,8 +791,8 @@ mod tests {
         let root = temp_project();
         let baffle_dir = root.join("credentials/baffle");
         fs::create_dir_all(baffle_dir.join(SECRETS_DIR)).unwrap();
-        let (certificate, _) = generate_ca_material().unwrap();
-        let (_, other_key) = generate_ca_material().unwrap();
+        let (certificate, _) = generate_test_ca_material().unwrap();
+        let (_, other_key) = generate_test_ca_material().unwrap();
         let cert_path = baffle_dir.join(CERTIFICATE_FILE);
         let key_path = baffle_dir.join(PRIVATE_KEY_FILE);
         fs::write(&cert_path, &certificate).unwrap();
@@ -706,10 +863,26 @@ mod tests {
         let root = temp_project();
         let first_root = root.clone();
         let second_root = root.clone();
-        let first = std::thread::spawn(move || ensure_baffle_credentials(&first_root));
-        let second = std::thread::spawn(move || ensure_baffle_credentials(&second_root));
+        let init_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_count = init_count.clone();
+        let second_count = init_count.clone();
+        let first = std::thread::spawn(move || {
+            ensure_baffle_ca(&first_root, || {
+                first_count.fetch_add(1, Ordering::Relaxed);
+                write_generated_ca(&first_root.join("credentials/baffle"));
+                Ok(())
+            })
+        });
+        let second = std::thread::spawn(move || {
+            ensure_baffle_ca(&second_root, || {
+                second_count.fetch_add(1, Ordering::Relaxed);
+                write_generated_ca(&second_root.join("credentials/baffle"));
+                Ok(())
+            })
+        });
         first.join().unwrap().unwrap();
         second.join().unwrap().unwrap();
+        assert_eq!(init_count.load(Ordering::Relaxed), 1);
 
         let baffle_dir = root.join("credentials/baffle");
         let cert = fs::read(baffle_dir.join(CERTIFICATE_FILE)).unwrap();

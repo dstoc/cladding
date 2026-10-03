@@ -82,8 +82,6 @@ for session_file in agent.toml nw-sandbox.toml; do
 done
 test "$(stat -c '%a:%u' "$project_root/credentials/baffle")" = "700:$(id -u)"
 test "$(stat -c '%a:%u' "$project_root/credentials/baffle/secrets")" = "700:$(id -u)"
-test "$(stat -c '%a:%u' "$project_root/credentials/baffle/ca.crt")" = "644:$(id -u)"
-test "$(stat -c '%a:%u' "$project_root/credentials/baffle/ca-key.pem")" = "600:$(id -u)"
 jq --arg image "$client_image" --arg runtime "$runtime" \
   '.agent.image = $image
    | .nw_sandbox.image = $image
@@ -201,13 +199,15 @@ printf '%s' "cladding-test-old-value" > "$project_root/credentials/baffle/secret
 printf '%s' "cladding-test-new-value" > "$project_root/credentials/baffle/secrets/test-token-new"
 chmod 0644 "$project_root/credentials/baffle/secrets/test-token-old"
 chmod 0600 "$project_root/credentials/baffle/secrets/test-token-new"
-ca_before=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
 jq --arg image "$proxy_image" '.proxy = {image: $image}' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
 phase="start Cladding runtime"
 "$cladding_bin" --cladding-dir "$project_root" up
+test "$(stat -c '%a:%u' "$project_root/credentials/baffle/ca.crt")" = "644:$(id -u)"
+test "$(stat -c '%a:%u' "$project_root/credentials/baffle/ca-key.pem")" = "600:$(id -u)"
+ca_before=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
 phase="verify injected secret permissions"
 secret_mode=$(stat -c '%a' "$project_root/credentials/baffle/secrets/test-token-old")
 if [ "$secret_mode" != 600 ]; then

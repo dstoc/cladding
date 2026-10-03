@@ -67,6 +67,60 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Initialize the project CA with the same Baffle binary, daemon config, and
+/// credentials mount that the proxy runtime will use.
+pub fn initialize_baffle_ca(spec: &RuntimeSpec, verbose: bool) -> Result<()> {
+    let mut cmd = build_baffle_ca_init_command(spec);
+    trace_command(&cmd, verbose);
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed to run Baffle CA initialization for project '{}'",
+            spec.project_name
+        )
+    })?;
+    ensure_success_output(&output, "Baffle CA initialization")
+}
+
+fn build_baffle_ca_init_command(spec: &RuntimeSpec) -> Command {
+    let proxy_image = spec
+        .proxy
+        .containers
+        .first()
+        .map(|container| container.image.as_str())
+        .expect("runtime spec must include a proxy container");
+    let mounts = [
+        crate::runtime::RuntimeMount {
+            mount_path: "/opt/config".to_string(),
+            read_only: true,
+            source: crate::runtime::RuntimeMountSource::HostPath {
+                path: spec.project_root.join("config"),
+            },
+        },
+        crate::runtime::RuntimeMount {
+            mount_path: "/opt/credentials/baffle".to_string(),
+            read_only: false,
+            source: crate::runtime::RuntimeMountSource::HostPath {
+                path: spec.project_root.join("credentials/baffle"),
+            },
+        },
+        crate::runtime::RuntimeMount {
+            mount_path: "/opt/tools/bin/baffle".to_string(),
+            read_only: true,
+            source: crate::runtime::RuntimeMountSource::HostPath {
+                path: spec.project_root.join("tools/bin/baffle"),
+            },
+        },
+    ];
+
+    let mut cmd = Command::new("podman");
+    cmd.args(["run", "--rm", "--network", "none", "--userns", "keep-id"]);
+    append_mount_args(&mut cmd, &spec.proxy.name, &mounts);
+    cmd.args(["--entrypoint", "/opt/tools/bin/baffle"]);
+    cmd.arg(proxy_image);
+    cmd.args(["ca", "init", "--config", "/opt/config/proxy/daemon.toml"]);
+    cmd
+}
+
 pub fn runtime_inventory(spec: &RuntimeSpec, verbose: bool) -> Result<RuntimeInventory> {
     let mut expected_count = 0;
     let mut resources = Vec::new();
@@ -814,6 +868,72 @@ mod tests {
                 "sh",
                 "-ec",
                 "cp /run/cladding/ca/baffle.crt /usr/local/share/ca-certificates/baffle.crt\nupdate-ca-certificates",
+            ]
+        );
+    }
+
+    #[test]
+    fn baffle_ca_initialization_uses_proxy_image_config_and_private_credentials_mount() {
+        let proxy = RuntimePod {
+            name: "demo-proxy".to_string(),
+            placement: RuntimePlacement::Pod,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "default".to_string(),
+            containers: vec![RuntimeContainer {
+                name: "demo-proxy-instance".to_string(),
+                image: "localhost/cladding-proxy:latest".to_string(),
+                command: Vec::new(),
+                workdir: None,
+                env: Vec::new(),
+                mounts: Vec::new(),
+                ports: Vec::new(),
+                stdin: false,
+                tty: false,
+            }],
+            user_namespace: RuntimeUserNamespace::KeepId,
+        };
+        let empty_pod = |name: &str| RuntimePod {
+            name: name.to_string(),
+            placement: RuntimePlacement::Standalone,
+            use_runsc: false,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "none".to_string(),
+            containers: Vec::new(),
+            user_namespace: RuntimeUserNamespace::KeepId,
+        };
+        let spec = RuntimeSpec {
+            project_name: "demo".to_string(),
+            project_root: "/tmp/demo/.cladding".into(),
+            use_runsc: false,
+            proxy,
+            agent: empty_pod("demo-agent"),
+            nw_sandbox: None,
+            fs_sandbox: None,
+        };
+
+        assert_eq!(
+            command_args(&build_baffle_ca_init_command(&spec)),
+            vec![
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--userns",
+                "keep-id",
+                "--volume",
+                "/tmp/demo/.cladding/config:/opt/config:ro",
+                "--volume",
+                "/tmp/demo/.cladding/credentials/baffle:/opt/credentials/baffle",
+                "--volume",
+                "/tmp/demo/.cladding/tools/bin/baffle:/opt/tools/bin/baffle:ro",
+                "--entrypoint",
+                "/opt/tools/bin/baffle",
+                "localhost/cladding-proxy:latest",
+                "ca",
+                "init",
+                "--config",
+                "/opt/config/proxy/daemon.toml",
             ]
         );
     }

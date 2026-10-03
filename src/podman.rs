@@ -11,6 +11,6 @@ pub use discovery::{
     runsc_available,
 };
 pub use runtime::{
-    RuntimeInventory, RuntimeResource, container_rm, container_run, pod_create, pod_rm,
-    runtime_cleanup, runtime_cleanup_owned, runtime_create, runtime_inventory,
+    RuntimeInventory, RuntimeResource, container_rm, container_run, initialize_baffle_ca,
+    pod_create, pod_rm, runtime_cleanup, runtime_cleanup_owned, runtime_create, runtime_inventory,
 };

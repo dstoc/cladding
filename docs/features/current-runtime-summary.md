@@ -36,10 +36,13 @@ sandbox can read those non-secret configuration files, but the Baffle control
 socket stays private inside the proxy container.
 
 Each project has a persistent CA under `.cladding/credentials/baffle/`.
-Cladding reuses a valid CA. After each agent and enabled network-sandbox
-container starts, Cladding uses `podman exec --user 0` to install the public
-certificate in that container's system trust store. This exec uses container
-root; the application remains unprivileged. The default image sets
+During the first `cladding up`, Cladding runs Baffle's
+`ca init --config /opt/config/proxy/daemon.toml` in the selected proxy image
+before it creates the runtime containers. Cladding validates the CA and reuses
+it on later starts. After each agent and enabled network-sandbox container
+starts, Cladding uses `podman exec --user 0` to install the public certificate
+in that container's system trust store. This exec uses container root; the
+application remains unprivileged. The default image sets
 `NODE_USE_SYSTEM_CA=1`. Custom images must provide a compatible command to
 install the certificate. The filesystem sandbox does not receive the CA.
 

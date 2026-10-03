@@ -193,7 +193,7 @@ Wire the new Baffle proxy image, scoped sockets, persistent credentials and post
 ### Implementation
 
 - Update the runtime specification, proxy pod/container inventory, mount construction and required-binary/image/config checks. Remove expectations of the Squid bridge sidecar and its local TCP ports.
-- In `cladding up`, prepare/validate the project CA before any container needing it is created; materialize runtime scripts and create containers through the existing Podman lifecycle. Install the public CA via `podman exec --user 0` after creating each agent/network-sandbox container.
+- In `cladding up`, initialize the project CA with Baffle's `ca init --config /opt/config/proxy/daemon.toml` in a temporary proxy-image container before creating runtime containers. Reuse a valid existing CA and reject missing or invalid post-bootstrap material. Install the public CA via `podman exec --user 0` after creating each agent/network-sandbox container.
 - Let the proxy container's startup script provision its sessions independently. Cladding must **not** block agent/network-sandbox startup waiting for a Baffle session to become ready. Installation of the CA is synchronous, but Baffle session readiness is not.
 - Integrate the same behavior with `cladding run`, including its unique names, private runtime namespace, noninteractive `--config -` behavior and ownership-aware cleanup. Avoid accidentally reusing a different project's CA or secret source.
 - Preserve running-project discovery, name collision/incomplete-runtime reporting and normal `check`, `build`, `up`, `down`, `destroy` and `run` semantics. `down` and `destroy` remove disposable runtime resources and proxy sessions, not a persistent project's CA or injection credentials.

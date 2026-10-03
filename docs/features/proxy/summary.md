@@ -106,16 +106,24 @@ read, rewrite, or log secret values. The proxy mounts the credentials
 directory read-only. Execution containers do not receive it.
 
 The project CA and injection credentials are separate. `cladding init`
-creates or reuses a valid project-scoped CA in
-`.cladding/credentials/baffle/`. It installs only the public `ca.crt` in the
-agent and enabled network-sandbox system trust stores by running
-`podman exec --user 0` after container creation. UID 0 applies to that exec
-inside the container; the workload remains unprivileged. The default image
-sets `NODE_USE_SYSTEM_CA=1`. Custom agent and network-sandbox images need `sh`,
-`cp`, a writable `/usr/local/share/ca-certificates/`, and
-`update-ca-certificates` or a compatible command that updates the system
-trust store. Applications with private CA bundles may need separate setup.
-Certificate-pinned applications may reject intercepted connections.
+creates private credential storage. On the first `cladding up`, Cladding runs
+`baffle ca init --config /opt/config/proxy/daemon.toml` in the selected proxy
+image before it creates the runtime containers. Baffle writes the configured
+CA pair under `.cladding/credentials/baffle/`. Cladding validates the pair and
+reuses it on later starts. Baffle creates an ECDSA P-256 certificate that
+expires after 365 days, a mode-`0600` private key, and a mode-`0644` public
+certificate. A missing or invalid pair after bootstrap is an error; Cladding
+does not replace it automatically.
+
+Cladding installs only the public `ca.crt` in the agent and enabled
+network-sandbox system trust stores by running `podman exec --user 0` after
+container creation. UID 0 applies to that exec inside the container; the
+workload remains unprivileged. The default image sets `NODE_USE_SYSTEM_CA=1`.
+Custom agent and network-sandbox images need `sh`, `cp`, a writable
+`/usr/local/share/ca-certificates/`, and `update-ca-certificates` or a
+compatible command that updates the system trust store. Applications with
+private CA bundles may need separate setup. Certificate-pinned applications
+may reject intercepted connections.
 
 To rotate the CA, stop the project and move the full
 `.cladding/credentials/baffle/` directory to a protected backup outside

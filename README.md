@@ -88,9 +88,10 @@ access the Baffle control socket, CA private key, or injection credentials.
 
 The normal setup order is `cladding init`, edit the files under
 `.cladding/config/`, then run `cladding build` and `cladding up`. `init`
-creates the Baffle configuration and project credentials. `build` creates
-the local images and refreshes the embedded tools. `up` starts the proxy
-pod and enabled execution containers.
+creates the Baffle configuration and private credential storage. On the first
+`up`, Cladding initializes the project CA from Baffle's daemon configuration
+before it creates the proxy pod or execution containers. `build` creates the
+local images and refreshes the embedded tools.
 
 * Execute commands in the agent container of an already-running project (workdir follows your host `cwd` relative to the directory containing `.cladding`; if it cannot be mapped, the command starts in `/home/user`):
 
@@ -157,7 +158,10 @@ cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - chec
 
 ### Project CA and injection credentials
 
-`cladding init` creates one Baffle CA for the project under `.cladding/credentials/baffle/`:
+`cladding init` prepares private Baffle credential storage under
+`.cladding/credentials/baffle/`. On the first `cladding up`, Cladding runs
+`baffle ca init --config /opt/config/proxy/daemon.toml` in the selected proxy
+image. Baffle reads the CA paths from that daemon configuration and creates:
 
 ```text
 .cladding/credentials/baffle/
@@ -166,7 +170,13 @@ cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - chec
   secrets/
 ```
 
-Cladding reuses a valid CA when the project starts again. If either CA file is missing, malformed, expired, or does not match its partner, Cladding reports an error and leaves the material in place. It does not rotate the CA automatically. The credentials directories use mode `0700`, the private key and secret files use `0600`, and the public certificate uses `0644` on Unix hosts.
+The generated CA uses an ECDSA P-256 key and expires 365 days after creation.
+Baffle creates the private key with mode `0600` and the public certificate
+with mode `0644`. Cladding validates the pair and reuses it on later starts.
+If either file is missing, malformed, expired, or does not match its partner,
+Cladding reports an error and leaves the material in place. It does not rotate
+the CA automatically. The credentials directories use mode `0700`, and
+secret files use mode `0600` on Unix hosts.
 
 Users or external secret managers provision one file per Baffle symbolic secret in `secrets/`. Cladding creates this directory but does not create, copy, read, rewrite, or log secret values. Keep secret names in policy configuration and keep the values in these files. The proxy receives the credentials directory as a read-only mount. The agent and network sandbox receive a separate read-only mount of `ca.crt`; they do not receive the private key or secret files. The filesystem sandbox receives no CA mount.
 
@@ -184,7 +194,10 @@ After Cladding creates the agent and enabled network-sandbox containers, it runs
 
 Custom agent and network-sandbox images must support the same initialization command. They need `sh`, `cp`, a writable `/usr/local/share/ca-certificates/` directory, and an `update-ca-certificates` command that adds certificates from that directory to the system trust store. Images with another trust-store layout can provide a compatible command in the image. Cladding does not provide a per-image initialization hook. Applications that use a private CA bundle or another application-specific trust store may need a separate import step. Certificate-pinned applications can reject intercepted connections even when the system trusts the CA.
 
-`cladding down` and `cladding destroy` remove runtime resources but keep the project CA and secrets. `cladding run` creates a separate temporary CA and empty secrets directory, then removes them during cleanup.
+`cladding down` and `cladding destroy` remove runtime resources but keep the
+project CA and secrets. `cladding run` initializes a separate temporary CA and
+empty secrets directory before it creates the runtime, then removes them during
+cleanup.
 
 To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then start the project to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
 

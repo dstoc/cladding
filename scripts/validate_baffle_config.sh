@@ -175,6 +175,51 @@ if [ -n "$socket_probe_bin" ] && [ ! -x "$socket_probe_bin" ]; then
   exit 1
 fi
 
+run_baffle_ca_init() {
+  podman run --rm --network none --userns keep-id \
+    --volume "$project_root/config:/opt/config:ro" \
+    --volume "$project_root/credentials/baffle:/opt/credentials/baffle:rw" \
+    --volume "$project_root/tools/bin/baffle:/opt/tools/bin/baffle:ro" \
+    --entrypoint /opt/tools/bin/baffle \
+    localhost/cladding-proxy:latest \
+    ca init --config /opt/config/proxy/daemon.toml
+}
+
+current_phase="initialize CA with Baffle daemon configuration"
+ca_init_output="$temp_root/ca-init.log"
+if run_baffle_ca_init >"$ca_init_output" 2>&1; then
+  cat "$ca_init_output"
+else
+  status=$?
+  cat "$ca_init_output" >&2
+  report_failure_output "Baffle CA initialization failed" \
+    "exit=$status config=/opt/config/proxy/daemon.toml" "$ca_init_output"
+  exit "$status"
+fi
+test "$(stat_mode "$project_root/credentials/baffle/ca.crt")" = 644
+test "$(stat_mode "$project_root/credentials/baffle/ca-key.pem")" = 600
+if [ "$(stat_uid "$project_root/credentials/baffle/ca.crt")" != "$runner_uid" ]; then
+  echo "Baffle CA certificate is not owned by the invoking host user" >&2
+  exit 1
+fi
+if [ "$(stat_uid "$project_root/credentials/baffle/ca-key.pem")" != "$runner_uid" ]; then
+  echo "Baffle CA private key is not owned by the invoking host user" >&2
+  exit 1
+fi
+ca_init_cert_before=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
+ca_init_key_before=$(sha256sum "$project_root/credentials/baffle/ca-key.pem" | cut -d ' ' -f 1)
+if run_baffle_ca_init >"$ca_init_output" 2>&1; then
+  echo "Baffle CA initialization unexpectedly replaced existing CA material" >&2
+  exit 1
+fi
+if ! grep -F "refusing to overwrite existing" "$ca_init_output" >/dev/null; then
+  cat "$ca_init_output" >&2
+  echo "Baffle CA initialization did not report the existing-file conflict" >&2
+  exit 1
+fi
+test "$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)" = "$ca_init_cert_before"
+test "$(sha256sum "$project_root/credentials/baffle/ca-key.pem" | cut -d ' ' -f 1)" = "$ca_init_key_before"
+
 verify_scoped_socket_access() {
   component=$1
   socket_dir=$2
