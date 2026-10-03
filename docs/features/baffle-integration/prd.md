@@ -132,7 +132,7 @@ directory = "/opt/credentials/baffle/secrets"
 allowed = []
 ```
 
-For a session using an exact hostname, the native file has this form:
+For a session that needs access to an exact hostname, add a native rule table:
 
 ```toml
 version = 2
@@ -140,10 +140,18 @@ persistent = true
 socket_name = "agent/proxy.sock"
 unmatched = "deny"
 
-[rules."example.com"]
+[rules."api.example.com"]
 ```
 
-The network-sandbox template uses `socket_name = "nw-sandbox/proxy.sock"`. In version 2 files, configure `paths` and `[[rules."hostname".inject]]` under hostname-keyed rule tables; Baffle infers interception from those fields. Baffle requires at least one host rule per active session. Default template rules should be explicit, conservative and documented, not wildcard placeholders.
+The network-sandbox template uses `socket_name = "nw-sandbox/proxy.sock"`.
+In version 2 files, configure `paths` and `[[rules."hostname".inject]]`
+under hostname-keyed rule tables. Baffle infers interception from those fields.
+
+Baffle 1.0 accepts sessions with zero host rules. Cladding generates sessions
+with no rules and `unmatched = "deny"`. A fresh project therefore permits no
+proxy destinations. Users add exact host rules for destinations their
+components need. Document optional rules as user-added examples, not as
+enabled defaults.
 
 Baffle validates file and directory ownership, permissions and symlink safety in file-only mode. Cladding's template/materialization paths and the proxy-container UID must satisfy those checks under the supported Podman environments. Native TOML may use fixed in-container paths; users do not have to manage host mount paths inside individual session files.
 

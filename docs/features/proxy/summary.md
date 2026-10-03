@@ -6,7 +6,14 @@ Cladding stores editable proxy configuration in `.cladding/config/proxy/`. `clad
 - `sessions/agent.toml` configures the agent session.
 - `sessions/nw-sandbox.toml` configures the network-sandbox session.
 
-Both session templates are persistent and use stable data-socket names. Each template includes an explicit `example.com:443` HTTPS tunnel rule. Baffle rejects active sessions without host rules. Add exact hostnames and ports to the relevant session file to change its policy.
+Both session templates are persistent and use stable data-socket names. They
+have no explicit rules and set `unmatched = "deny"`. A fresh project cannot
+reach any proxy destination until you add a rule. Add exact hostnames to the
+relevant session file to allow the destinations that component needs.
+
+`cladding init` preserves existing session files. If a file contains the old
+template's `example.com` rule and you did not add it intentionally, remove it
+to block that destination.
 
 The network-sandbox session file may exist when the network sandbox is disabled. The file's presence does not create an active session.
 
@@ -55,16 +62,25 @@ A successful reload applies changed policy, resolved injection credentials, and 
 
 Baffle can reject a non-disruptive reload when it cannot retain an old policy generation or listener. Inspect `cladding logs proxy` when a session reports `failed`. Reload applies file-backed session changes only. Changes to daemon settings, the CA, or the Baffle binary require a proxy container restart.
 
+## Adding an allow rule
+
+To allow HTTPS through `CONNECT` to one exact hostname, add a hostname table to
+the relevant session file. Baffle uses HTTPS tunneling on port `443` by default
+for a rule with no interception settings:
+
+```toml
+[rules."api.example.com"]
+```
+
+Keep `unmatched = "deny"` so all destinations without a rule stay blocked.
+Add only the hostnames a component needs. For path restrictions or header
+injection, use an interception rule and ensure clients trust this project's CA.
+
 ## Policy and credential example
 
-The default templates allow HTTPS tunneling to the exact hostname
-`example.com` on port `443`. Add only the hostnames and ports that a component
-needs. A tunnel rule permits HTTPS through `CONNECT`; it does not inspect
-paths or inject headers. For path restrictions or header injection, use an
-interception rule and ensure clients trust this project's CA.
-
-For example, a session can restrict interception to paths on one exact host
-and use a symbolic credential name:
+The following optional policy restricts interception to paths on one exact
+host and uses a symbolic credential name. Add it only when the component needs
+this access:
 
 ```toml
 version = 2
