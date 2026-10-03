@@ -58,13 +58,19 @@ In short: the agent cannot freely access the network. From the host, `cladding e
 
   `cladding init` creates these TOML files when missing and preserves existing edits on later runs. The network-sandbox session file is present even when that component is disabled.
 
+  Baffle 1.0 requires session files in version 2 format. Existing projects
+  keep their current session files because `cladding init` preserves edits.
+  Migrate any version 1 session files before starting or reloading the proxy.
+  See the [Baffle session migration steps](docs/features/baffle-integration/embedded-baffle.md#session-file-migration).
+
 The proxy uses Baffle's `file_only` mode. `daemon.toml` defines the daemon and
 its allowed symbolic secrets. The session files define the agent and optional
 network-sandbox policies. The proxy startup script creates the network-sandbox
 session only when that component is enabled. Each active session needs at least
-one exact host rule. The agent and network sandbox can read these non-secret
-TOML files. They cannot access the Baffle control socket, CA private key, or
-injection credentials.
+one exact host rule. Cladding sets `unmatched = "deny"`, so requests to hosts
+without a rule remain denied. The agent and network sandbox can read these
+non-secret TOML files. They cannot access the Baffle control socket, CA private
+key, or injection credentials.
 
 * Build images and refresh host-mounted binaries (`mcp-run`, `run-remote`, `baffle`, and sandbox helper wrappers) in `.cladding/tools/bin`. See the [embedded Baffle build and update procedure](docs/features/baffle-integration/embedded-baffle.md): Baffle builds need Rust 1.96 or newer and native build tools; cross-build hosts can provide `CLADDING_BAFFLE_BIN`.
 

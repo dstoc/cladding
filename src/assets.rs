@@ -438,18 +438,16 @@ mod tests {
         let session: toml::Value =
             toml::from_str(&fs::read_to_string(path).expect("read session config"))
                 .expect("parse session TOML");
-        assert_eq!(session["version"].as_integer(), Some(1));
-        assert_eq!(session["operation"].as_str(), Some("create"));
-        assert_eq!(session["session"]["persistent"].as_bool(), Some(true));
-        assert_eq!(
-            session["session"]["socket_name"].as_str(),
-            Some(socket_name)
-        );
-        let rules = session["rules"].as_array().expect("session rules");
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0]["host"].as_str(), Some("example.com"));
-        assert_eq!(rules[0]["mode"].as_str(), Some("tunnel"));
-        assert_eq!(rules[0]["ports"][0].as_integer(), Some(443));
+        assert_eq!(session["version"].as_integer(), Some(2));
+        assert!(session.get("operation").is_none());
+        assert!(session.get("session").is_none());
+        assert_eq!(session["persistent"].as_bool(), Some(true));
+        assert_eq!(session["socket_name"].as_str(), Some(socket_name));
+        assert_eq!(session["unmatched"].as_str(), Some("deny"));
+        let rule = &session["rules"]["example.com"];
+        assert!(rule.is_table(), "hostname-keyed rule should be a table");
+        assert!(rule.get("mode").is_none());
+        assert!(rule.get("ports").is_none());
     }
 
     fn create_temp_dir(name: &str) -> PathBuf {

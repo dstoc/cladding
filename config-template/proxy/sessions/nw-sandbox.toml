@@ -1,11 +1,6 @@
-version = 1
-operation = "create"
-
-[session]
+version = 2
 persistent = true
 socket_name = "nw-sandbox/proxy.sock"
+unmatched = "deny"
 
-[[rules]]
-host = "example.com"
-mode = "tunnel"
-ports = [443]
+[rules."example.com"]

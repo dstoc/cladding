@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const BAFFLE_VERSION: &str = "0.2.0";
+const BAFFLE_VERSION: &str = "1.0.0";
 const BAFFLE_MIN_RUST_VERSION: (u32, u32) = (1, 96);
 
 fn main() {

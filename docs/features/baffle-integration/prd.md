@@ -76,7 +76,7 @@ The existing client-side `socat` commands and `http_proxy`/`https_proxy` values 
 
 The intended result removes the proxy bridge sidecar. Validate that Baffle's mode-`0600` data sockets and mode-`0700` parent directories work with rootless Podman UID mappings, macOS Podman-machine mounts, and optional `runsc` before treating that removal as complete. If direct access cannot satisfy those constraints, retain a *minimal trusted bridge in the proxy container* rather than broadening socket permissions or exposing the control socket. Do not add a second proxy engine.
 
-When the trusted relay is required, keep its Baffle-owned sockets in a fresh mode-`0700` directory under `/tmp`, outside the mode-`1733` control-socket parent. Baffle 0.2.0 opens every data-socket path parent with `O_RDONLY | O_DIRECTORY`; it cannot traverse a mode-`1733` parent as a non-owner even when search access is allowed. Keep the control socket under `/run/baffle` and expose only the relay sockets through the scoped runtime mounts.
+When the trusted relay is required, keep its Baffle-owned sockets in a fresh mode-`0700` directory under `/tmp`, outside the mode-`1733` control-socket parent. Baffle 1.0.0 opens every data-socket path parent with `O_RDONLY | O_DIRECTORY`; it cannot traverse a mode-`1733` parent as a non-owner even when search access is allowed. Keep the control socket under `/run/baffle` and expose only the relay sockets through the scoped runtime mounts.
 
 ## User-editable configuration
 
@@ -135,20 +135,15 @@ allowed = []
 For a session using an exact hostname, the native file has this form:
 
 ```toml
-version = 1
-operation = "create"
-
-[session]
+version = 2
 persistent = true
 socket_name = "agent/proxy.sock"
+unmatched = "deny"
 
-[[rules]]
-host = "example.com"
-mode = "tunnel"
-ports = [443]
+[rules."example.com"]
 ```
 
-The network-sandbox template uses `socket_name = "nw-sandbox/proxy.sock"`. Configure `mode = "intercept"`, `paths`, and `[[rules.inject]]` directly in native session TOML where required. Baffle requires at least one host rule per active session. Default template rules should be explicit, conservative and documented, not wildcard placeholders.
+The network-sandbox template uses `socket_name = "nw-sandbox/proxy.sock"`. In version 2 files, configure `paths` and `[[rules."hostname".inject]]` under hostname-keyed rule tables; Baffle infers interception from those fields. Baffle requires at least one host rule per active session. Default template rules should be explicit, conservative and documented, not wildcard placeholders.
 
 Baffle validates file and directory ownership, permissions and symlink safety in file-only mode. Cladding's template/materialization paths and the proxy-container UID must satisfy those checks under the supported Podman environments. Native TOML may use fixed in-container paths; users do not have to manage host mount paths inside individual session files.
 

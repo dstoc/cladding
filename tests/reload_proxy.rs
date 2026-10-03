@@ -30,8 +30,14 @@ impl Fixture {
         let session_dir = cladding_dir.join("config/proxy/sessions");
         fs::create_dir_all(&session_dir).expect("session config directory should be created");
         let session_config_path = session_dir.join("agent.toml");
-        fs::write(&session_config_path, "# user-edited native session\n")
-            .expect("session config should be written");
+        let session = concat!(
+            "version = 2\n",
+            "persistent = true\n",
+            "socket_name = \"agent/proxy.sock\"\n",
+            "unmatched = \"deny\"\n\n",
+            "[rules.\"example.com\"]\n",
+        );
+        fs::write(&session_config_path, session).expect("session config should be written");
 
         let config_path = root.join("cladding.json");
         fs::write(
@@ -117,7 +123,13 @@ fn reload_proxy_displays_each_result_and_executes_baffle_reload_all() {
     assert_eq!(
         fs::read_to_string(&fixture.session_config_path)
             .expect("native session config should remain present"),
-        "# user-edited native session\n"
+        concat!(
+            "version = 2\n",
+            "persistent = true\n",
+            "socket_name = \"agent/proxy.sock\"\n",
+            "unmatched = \"deny\"\n\n",
+            "[rules.\"example.com\"]\n",
+        )
     );
 }
 
