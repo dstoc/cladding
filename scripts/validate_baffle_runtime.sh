@@ -80,12 +80,25 @@ test "$(stat -c '%a:%u' "$project_root/config/proxy/sessions")" = "755:$(id -u)"
 for session_file in agent.toml nw-sandbox.toml; do
   test "$(stat -c '%a:%u' "$project_root/config/proxy/sessions/$session_file")" = "644:$(id -u)"
 done
+agent_session_config=custom/agent-policy.toml
+nw_sandbox_session_config=restricted/network-policy.toml
+mkdir -p \
+  "$project_root/config/proxy/sessions/custom" \
+  "$project_root/config/proxy/sessions/restricted"
+cp "$project_root/config/proxy/sessions/agent.toml" \
+  "$project_root/config/proxy/sessions/$agent_session_config"
+cp "$project_root/config/proxy/sessions/nw-sandbox.toml" \
+  "$project_root/config/proxy/sessions/$nw_sandbox_session_config"
 test "$(stat -c '%a:%u' "$project_root/credentials/baffle")" = "700:$(id -u)"
 test "$(stat -c '%a:%u' "$project_root/credentials/baffle/secrets")" = "700:$(id -u)"
 jq --arg image "$client_image" --arg runtime "$runtime" \
+  --arg agent_session_config "$agent_session_config" \
+  --arg nw_sandbox_session_config "$nw_sandbox_session_config" \
   '.agent.image = $image
    | .nw_sandbox.image = $image
-   | .use_runsc = ($runtime == "runsc")' \
+   | .use_runsc = ($runtime == "runsc")
+   | .proxy.agent.session_config = $agent_session_config
+   | .proxy.nw_sandbox.session_config = $nw_sandbox_session_config' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
@@ -168,7 +181,7 @@ EOF
 write_agent_policy() {
   token=$1
   path=$2
-  cat > "$project_root/config/proxy/sessions/agent.toml" <<EOF
+  cat > "$project_root/config/proxy/sessions/$agent_session_config" <<EOF
 version = 2
 persistent = true
 socket_name = "agent/proxy.sock"
@@ -184,7 +197,7 @@ secret = "$token"
 format = "bearer"
 EOF
 }
-cat > "$project_root/config/proxy/sessions/nw-sandbox.toml" <<'EOF'
+cat > "$project_root/config/proxy/sessions/$nw_sandbox_session_config" <<'EOF'
 version = 2
 persistent = true
 socket_name = "nw-sandbox/proxy.sock"
@@ -199,7 +212,7 @@ printf '%s' "cladding-test-old-value" > "$project_root/credentials/baffle/secret
 printf '%s' "cladding-test-new-value" > "$project_root/credentials/baffle/secrets/test-token-new"
 chmod 0644 "$project_root/credentials/baffle/secrets/test-token-old"
 chmod 0600 "$project_root/credentials/baffle/secrets/test-token-new"
-jq --arg image "$proxy_image" '.proxy = {image: $image}' \
+jq --arg image "$proxy_image" '.proxy.image = $image' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
@@ -306,7 +319,7 @@ for component in agent nw-sandbox; do
     other_component=agent
   fi
   podman exec "$container" sh -ec '
-    test -r /opt/config/proxy/sessions/agent.toml
+    test -r /opt/config/proxy/sessions/custom/agent-policy.toml
     test -r /opt/config/nw_sandbox/main.rego
     test -r /opt/config/nw_sandbox/curl.rego
     test -r /run/cladding/ca/baffle.crt
@@ -437,13 +450,13 @@ if [ "$attempt" -ge 60 ]; then
 fi
 wait "$reload_client_pid"
 
-cp "$project_root/config/proxy/sessions/agent.toml" "$temp_root/agent.valid.toml"
-printf '%s\n' 'invalid = [' > "$project_root/config/proxy/sessions/agent.toml"
+cp "$project_root/config/proxy/sessions/$agent_session_config" "$temp_root/agent.valid.toml"
+printf '%s\n' 'invalid = [' > "$project_root/config/proxy/sessions/$agent_session_config"
 if "$cladding_bin" --cladding-dir "$project_root" reload-proxy >/dev/null 2>&1; then
   echo "Baffle reload accepted invalid session TOML" >&2
   exit 1
 fi
-cp "$temp_root/agent.valid.toml" "$project_root/config/proxy/sessions/agent.toml"
+cp "$temp_root/agent.valid.toml" "$project_root/config/proxy/sessions/$agent_session_config"
 reload_output=$("$cladding_bin" --cladding-dir "$project_root" reload-proxy 2>&1)
 printf '%s\n' "$reload_output" | grep -E 'agent.*unchanged|unchanged.*agent' >/dev/null
 printf '%s\n' "$reload_output" | grep -E 'nw-sandbox.*unchanged|unchanged.*nw-sandbox' >/dev/null

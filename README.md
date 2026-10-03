@@ -56,7 +56,7 @@ In short: the agent cannot freely access the network. From the host, `cladding e
   - `.cladding/config/nw_sandbox/` Rego policies when `nw_sandbox` is enabled (template dir: [`config-template/nw_sandbox/`](config-template/nw_sandbox/))
   - `.cladding/config/fs_sandbox/` Rego policies when `fs_sandbox` is enabled (template dir: [`config-template/fs_sandbox/`](config-template/fs_sandbox/))
 
-  `cladding init` creates these TOML files when missing and preserves existing edits on later runs. The network-sandbox session file is present even when that component is disabled.
+  `cladding init` creates these TOML files when missing and preserves existing edits on later runs. These are the default session filenames. A disabled network sandbox does not require its selected session file.
 
   Baffle 1.0 requires session files in version 2 format. Existing projects
   keep their current session files because `cladding init` preserves edits.
@@ -64,11 +64,18 @@ In short: the agent cannot freely access the network. From the host, `cladding e
   See the [Baffle session migration steps](docs/features/baffle-integration/embedded-baffle.md#session-file-migration).
 
 The proxy uses Baffle's `file_only` mode. `daemon.toml` defines the daemon and
-its allowed symbolic secrets. The session files define the agent and optional
-network-sandbox policies. The proxy startup script creates the network-sandbox
-session only when that component is enabled. Fresh sessions have no host rules
-and set `unmatched = "deny"`, so proxy destinations remain blocked until you add
-a rule. To allow HTTPS to a host, add a hostname table such as
+its allowed symbolic secrets. The selected session files define the agent and
+optional network-sandbox policies. By default, Cladding selects `agent.toml`
+and `nw-sandbox.toml`. You can select separate files with
+`proxy.agent.session_config` and `proxy.nw_sandbox.session_config` in
+`cladding.json`. Each value is relative to
+`.cladding/config/proxy/sessions/`; absolute paths and paths with `.` or `..`
+components are rejected. `cladding check` validates the selected file for each
+enabled component. It does not require the network-sandbox file when that
+component is disabled. The proxy creates the network-sandbox session only
+when that component is enabled. Fresh sessions have no host rules and set
+`unmatched = "deny"`, so proxy destinations remain blocked until you add a
+rule. To allow HTTPS to a host, add a hostname table such as
 `[rules."api.example.com"]` to the relevant session file. See
 [Proxy Configuration](docs/features/proxy/summary.md) for a complete example.
 The agent and network sandbox can read these non-secret TOML files. They cannot
@@ -110,7 +117,7 @@ project.
   cladding run codex exec "Implement the task"
   ```
 
-  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It snapshots the selected project's `.cladding/config/` tree when the command starts, then fills in any missing default files. The snapshot includes Baffle session policies and sandbox policies. Later edits to project config do not change the active run, and the run does not write its generated runtime state to the source tree. Cladding reads the selected JSON configuration at startup. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It snapshots the selected project's `.cladding/config/` tree when the command starts, then fills in any missing default files. The snapshot includes Baffle session policies and sandbox policies. It uses the selected session filenames from `cladding.json`; later edits to project config do not change the active run. The run does not write its generated runtime state to the source tree. Cladding reads the selected JSON configuration at startup. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
 
 * Temporarily publish a TCP port from the agent container to the host while the project is running:
 
@@ -212,7 +219,7 @@ New `.cladding` directories contain an internal ignore file. For an existing pro
 
 ### Reloading proxy policy
 
-After editing `.cladding/config/proxy/sessions/agent.toml` or `nw-sandbox.toml`, run `cladding reload-proxy`. Baffle reads those existing files and reports each active session as `reloaded`, `unchanged`, or `failed`. It reports all session results, even when one reload fails, and the command exits unsuccessfully if any session fails. Invalid updates leave the prior effective session in place.
+After editing a selected session file, run `cladding reload-proxy`. Baffle reads the active sessions' selected files and reports each session as `reloaded`, `unchanged`, or `failed`. It reports all session results, even when one reload fails, and the command exits unsuccessfully if any session fails. Invalid updates leave the prior effective session in place. Changing a `session_config` selection requires recreating the proxy runtime with `cladding down` and `cladding up`.
 
 Changed policy, injection credentials, and socket paths apply to new connections. Existing connections keep their prior policy and credentials until they close, so a credential change does not revoke access on an already-open connection. A reload can fail when an old policy generation or listener is still in use; inspect `cladding logs proxy` to diagnose it. Changes to daemon settings, the CA, or the Baffle binary require a proxy container restart.
 
@@ -280,6 +287,33 @@ Each component can use an existing image or build one from a Containerfile. The 
 `containerfile` and `context` paths are relative to `.cladding/cladding.json`. `context` defaults to the `.cladding` directory when omitted. Build `args` are string values passed to Podman as ordinary Containerfile build arguments.
 
 `cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag.
+
+### Selecting Baffle session files
+
+The default session files are `.cladding/config/proxy/sessions/agent.toml` and
+`.cladding/config/proxy/sessions/nw-sandbox.toml`. Set a component's
+`session_config` under `proxy` to select another file:
+
+```json
+{
+  "proxy": {
+    "agent": {
+      "session_config": "agent-restricted.toml"
+    },
+    "nw_sandbox": {
+      "session_config": "restricted/network.toml"
+    }
+  }
+}
+```
+
+Cladding resolves each value only under
+`.cladding/config/proxy/sessions/`. Use a relative filename or nested path.
+Cladding rejects absolute paths, `.` components, `..` components, and symlinks.
+The two selections are independent. `cladding check` requires and validates
+the agent file and, when `nw_sandbox` is enabled, the selected network-sandbox
+file. A disabled network sandbox does not require its selected file. See the
+[working example](examples/proxy-session-selection/).
 
 The default proxy image is built from Debian trixie slim. It includes GNU libc, a POSIX shell, the startup utilities, and system CA certificates. It does not include Cargo or a Rust toolchain. A custom `proxy.image` or `proxy.build` image must provide `/bin/sh`, `mkdir`, `chmod`, `dirname`, `sleep`, and compatible GNU libc runtime support for the embedded Baffle executable.
 

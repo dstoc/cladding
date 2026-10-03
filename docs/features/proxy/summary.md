@@ -17,6 +17,37 @@ to block that destination.
 
 The network-sandbox session file may exist when the network sandbox is disabled. The file's presence does not create an active session.
 
+## Selecting session files
+
+Cladding selects `sessions/agent.toml` for the agent and
+`sessions/nw-sandbox.toml` for the network sandbox by default. Set
+`proxy.agent.session_config` or `proxy.nw_sandbox.session_config` in
+`.cladding/cladding.json` to choose another file. Each value is relative to
+`.cladding/config/proxy/sessions/` and can include nested directories. Cladding
+rejects absolute paths, `.` and `..` path components, and symlinks. The two
+components have independent selections.
+
+`cladding check` validates the selected version 2 Baffle session file for each
+enabled component. A disabled network sandbox does not require its selected
+file. `cladding run` uses the same selected files from its private snapshot of
+the project's configuration. `cladding reload-proxy` reloads the active
+sessions from their selected files. To change a selection, recreate the proxy
+runtime with `cladding down` and `cladding up`.
+
+Example `cladding.json`:
+
+```json
+{
+  "name": "myproject",
+  "agent": { "image": "localhost/cladding-default:latest" },
+  "nw_sandbox": { "enabled": true },
+  "proxy": {
+    "agent": { "session_config": "agent-restricted.toml" },
+    "nw_sandbox": { "session_config": "restricted/network.toml" }
+  }
+}
+```
+
 Use this setup sequence:
 
 ```bash

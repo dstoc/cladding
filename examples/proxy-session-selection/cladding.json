@@ -1,0 +1,18 @@
+{
+  "name": "myproject",
+  "agent": {
+    "image": "localhost/cladding-default:latest"
+  },
+  "nw_sandbox": {
+    "enabled": true,
+    "image": "localhost/cladding-default:latest"
+  },
+  "proxy": {
+    "agent": {
+      "session_config": "agent-restricted.toml"
+    },
+    "nw_sandbox": {
+      "session_config": "restricted/network.toml"
+    }
+  }
+}

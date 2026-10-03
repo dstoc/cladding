@@ -1,0 +1,4 @@
+version = 2
+persistent = true
+socket_name = "nw-sandbox/proxy.sock"
+unmatched = "deny"

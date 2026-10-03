@@ -116,6 +116,14 @@ fn build_proxy_pod(
                 value: config.nw_sandbox_enabled().to_string(),
             },
             RuntimeEnvVar {
+                name: "CLADDING_AGENT_SESSION_CONFIG".to_string(),
+                value: config.agent_session_config().to_string(),
+            },
+            RuntimeEnvVar {
+                name: "CLADDING_NW_SANDBOX_SESSION_CONFIG".to_string(),
+                value: config.nw_sandbox_session_config().to_string(),
+            },
+            RuntimeEnvVar {
                 name: "CLADDING_BAFFLE_SOCKET_RELAY".to_string(),
                 value: cfg!(target_os = "macos").to_string(),
             },
@@ -429,7 +437,8 @@ fn runtime_container_name(pod_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::{
-        ExecutionComponentConfig, ExecutionConfig, ExecutionProxyConfig, ResolvedMountConfig,
+        DEFAULT_PROXY_IMAGE, ExecutionComponentConfig, ExecutionConfig, ExecutionProxyConfig,
+        ResolvedMountConfig,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -829,6 +838,8 @@ mod tests {
         config.proxy = Some(ExecutionProxyConfig {
             image: "localhost/custom-proxy:latest".to_string(),
             build: None,
+            agent_session_config: "agent.toml".to_string(),
+            nw_sandbox_session_config: "nw-sandbox.toml".to_string(),
         });
 
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
@@ -837,6 +848,29 @@ mod tests {
         assert_eq!(
             spec.proxy.containers[0].image,
             "localhost/custom-proxy:latest"
+        );
+    }
+
+    #[test]
+    fn proxy_container_receives_independent_session_config_paths() {
+        let mut config = execution_config(true, false, Vec::new(), false);
+        config.proxy = Some(ExecutionProxyConfig {
+            image: DEFAULT_PROXY_IMAGE.to_string(),
+            build: None,
+            agent_session_config: "agent/restricted.toml".to_string(),
+            nw_sandbox_session_config: "nw/limited.toml".to_string(),
+        });
+
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+        let proxy = container(&spec.proxy, "demo-proxy-instance");
+
+        assert_eq!(
+            env_value(proxy, "CLADDING_AGENT_SESSION_CONFIG"),
+            Some("agent/restricted.toml")
+        );
+        assert_eq!(
+            env_value(proxy, "CLADDING_NW_SANDBOX_SESSION_CONFIG"),
+            Some("nw/limited.toml")
         );
     }
 

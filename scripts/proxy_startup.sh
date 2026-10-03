@@ -9,6 +9,8 @@ DEFAULT_CONTROL_SOCKET=/run/baffle/control.sock
 SOCKET_DIR=${BAFFLE_SOCKET_DIR:-/run/cladding/proxy}
 NW_SANDBOX_ENABLED=${CLADDING_NW_SANDBOX_ENABLED:-false}
 SOCKET_RELAY=${CLADDING_BAFFLE_SOCKET_RELAY:-false}
+AGENT_SESSION_CONFIG=${CLADDING_AGENT_SESSION_CONFIG:-agent.toml}
+NW_SANDBOX_SESSION_CONFIG=${CLADDING_NW_SANDBOX_SESSION_CONFIG:-nw-sandbox.toml}
 daemon_pid=
 relay_pids=
 control_socket_dir=
@@ -133,12 +135,23 @@ case "$SOCKET_RELAY" in
     *) fail "CLADDING_BAFFLE_SOCKET_RELAY must be true or false" ;;
 esac
 
+validate_session_config_name() {
+    session_config_name=$1
+    case "$session_config_name" in
+        ''|/*|*\\*|[A-Za-z]:*|.|./*|../*|*//*|*/./*|*/../*|*/.|*/..)
+            fail "Baffle session config must be a safe path relative to $CONFIG_DIR/sessions: $session_config_name"
+            ;;
+    esac
+}
+
 if [ ! -x "$BAFFLE_BIN" ]; then
     fail "Baffle executable is missing or not executable: $BAFFLE_BIN"
 fi
 
 require_file "$CONFIG_DIR/daemon.toml"
-require_file "$CONFIG_DIR/sessions/agent.toml"
+validate_session_config_name "$AGENT_SESSION_CONFIG"
+validate_session_config_name "$NW_SANDBOX_SESSION_CONFIG"
+require_file "$CONFIG_DIR/sessions/$AGENT_SESSION_CONFIG"
 require_file "$CREDENTIALS_DIR/ca.crt"
 require_file "$CREDENTIALS_DIR/ca-key.pem"
 require_directory "$CREDENTIALS_DIR/secrets"
@@ -148,7 +161,7 @@ if [ ! -w "$SOCKET_DIR/agent" ]; then
 fi
 
 if [ "$NW_SANDBOX_ENABLED" = true ]; then
-    require_file "$CONFIG_DIR/sessions/nw-sandbox.toml"
+    require_file "$CONFIG_DIR/sessions/$NW_SANDBOX_SESSION_CONFIG"
     require_directory "$SOCKET_DIR/nw-sandbox"
     if [ ! -w "$SOCKET_DIR/nw-sandbox" ]; then
         fail "network-sandbox session socket directory is not writable: $SOCKET_DIR/nw-sandbox"
@@ -483,9 +496,9 @@ create_session() {
     fi
 }
 
-create_session agent agent.toml
+create_session agent "$AGENT_SESSION_CONFIG"
 if [ "$NW_SANDBOX_ENABLED" = true ]; then
-    create_session nw-sandbox nw-sandbox.toml
+    create_session nw-sandbox "$NW_SANDBOX_SESSION_CONFIG"
 fi
 
 log "Baffle daemon is supervising persistent sessions"
