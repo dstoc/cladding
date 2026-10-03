@@ -309,6 +309,37 @@ report_client_failure() {
   printf '::error title=Baffle client workload diagnostics::%s\n' "$diagnostic"
 }
 
+verify_orphan_reaping() {
+  container=$1
+  orphan_pid=$(podman exec "$container" python3 -c '
+import os, time
+
+supervisor = os.fork()
+if supervisor == 0:
+    orphan = os.fork()
+    if orphan == 0:
+        print(os.getpid(), flush=True)
+        os.close(1)
+        time.sleep(1)
+        os._exit(0)
+    os._exit(0)
+os.waitpid(supervisor, 0)
+')
+  case "$orphan_pid" in
+    ''|*[!0-9]*)
+      echo "failed to get orphan process ID from $container: $orphan_pid" >&2
+      return 1
+      ;;
+  esac
+
+  sleep 2
+  if podman exec "$container" test -e "/proc/$orphan_pid"; then
+    orphan_stat=$(podman exec "$container" cat "/proc/$orphan_pid/stat" 2>&1 || true)
+    echo "orphaned process $orphan_pid remains in $container after exit: $orphan_stat" >&2
+    return 1
+  fi
+}
+
 phase="check execution-container isolation and installed trust"
 for component in agent nw-sandbox; do
   if [ "$component" = agent ]; then
@@ -323,6 +354,7 @@ for component in agent nw-sandbox; do
     test -r /opt/config/nw_sandbox/main.rego
     test -r /opt/config/nw_sandbox/curl.rego
     test -r /run/cladding/ca/baffle.crt
+    test -x /run/podman-init
     test ! -e /opt/credentials/baffle/ca-key.pem
     test ! -e /opt/credentials/baffle/secrets/test-token-old
     test ! -e /run/baffle/control.sock
@@ -332,10 +364,15 @@ for component in agent nw-sandbox; do
   podman exec --user 0 "$container" cmp \
     /run/cladding/ca/baffle.crt /usr/local/share/ca-certificates/baffle.crt
 done
+podman exec "$proxy" test -x /run/podman-init
 test "$(stat -c '%a' "$project_root/credentials/baffle")" = 700
 test "$(stat -c '%a' "$project_root/credentials/baffle/ca.crt")" = 644
 test "$(stat -c '%a' "$project_root/credentials/baffle/ca-key.pem")" = 600
 test "$(stat -c '%u' "$project_root/credentials/baffle/ca-key.pem")" = "$(id -u)"
+
+phase="verify orphaned child processes are reaped"
+verify_orphan_reaping "$agent"
+verify_orphan_reaping "$sandbox"
 
 phase="authorize agent HTTPS request through scoped proxy"
 body=$(agent_curl --fail https://localhost:8443/authorized/curl \

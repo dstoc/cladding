@@ -366,7 +366,7 @@ run_proxy_startup() {
 
   start_output_file="$temp_root/proxy-start-$name.log"
   current_phase="create proxy container ($name)"
-  set -- podman run --detach --name "$name" \
+  set -- podman run --detach --init --name "$name" \
     --userns keep-id \
     --env "CLADDING_NW_SANDBOX_ENABLED=$sandbox_enabled" \
     --env "CLADDING_BAFFLE_SOCKET_RELAY=$socket_relay" \
@@ -429,6 +429,12 @@ run_proxy_startup() {
         "container=$name expected=$sandbox_state" "$start_output_file"
     fi
     echo "Baffle startup did not create the expected $sandbox_state session socket" >&2
+    exit 1
+  fi
+
+  current_phase="verify Podman init helper mount ($name)"
+  if ! podman exec "$name" test -x /run/podman-init; then
+    echo "Podman did not mount its configured init helper at /run/podman-init" >&2
     exit 1
   fi
 
