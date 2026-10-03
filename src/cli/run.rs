@@ -15,13 +15,16 @@ pub(super) fn cmd_run(
     source_context: &Context,
     args: &[String],
     config_uses_stdin: bool,
+    verbose: bool,
 ) -> Result<()> {
     if args.is_empty() {
         return Err(Error::message("missing run command"));
     }
 
     let instance_name = format!("cladding-run-{}", generate_uuid_v4()?);
-    println!("starting one-off instance: {instance_name}");
+    if verbose {
+        println!("starting one-off instance: {instance_name}");
+    }
 
     let mut config = source_context.load_config().map_err(|err| {
         Error::message(format!(
@@ -80,11 +83,11 @@ pub(super) fn cmd_run(
         )));
     }
 
-    let (startup_result, runtime_create_attempted) = lifecycle::cmd_up_ephemeral(&context, false);
+    let (startup_result, runtime_create_attempted) = lifecycle::cmd_up_ephemeral(&context, verbose);
 
     if let Err(startup_error) = startup_result {
         let cleanup_error = if runtime_create_attempted {
-            cleanup_ephemeral_runtime(&context, &runtime_root)
+            cleanup_ephemeral_runtime(&context, &runtime_root, &instance_name, verbose)
         } else {
             remove_private_runtime_root(&runtime_root).map_err(Error::from)
         };
@@ -107,7 +110,7 @@ pub(super) fn cmd_run(
         Some(signal) => Err(signal_status_error(signal)),
         None => exec::cmd_run_command(&context, args, !config_uses_stdin),
     };
-    let cleanup_error = cleanup_ephemeral_runtime(&context, &runtime_root);
+    let cleanup_error = cleanup_ephemeral_runtime(&context, &runtime_root, &instance_name, verbose);
     let signal = signals.finish();
 
     finish_run(
@@ -119,8 +122,16 @@ pub(super) fn cmd_run(
     )
 }
 
-fn cleanup_ephemeral_runtime(context: &Context, runtime_root: &Path) -> Result<()> {
-    lifecycle::cmd_down_ephemeral(context)?;
+fn cleanup_ephemeral_runtime(
+    context: &Context,
+    runtime_root: &Path,
+    instance_name: &str,
+    verbose: bool,
+) -> Result<()> {
+    if verbose {
+        eprintln!("cleaning up one-off instance: {instance_name}");
+    }
+    lifecycle::cmd_down_ephemeral(context, verbose)?;
     remove_private_runtime_root(runtime_root)?;
     Ok(())
 }
@@ -169,7 +180,8 @@ fn finish_run(
 
 fn preserve_command_status(err: Error, instance_name: &str) -> Error {
     match err {
-        command_error @ Error::CommandFailed { .. } => command_error,
+        command_error @ Error::CommandFailed { .. }
+        | command_error @ Error::CommandFailedWithOutput { .. } => command_error,
         other => Error::message(format!(
             "one-off instance '{instance_name}' failed: {other}"
         )),

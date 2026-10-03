@@ -65,7 +65,7 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
 
     let spec = context.runtime_spec(&config)?;
     prepare_persistent_baffle_ca(&context.project_root, || {
-        initialize_baffle_ca(&spec, false).map_err(anyhow::Error::new)
+        initialize_baffle_ca(&spec, false, false).map_err(anyhow::Error::new)
     })?;
 
     Ok(())
@@ -291,12 +291,24 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
 
 pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     let mut runtime_create_attempted = false;
-    cmd_up_inner(context, verbose, false, &mut runtime_create_attempted)
+    cmd_up_inner(
+        context,
+        verbose,
+        false,
+        false,
+        &mut runtime_create_attempted,
+    )
 }
 
 pub(super) fn cmd_up_ephemeral(context: &Context, verbose: bool) -> (Result<()>, bool) {
     let mut runtime_create_attempted = false;
-    let result = cmd_up_inner(context, verbose, true, &mut runtime_create_attempted);
+    let result = cmd_up_inner(
+        context,
+        verbose,
+        true,
+        !verbose,
+        &mut runtime_create_attempted,
+    );
     (result, runtime_create_attempted)
 }
 
@@ -304,12 +316,13 @@ fn cmd_up_inner(
     context: &Context,
     verbose: bool,
     fail_if_already_running: bool,
+    quiet_helpers: bool,
     runtime_create_attempted: &mut bool,
 ) -> Result<()> {
     let config = context.load_config()?;
-    let status = project_runtime_status(context, &config, verbose)?;
+    let status = project_runtime_status(context, &config, verbose, quiet_helpers)?;
     let spec = context.runtime_spec(&config)?;
-    let inventory = runtime_inventory(&spec, verbose)?;
+    let inventory = runtime_inventory(&spec, verbose, quiet_helpers)?;
 
     if status.already_running && inventory.is_fully_running() {
         if fail_if_already_running {
@@ -344,14 +357,14 @@ fn cmd_up_inner(
     } else {
         BaffleCaReadiness::Validate
     };
-    check_project_readiness(context, &config, &spec, verbose, baffle_ca)?;
+    check_project_readiness(context, &config, &spec, verbose, quiet_helpers, baffle_ca)?;
     prepare_baffle_runtime(&context.project_root)?;
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     *runtime_create_attempted = true;
-    if let Err(startup_error) = runtime_create(&spec, verbose) {
+    if let Err(startup_error) = runtime_create(&spec, verbose, quiet_helpers) {
         if !fail_if_already_running
-            && let Err(cleanup_error) = runtime_cleanup_owned(&spec, verbose)
+            && let Err(cleanup_error) = runtime_cleanup_owned(&spec, verbose, quiet_helpers)
         {
             eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
         }
@@ -481,7 +494,7 @@ pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     let config = context.load_config()?;
     let spec = context.runtime_spec(&config)?;
     let mut cleanup_error = None;
-    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose));
+    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose, false));
 
     match cleanup_error {
         Some(err) => Err(err),
@@ -489,21 +502,21 @@ pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     }
 }
 
-pub(super) fn cmd_down_ephemeral(context: &Context) -> Result<()> {
+pub(super) fn cmd_down_ephemeral(context: &Context, verbose: bool) -> Result<()> {
     let config = context.load_config()?;
     let spec = RuntimeSpec::build_with_workspace_root(
         &context.project_root,
         &context.workspace_root,
         &config,
     );
-    runtime_cleanup_owned(&spec, false)
+    runtime_cleanup_owned(&spec, verbose, !verbose)
 }
 
 pub(super) fn cmd_destroy(context: &Context) -> Result<()> {
     let config = context.load_config()?;
     let spec = context.runtime_spec(&config)?;
     let mut cleanup_error = None;
-    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false));
+    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false, false));
 
     match cleanup_error {
         Some(err) => Err(err),
@@ -513,7 +526,7 @@ pub(super) fn cmd_destroy(context: &Context) -> Result<()> {
 
 pub(super) fn cmd_ps(_context: &Context) -> Result<()> {
     podman_required("podman (required for cladding ps)")?;
-    let projects = list_running_projects(false)?;
+    let projects = list_running_projects(false, false)?;
     if projects.is_empty() {
         println!("no running cladding projects");
         return Ok(());

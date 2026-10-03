@@ -115,9 +115,12 @@ project.
   cladding --config job.json run -- codex exec "Implement the task"
   cladding --cladding-dir /tmp/job/.cladding --config - run -- cargo test --workspace
   cladding run codex exec "Implement the task"
+  cladding run -v -- codex exec "Implement the task"
   ```
 
   `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It snapshots the selected project's `.cladding/config/` tree when the command starts, then fills in any missing default files. The snapshot includes Baffle session policies and sandbox policies. It uses the selected session filenames from `cladding.json`; later edits to project config do not change the active run. The run does not write its generated runtime state to the source tree. Cladding reads the selected JSON configuration at startup. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+
+  `cladding run` keeps successful startup and cleanup diagnostics quiet by default. Use `-v` or `--verbose` to show Podman and certificate setup output, instance details, and cleanup activity.
 
 * Temporarily publish a TCP port from the agent container to the host while the project is running:
 
@@ -443,7 +446,7 @@ cladding init [name]  # create .cladding config and runtime layout
 cladding build       # build images, refresh embedded tools, initialize persistent Baffle CA
 cladding check        # verify project prerequisites, including the persistent Baffle CA
 cladding ps           # list running cladding projects
-cladding run [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
+cladding run [-v|--verbose] [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
 cladding exec [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] <cmd> [args...] # execute in the selected container of a running runtime
 cladding expose <containerport> [hostport] [--bind-address <address>] # block while forwarding host address/port to agent containerport
 cladding inject <host-endpoint> [containerport] # block while forwarding agent localhost containerport to a host-reachable endpoint

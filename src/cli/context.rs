@@ -201,12 +201,13 @@ pub(super) fn project_runtime_status(
     context: &Context,
     config: &ExecutionConfig,
     verbose: bool,
+    quiet_helpers: bool,
 ) -> Result<ProjectRuntimeStatus> {
     let current_project_root = current_project_root(context)?;
 
     let mut conflicting_roots = Vec::new();
     let mut already_running = false;
-    for project in list_running_projects(verbose)? {
+    for project in list_running_projects(verbose, quiet_helpers)? {
         if project.name != config.name {
             continue;
         }
@@ -333,6 +334,7 @@ mod tests {
             &project_root,
             None,
             &CommandSpec::Run {
+                verbose: false,
                 args: vec!["echo".to_string()],
             },
         )

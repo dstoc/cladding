@@ -1,5 +1,7 @@
 use crate::error::{Error, Result};
+use anyhow::Context as _;
 use std::ffi::OsStr;
+use std::io::Write as _;
 use std::process::{Command, ExitStatus, Output};
 
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +97,70 @@ pub fn ensure_success_output(output: &Output, context: &'static str) -> Result<(
         eprintln!("{stderr}");
     }
     Err(Error::CommandFailed { context, code })
+}
+
+/// Run a helper command with either inherited output or quiet capture.
+/// Quiet capture discards output on success and preserves it in the error on failure.
+pub fn run_helper_command(
+    cmd: &mut Command,
+    verbose: bool,
+    capture_success: bool,
+    context: &'static str,
+) -> Result<()> {
+    trace_command(cmd, verbose);
+    if !capture_success {
+        let status = cmd
+            .status()
+            .with_context(|| format!("failed to run {context}"))?;
+        return ensure_success(status, context);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to run {context}"))?;
+    ensure_success_output_with_diagnostics(&output, context)
+}
+
+/// Forward output captured by a helper whose output is also used internally.
+pub fn forward_output(output: &Output) -> anyhow::Result<()> {
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .context("failed to write helper stdout")?;
+    std::io::stderr()
+        .write_all(&output.stderr)
+        .context("failed to write helper stderr")?;
+    Ok(())
+}
+
+/// Return a command failure that includes both captured output streams.
+pub fn ensure_success_output_with_diagnostics(
+    output: &Output,
+    context: &'static str,
+) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let code = output.status.code().unwrap_or(1);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut diagnostics = String::new();
+    if !stdout.trim().is_empty() {
+        diagnostics.push_str(&format!("\nstdout:\n{}", stdout.trim_end()));
+    }
+    if !stderr.trim().is_empty() {
+        diagnostics.push_str(&format!("\nstderr:\n{}", stderr.trim_end()));
+    }
+
+    if diagnostics.is_empty() {
+        Err(Error::CommandFailed { context, code })
+    } else {
+        Err(Error::CommandFailedWithOutput {
+            context,
+            code,
+            diagnostics,
+        })
+    }
 }
 
 #[cfg(test)]

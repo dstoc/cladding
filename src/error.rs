@@ -4,6 +4,12 @@ pub enum Error {
     Message(String),
     #[error("{context} failed (exit code {code})")]
     CommandFailed { context: &'static str, code: i32 },
+    #[error("{context} failed (exit code {code}){diagnostics}")]
+    CommandFailedWithOutput {
+        context: &'static str,
+        code: i32,
+        diagnostics: String,
+    },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -13,7 +19,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl Error {
     pub fn exit_code(&self) -> i32 {
         match self {
-            Error::CommandFailed { code, .. } => *code,
+            Error::CommandFailed { code, .. } | Error::CommandFailedWithOutput { code, .. } => {
+                *code
+            }
             _ => 1,
         }
     }

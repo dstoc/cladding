@@ -51,6 +51,9 @@ pub(super) enum CommandSpec {
     Destroy,
     /// Run a command in a temporary runtime, then remove the runtime
     Run {
+        /// Show startup and teardown diagnostics
+        #[arg(short, long)]
+        verbose: bool,
         #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
@@ -411,8 +414,9 @@ mod tests {
         ] {
             let cli = Cli::try_parse_from(argv).expect("run command should parse");
             match cli.command.expect("command") {
-                CommandSpec::Run { args } => {
+                CommandSpec::Run { args, verbose } => {
                     assert_eq!(args, ["codex", "exec", "--full-auto"]);
+                    assert!(!verbose);
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
@@ -420,6 +424,21 @@ mod tests {
 
         assert!(Cli::try_parse_from(["cladding", "run"]).is_err());
         assert!(Cli::try_parse_from(["cladding", "once", "--", "codex"]).is_err());
+    }
+
+    #[test]
+    fn run_accepts_verbose_before_the_command_delimiter() {
+        for flag in ["-v", "--verbose"] {
+            let cli = Cli::try_parse_from(["cladding", "run", flag, "--", "echo", "hello"])
+                .expect("run verbose flag should parse");
+            match cli.command.expect("command") {
+                CommandSpec::Run { args, verbose } => {
+                    assert!(verbose);
+                    assert_eq!(args, ["echo", "hello"]);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
     }
 
     #[test]
