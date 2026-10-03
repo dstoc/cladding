@@ -12,8 +12,8 @@ use cladding::config::{
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::podman::{
-    list_running_projects, podman_build_image, podman_build_proxy_image, podman_required,
-    runtime_cleanup, runtime_cleanup_owned, runtime_create, runtime_inventory,
+    initialize_baffle_ca, list_running_projects, podman_build_image, podman_build_proxy_image,
+    podman_required, runtime_cleanup, runtime_cleanup_owned, runtime_create, runtime_inventory,
 };
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashMap;
@@ -338,6 +338,9 @@ fn cmd_up_inner(
     check_required_images(&config, verbose)?;
     check_required_config_files(context, &config)?;
     prepare_baffle_runtime(&context.project_root)?;
+    cladding::credentials::ensure_baffle_ca(&context.project_root, || {
+        initialize_baffle_ca(&spec, verbose).map_err(anyhow::Error::new)
+    })?;
     fs::create_dir_all(context.project_root.join("runtime/empty-mask"))
         .with_context(|| "failed to create runtime empty-mask directory")?;
     check_required_host_paths(&spec)?;
@@ -563,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn run_prepares_an_isolated_ca_and_empty_secrets_directory() {
+    fn run_preparation_creates_an_isolated_credentials_directory() {
         let root =
             std::env::temp_dir().join(format!("cladding-run-credentials-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -575,9 +578,13 @@ mod tests {
 
         prepare_ephemeral_runtime_root(&ephemeral_root).unwrap();
 
-        let persistent_ca = fs::read(persistent_root.join("credentials/baffle/ca.crt")).unwrap();
-        let ephemeral_ca = fs::read(ephemeral_root.join("credentials/baffle/ca.crt")).unwrap();
-        assert_ne!(ephemeral_ca, persistent_ca);
+        assert!(!persistent_root.join("credentials/baffle/ca.crt").exists());
+        assert!(!ephemeral_root.join("credentials/baffle/ca.crt").exists());
+        assert!(
+            !ephemeral_root
+                .join("credentials/baffle/ca-key.pem")
+                .exists()
+        );
         assert!(
             fs::read_dir(ephemeral_root.join("credentials/baffle/secrets"))
                 .unwrap()
@@ -588,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn baffle_runtime_preparation_preserves_persistent_credentials() {
+    fn baffle_runtime_preparation_does_not_generate_ca_or_change_secrets() {
         let root = std::env::temp_dir().join(format!(
             "cladding-baffle-runtime-preparation-{}",
             std::process::id()
@@ -598,21 +605,13 @@ mod tests {
 
         prepare_baffle_runtime(&root).unwrap();
         let credential_dir = root.join("credentials/baffle");
-        let certificate_before = fs::read(credential_dir.join("ca.crt")).unwrap();
-        let private_key_before = fs::read(credential_dir.join("ca-key.pem")).unwrap();
         let secret_path = credential_dir.join("secrets/api-token");
         fs::write(&secret_path, "persistent-secret").unwrap();
 
         prepare_baffle_runtime(&root).unwrap();
 
-        assert_eq!(
-            fs::read(credential_dir.join("ca.crt")).unwrap(),
-            certificate_before
-        );
-        assert_eq!(
-            fs::read(credential_dir.join("ca-key.pem")).unwrap(),
-            private_key_before
-        );
+        assert!(!credential_dir.join("ca.crt").exists());
+        assert!(!credential_dir.join("ca-key.pem").exists());
         assert_eq!(
             fs::read_to_string(secret_path).unwrap(),
             "persistent-secret"
@@ -622,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn init_creates_and_reuses_persistent_baffle_credentials() {
+    fn init_creates_and_reuses_persistent_baffle_credential_storage() {
         let root =
             std::env::temp_dir().join(format!("cladding-init-credentials-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -631,11 +630,11 @@ mod tests {
 
         cmd_init(&context, Some("demo")).unwrap();
         let cert_path = project_root.join("credentials/baffle/ca.crt");
-        let cert = fs::read(&cert_path).unwrap();
         cmd_init(&context, Some("demo")).unwrap();
 
-        assert_eq!(fs::read(cert_path).unwrap(), cert);
-        assert!(project_root.join("credentials/baffle/ca-key.pem").is_file());
+        assert!(!cert_path.exists());
+        assert!(!project_root.join("credentials/baffle/ca-key.pem").exists());
+        assert!(project_root.join("credentials/baffle").is_dir());
         assert!(project_root.join("credentials/baffle/secrets").is_dir());
         assert!(
             project_root
