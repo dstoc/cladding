@@ -56,6 +56,10 @@ fi
 if [ "$1" = "image" ] && [ "$2" = "exists" ]; then
   exit 0
 fi
+if [ "$1" = "info" ]; then
+  printf '{"runsc":{"path":"runsc"}}\n'
+  exit 0
+fi
 if [ "$2" = "exists" ]; then
   if [ -f "$CLADDING_PODMAN_STATE" ]; then exit 0; else exit 1; fi
 fi
@@ -216,6 +220,12 @@ exit 0
     assert!(String::from_utf8_lossy(&invalid_result.stderr).contains("invalid Baffle CA"));
     fs::write(project_root.join("credentials/baffle/ca.crt"), &certificate).unwrap();
 
+    let config_path = project_root.join("cladding.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["use_runsc"] = true.into();
+    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+
     fs::remove_file(project_root.join("credentials/baffle/ca.crt")).unwrap();
     fs::remove_file(project_root.join("credentials/baffle/ca-key.pem")).unwrap();
     fs::write(&podman_log, "").unwrap();
@@ -240,12 +250,7 @@ exit 0
         "up created a pod before CA validation"
     );
     assert!(
-        !up_calls.lines().any(|line| {
-            let mut args = line.split_whitespace();
-            args.next() == Some("run")
-                && args.next() == Some("-d")
-                && args.any(|arg| arg == "--name")
-        }),
+        !up_calls.lines().any(is_detached_container_run),
         "up started a container before CA validation"
     );
     assert!(
@@ -319,6 +324,11 @@ fn assert_success(output: Output) {
 
 fn read_log(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
+}
+
+fn is_detached_container_run(line: &str) -> bool {
+    let args = line.split_whitespace().collect::<Vec<_>>();
+    args.windows(2).any(|tokens| tokens == ["run", "-d"]) && args.contains(&"--name")
 }
 
 fn write_test_ca(certificate_path: &Path, private_key_path: &Path) {
