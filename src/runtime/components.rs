@@ -51,13 +51,8 @@ impl RuntimeSpec {
             build_custom_mounts(&project_root, &runtime_root, &config.name, &config.mounts);
         let names = RuntimeNames::from_config(config);
 
-        let proxy = build_proxy_component(
-            &project_root,
-            &runtime_root,
-            config,
-            &names,
-            &custom_mounts,
-        );
+        let proxy =
+            build_proxy_component(&project_root, &runtime_root, config, &names, &custom_mounts);
         let agent = build_agent_component(
             &project_root,
             &workspace_root,

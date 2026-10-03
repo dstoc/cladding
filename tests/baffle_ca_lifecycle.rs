@@ -167,6 +167,13 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
     credentials_dir=
     config_dir=
     secret_source_dir=
+    tools_dir=
+    home_dir=
+    baffle_binary=
+    runtime_script=
+    runtime_sockets=
+    agent_session_config=agent.toml
+    nw_sandbox_session_config=nw-sandbox.toml
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "--volume" ]; then
         shift
@@ -183,16 +190,61 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
           *:/opt/config:ro)
             config_dir=${1%:/opt/config:ro}
             ;;
+          *:/opt/tools/bin/baffle:ro)
+            baffle_binary=${1%:/opt/tools/bin/baffle:ro}
+            ;;
+          *:/opt/tools:ro)
+            tools_dir=${1%:/opt/tools:ro}
+            ;;
+          *:/home/user)
+            home_dir=${1%:/home/user}
+            ;;
+          *:/opt/scripts/proxy_startup.sh:ro)
+            runtime_script=${1%:/opt/scripts/proxy_startup.sh:ro}
+            ;;
+          *:/run/cladding/proxy*)
+            runtime_sockets=${1%:/run/cladding/proxy*}
+            ;;
+        esac
+      elif [ "$1" = "--env" ]; then
+        shift
+        case "$1" in
+          CLADDING_AGENT_SESSION_CONFIG=*) agent_session_config=${1#CLADDING_AGENT_SESSION_CONFIG=} ;;
+          CLADDING_NW_SANDBOX_SESSION_CONFIG=*) nw_sandbox_session_config=${1#CLADDING_NW_SANDBOX_SESSION_CONFIG=} ;;
         esac
       fi
       shift
     done
-    if [ -n "$config_dir" ] && [ -f "$config_dir/proxy/sessions/agent.toml" ]; then
-      printf '%s\n' 'PROJECT_AGENT_SESSION_SNAPSHOT' >> "$CLADDING_PODMAN_LOG"
-      cat "$config_dir/proxy/sessions/agent.toml" >> "$CLADDING_PODMAN_LOG"
+    if [ -n "$config_dir" ] && [ -f "$config_dir/proxy/sessions/$agent_session_config" ]; then
+      printf 'PROJECT_AGENT_SESSION_CONFIG=%s\n' "$agent_session_config" >> "$CLADDING_PODMAN_LOG"
+      printf 'PROJECT_NW_SANDBOX_SESSION_CONFIG=%s\n' "$nw_sandbox_session_config" >> "$CLADDING_PODMAN_LOG"
+      cat "$config_dir/proxy/sessions/$agent_session_config" >> "$CLADDING_PODMAN_LOG"
     fi
     if [ -n "$secret_source_dir" ]; then
       printf 'PROJECT_BAFFLE_SECRET_SOURCE=%s\n' "$secret_source_dir" >> "$CLADDING_PODMAN_LOG"
+    fi
+    if [ -n "$credentials_dir" ]; then
+      printf 'PROJECT_CREDENTIALS_SOURCE=%s\n' "$credentials_dir" >> "$CLADDING_PODMAN_LOG"
+    fi
+    if [ -n "$tools_dir" ]; then
+      printf 'PROJECT_TOOLS_SOURCE=%s\n' "$tools_dir" >> "$CLADDING_PODMAN_LOG"
+    fi
+    if [ -n "$home_dir" ]; then
+      printf 'PROJECT_HOME_SOURCE=%s\n' "$home_dir" >> "$CLADDING_PODMAN_LOG"
+    fi
+    if [ -n "$baffle_binary" ]; then
+      printf 'PROJECT_BAFFLE_BINARY_SOURCE=%s\n' "$baffle_binary" >> "$CLADDING_PODMAN_LOG"
+    fi
+    if [ -n "$runtime_script" ]; then
+      printf 'RUNTIME_SCRIPT_SOURCE=%s\n' "$runtime_script" >> "$CLADDING_PODMAN_LOG"
+      runtime_root=${runtime_script%/runtime/scripts/proxy_startup.sh}
+      if [ ! -e "$runtime_root/config" ] && [ ! -e "$runtime_root/tools" ] \
+        && [ ! -e "$runtime_root/credentials" ] && [ ! -e "$runtime_root/home" ]; then
+        printf '%s\n' 'RUNTIME_HAS_NO_PROJECT_COPIES' >> "$CLADDING_PODMAN_LOG"
+      fi
+    fi
+    if [ -n "$runtime_sockets" ]; then
+      printf 'RUNTIME_SOCKETS_SOURCE=%s\n' "$runtime_sockets" >> "$CLADDING_PODMAN_LOG"
     fi
     if [ -n "$credentials_dir" ] && [ -n "$secret_source_dir" ] \
       && [ "$secret_source_dir" != "$credentials_dir/secrets" ]; then
