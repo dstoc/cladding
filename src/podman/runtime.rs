@@ -512,11 +512,11 @@ pub fn container_run(
     trace_command(&cmd, verbose);
     let status = cmd.status().with_context(|| {
         format!(
-            "failed to run podman container {} in pod {}",
+            "failed to run podman container {} in pod {} with --init",
             container.name, pod.name
         )
     })?;
-    ensure_success(status, "podman run")
+    ensure_success(status, "podman run --init")
 }
 
 fn should_install_baffle_ca(spec: &RuntimeSpec, pod: &RuntimePod) -> bool {
@@ -709,6 +709,7 @@ fn build_container_run_command(
         ));
     cmd.arg("run");
     cmd.arg("-d");
+    cmd.arg("--init");
     match pod.placement {
         RuntimePlacement::Pod => {
             cmd.arg("--pod");
@@ -912,8 +913,10 @@ mod tests {
             fs_sandbox: None,
         };
 
+        let args = command_args(&build_baffle_ca_init_command(&spec));
+        assert!(!args.iter().any(|arg| arg == "--init"));
         assert_eq!(
-            command_args(&build_baffle_ca_init_command(&spec)),
+            args,
             vec![
                 "run",
                 "--rm",
@@ -969,6 +972,46 @@ mod tests {
             &spec,
             spec.fs_sandbox.as_ref().expect("filesystem sandbox")
         ));
+    }
+
+    #[test]
+    fn runtime_containers_enable_podman_init_for_every_component() {
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+                build: None,
+            },
+            nw_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: "nw-sandbox:image".to_string(),
+                build: None,
+            }),
+            fs_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: "fs-sandbox:image".to_string(),
+                build: None,
+            }),
+            proxy: None,
+            mounts: Vec::new(),
+        };
+        let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
+        let pods = runtime_pods(&spec);
+
+        assert_eq!(pods.len(), 4);
+        for pod in pods {
+            for container in &pod.containers {
+                let args =
+                    command_args(&build_container_run_command(pod.use_runsc, pod, container));
+                assert!(
+                    args.iter().any(|arg| arg == "--init"),
+                    "{} did not enable Podman init",
+                    container.name
+                );
+            }
+        }
     }
 
     fn successful_status() -> std::process::ExitStatus {
@@ -1180,6 +1223,7 @@ mod tests {
                 "network=none",
                 "run",
                 "-d",
+                "--init",
                 "--label",
                 "app=agent",
                 "--label",
@@ -1234,6 +1278,13 @@ mod tests {
                     source: RuntimeMountSource::EmptyDir,
                 },
                 RuntimeMount {
+                    mount_path: "/run/cladding/proxy/agent".to_string(),
+                    read_only: false,
+                    source: RuntimeMountSource::NamedVolume {
+                        claim_name: "demo-proxy-agent-relay".to_string(),
+                    },
+                },
+                RuntimeMount {
                     mount_path: "/home/user/workspace/.cladding".to_string(),
                     read_only: true,
                     source: RuntimeMountSource::GeneratedEmptyMask {
@@ -1262,6 +1313,7 @@ mod tests {
             vec![
                 "run",
                 "-d",
+                "--init",
                 "--pod",
                 "demo-agent",
                 "--name",
@@ -1278,6 +1330,8 @@ mod tests {
                 "demo-cache:/workspace/data",
                 "--volume",
                 "cladding-demo-agent-empty-workspace-tmp:/workspace/tmp",
+                "--volume",
+                "demo-proxy-agent-relay:/run/cladding/proxy/agent",
                 "--volume",
                 "/tmp/demo/runtime/empty-mask:/home/user/workspace/.cladding:ro",
                 "--expose",
@@ -1333,6 +1387,7 @@ mod tests {
                 "host-uds=all",
                 "run",
                 "-d",
+                "--init",
                 "--pod",
                 "demo-agent",
                 "--name",
@@ -1382,6 +1437,7 @@ mod tests {
                 "network=none",
                 "run",
                 "-d",
+                "--init",
                 "--network",
                 "none",
                 "--userns",
