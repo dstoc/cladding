@@ -240,7 +240,12 @@ exit 0
         "up created a pod before CA validation"
     );
     assert!(
-        !up_calls.lines().any(|line| line.starts_with("run --name ")),
+        !up_calls.lines().any(|line| {
+            let mut args = line.split_whitespace();
+            args.next() == Some("run")
+                && args.next() == Some("-d")
+                && args.any(|arg| arg == "--name")
+        }),
         "up started a container before CA validation"
     );
     assert!(
