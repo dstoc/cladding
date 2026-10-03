@@ -155,8 +155,7 @@ pub fn runtime_inventory(
 
         // Detect pods created by older Cladding versions so `up` does not
         // mistake their proxy containers for the current standalone runtime.
-        if let Some(state) =
-            inspect_resource_state("pod", &component.name, verbose, quiet_helpers)?
+        if let Some(state) = inspect_resource_state("pod", &component.name, verbose, quiet_helpers)?
         {
             resources.push(RuntimeResource {
                 kind: "pod",
@@ -196,8 +195,8 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
                     ))),
                 );
             }
-            // A pod can contain the legacy proxy container. Do not remove a
-            // same-named container separately when the pod is not owned.
+            // The pod may own the legacy proxy container. Skip standalone
+            // container removal whenever a same-named pod exists.
             continue;
         }
 
@@ -218,7 +217,7 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
                     &mut cleanup_error,
                     container_rm(&container.name, verbose, quiet_helpers),
                 );
-        } else {
+            } else {
                 record_cleanup_result(
                     &mut cleanup_error,
                     Err(Error::message(format!(
@@ -243,11 +242,7 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
 /// Clean up resources only when their Podman labels identify this runtime.
 /// This is used by one-off startup and teardown paths so a name collision
 /// cannot cause cleanup to remove another project's resources.
-pub fn runtime_cleanup_owned(
-    spec: &RuntimeSpec,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<()> {
+pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     // runtime_cleanup checks the component labels on every existing resource,
     // including legacy pods, before it removes anything.
     runtime_cleanup(spec, verbose, quiet_helpers)

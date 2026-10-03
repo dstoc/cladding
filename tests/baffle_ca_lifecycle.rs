@@ -547,7 +547,7 @@ exit 0
     let verbose_stdout = String::from_utf8_lossy(&verbose_run_output.stdout);
     let verbose_stderr = String::from_utf8_lossy(&verbose_run_output.stderr);
     assert!(verbose_stdout.contains("starting one-off instance:"));
-    assert!(verbose_stdout.contains("helper stdout: pod create"));
+    assert!(verbose_stdout.contains("helper stdout: run -d"));
     assert!(verbose_stdout.contains("container-id: fake-podman-id"));
     assert!(verbose_stdout.contains("user-output"));
     assert!(verbose_stderr.contains("helper stderr:"));
