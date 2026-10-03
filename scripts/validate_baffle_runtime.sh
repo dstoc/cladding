@@ -36,6 +36,7 @@ temp_root=$(mktemp -d "/tmp/cladding-baffle-runtime.XXXXXX")
 project_name="baffleintegration$$"
 project_root="$temp_root/workspace/.cladding"
 origin_name="$project_name-origin"
+proxy="$project_name-proxy-instance"
 proxy_image="localhost/$project_name-proxy:latest"
 client_image="localhost/$project_name-client:latest"
 origin_image="localhost/$project_name-origin:latest"
@@ -231,11 +232,9 @@ if [ "$secret_mode" != 600 ]; then
   exit 1
 fi
 phase="start local TLS origin container"
-podman run --detach --name "$origin_name" --network default \
-  --network-alias "$origin_name" "$origin_image" >/dev/null
+podman run --detach --name "$origin_name" --network "container:$proxy" "$origin_image" >/dev/null
 agent="$project_name-agent-instance"
 sandbox="$project_name-nw-sandbox-instance"
-proxy="$project_name-proxy-instance"
 ready=false
 attempt=0
 phase="wait for Baffle daemon readiness"
