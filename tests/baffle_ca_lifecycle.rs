@@ -77,6 +77,7 @@ fi
 if [ "$1" = "run" ]; then
   shift
   credentials_dir=
+  config_dir=
   while [ "$#" -gt 0 ]; do
     if [ "$1" = "--volume" ]; then
       shift
@@ -84,10 +85,17 @@ if [ "$1" = "run" ]; then
         *:/opt/credentials/baffle*)
           credentials_dir=${1%%:/opt/credentials/baffle*}
           ;;
+        *:/opt/config:ro)
+          config_dir=${1%:/opt/config:ro}
+          ;;
       esac
     fi
     shift
   done
+  if [ -n "$config_dir" ] && [ -f "$config_dir/proxy/sessions/agent.toml" ]; then
+    printf '%s\n' 'PROJECT_AGENT_SESSION_SNAPSHOT' >> "$CLADDING_PODMAN_LOG"
+    cat "$config_dir/proxy/sessions/agent.toml" >> "$CLADDING_PODMAN_LOG"
+  fi
   if [ -n "$credentials_dir" ]; then
     cp "$CLADDING_TEST_CA_CERT" "$credentials_dir/ca.crt"
     cp "$CLADDING_TEST_CA_KEY" "$credentials_dir/ca-key.pem"
@@ -114,6 +122,13 @@ exit 0
     ]);
     assert_success(init.output().unwrap());
 
+    let agent_session_path = project_root.join("config/proxy/sessions/agent.toml");
+    let project_session = format!(
+        "{}\n[rules.\"example.com\"]\n",
+        fs::read_to_string(&agent_session_path).unwrap()
+    );
+    fs::write(&agent_session_path, &project_session).unwrap();
+
     let mut run_before_build = cli(
         &root,
         &bin_dir,
@@ -128,6 +143,15 @@ exit 0
         "true",
     ]);
     assert_success(run_before_build.output().unwrap());
+    assert!(
+        read_log(&podman_log).contains("[rules.\"example.com\"]"),
+        "cladding run did not pass the project agent session policy to its private runtime"
+    );
+    assert_eq!(
+        fs::read_to_string(&agent_session_path).unwrap(),
+        project_session,
+        "cladding run changed the project's agent session policy"
+    );
     assert!(
         !project_root.join("credentials/baffle/ca.crt").exists(),
         "ephemeral run must not initialize the persistent project CA"

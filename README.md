@@ -110,7 +110,7 @@ project.
   cladding run codex exec "Implement the task"
   ```
 
-  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It can use the shared `.cladding` discovery behavior or a supplied configuration without creating runtime state in the source tree. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It snapshots the selected project's `.cladding/config/` tree when the command starts, then fills in any missing default files. The snapshot includes Baffle session policies and sandbox policies. Later edits to project config do not change the active run, and the run does not write its generated runtime state to the source tree. Cladding reads the selected JSON configuration at startup. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
 
 * Temporarily publish a TCP port from the agent container to the host while the project is running:
 

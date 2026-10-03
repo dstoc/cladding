@@ -56,7 +56,9 @@ pub(super) fn cmd_run(
     };
     let context = source_context.with_resolved_config(runtime_root.clone(), config);
 
-    if let Err(startup_error) = lifecycle::prepare_ephemeral_runtime_root(&runtime_root) {
+    if let Err(startup_error) =
+        lifecycle::prepare_ephemeral_runtime_root(&source_context.project_root, &runtime_root)
+    {
         let root_cleanup = fs::remove_dir_all(&runtime_root).with_context(|| {
             format!(
                 "failed to remove private runtime root {}",
