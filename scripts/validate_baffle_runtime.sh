@@ -171,36 +171,28 @@ write_agent_policy() {
   token=$1
   path=$2
   cat > "$project_root/config/proxy/sessions/agent.toml" <<EOF
-version = 1
-operation = "create"
-
-[session]
+version = 2
 persistent = true
 socket_name = "agent/proxy.sock"
+unmatched = "deny"
 
-[[rules]]
-host = "localhost"
-mode = "intercept"
+[rules."localhost"]
 ports = [8443]
 paths = ["$path"]
 
-[[rules.inject]]
+[[rules."localhost".inject]]
 header = "Authorization"
 secret = "$token"
 format = "bearer"
 EOF
 }
 cat > "$project_root/config/proxy/sessions/nw-sandbox.toml" <<'EOF'
-version = 1
-operation = "create"
-
-[session]
+version = 2
 persistent = true
 socket_name = "nw-sandbox/proxy.sock"
+unmatched = "deny"
 
-[[rules]]
-host = "localhost"
-mode = "intercept"
+[rules."localhost"]
 ports = [9443]
 paths = ["/sandbox/**"]
 EOF
@@ -379,18 +371,16 @@ fi
 
 phase="check Baffle rejects missing secret material"
 cat > "$project_root/config/proxy/sessions/missing-secret.toml" <<'EOF'
-version = 1
-operation = "create"
-
-[session]
+version = 2
 persistent = false
 socket_name = "agent/missing-secret.sock"
-[[rules]]
-host = "localhost"
-mode = "intercept"
+unmatched = "deny"
+
+[rules."localhost"]
 ports = [8443]
 paths = ["/missing/**"]
-[[rules.inject]]
+
+[[rules."localhost".inject]]
 header = "Authorization"
 secret = "missing-token"
 format = "bearer"

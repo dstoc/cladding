@@ -67,13 +67,14 @@ For example, a session can restrict interception to paths on one exact host
 and use a symbolic credential name:
 
 ```toml
-[[rules]]
-host = "registry.example"
-mode = "intercept"
-ports = [443]
+version = 2
+persistent = true
+unmatched = "deny"
+
+[rules."registry.example"]
 paths = ["/v2/**"]
 
-[[rules.inject]]
+[[rules."registry.example".inject]]
 header = "Authorization"
 secret = "registry-token"
 format = "bearer"

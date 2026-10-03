@@ -1,6 +1,6 @@
 # Embedded Baffle binary
 
-Cladding embeds `baffle-proxy` **0.2.0** from crates.io. The package publishes
+Cladding embeds `baffle-proxy` **1.0.0** from crates.io. The package publishes
 the `baffle` executable and declares Rust 1.96 as its minimum supported
 version. Cladding pins that version in `build.rs` and invokes Cargo with
 `--locked`.
@@ -49,10 +49,34 @@ crate graph is the source of the executable and its release notices.
 
 ## Redistribution notices
 
-`baffle-proxy` 0.2.0 declares the MIT license. The Baffle executable also
+`baffle-proxy` 1.0.0 declares the MIT license. The Baffle executable also
 contains code from its locked dependencies, and each dependency keeps its own
 license terms. Release archives include `THIRD_PARTY_NOTICES.md`, the upstream
 `Cargo.lock` when present in the published crate, and license or notice files
 shipped in each crate archive. The notice file points to each copied file under
 `licenses/<crate>-<version>/`. Review entries with no declared license before
 publishing a release.
+
+## Session file migration
+
+Baffle 1.0 accepts session files in version 2 format. Cladding's generated
+files use this format. `cladding init` does not rewrite files that already
+exist, so migrate existing version 1 session files before you start or reload
+the proxy after upgrading Cladding.
+
+For each session file:
+
+1. Change `version = 1` to `version = 2`.
+2. Remove `operation = "create"`.
+3. Move `persistent` and `socket_name` from `[session]` to the document root.
+4. Replace each `[[rules]]` entry and its `host` field with a hostname-keyed
+   table such as `[rules."example.com"]`.
+5. Move that rule's `mode`, `ports`, and `paths` fields into its hostname
+   table. Change `[[rules.inject]]` to `[[rules."example.com".inject]]` for
+   each injection. Omit `ports = [443]` when port 443 is the only allowed
+   port. A tunnel rule can omit `mode = "tunnel"`. Baffle infers interception
+   from `paths` or `inject`.
+
+Cladding's generated sessions set `unmatched = "deny"` to keep the existing
+default-deny policy for hostnames that have no rule. Keep this setting unless
+you intend to allow unmatched HTTPS hostnames.
