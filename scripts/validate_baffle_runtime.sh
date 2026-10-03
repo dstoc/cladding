@@ -488,7 +488,14 @@ jq -s -e 'any(.[]; .path == "/authorized/curl" and .authorization == "old")
 
 phase="verify persistent CA reuse and normal shutdown"
 podman rm -f "$origin_name" >/dev/null
+shutdown_started_ns=$(date +%s%N)
 "$cladding_bin" --cladding-dir "$project_root" down
+shutdown_finished_ns=$(date +%s%N)
+shutdown_elapsed_ms=$(((shutdown_finished_ns - shutdown_started_ns) / 1000000))
+if [ "$shutdown_elapsed_ms" -ge 8000 ]; then
+  echo "cladding down took ${shutdown_elapsed_ms} ms; expected less than 8000 ms" >&2
+  exit 1
+fi
 ca_after=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
 test "$ca_before" = "$ca_after"
 "$cladding_bin" --cladding-dir "$project_root" up
