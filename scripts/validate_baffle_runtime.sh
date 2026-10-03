@@ -538,24 +538,47 @@ if [ -z "$run_root" ]; then
   echo "one-off runtime did not expose its private CA while active" >&2
   exit 1
 fi
+phase="verify one-off CA differs from persistent project CA"
 run_ca=$(sha256sum "$run_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
-test "$run_ca" != "$ca_before"
+if [ "$run_ca" = "$ca_before" ]; then
+  echo "one-off runtime reused the persistent project CA" >&2
+  exit 1
+fi
+phase="verify one-off secrets directory is private and empty"
 attempt=0
 while [ ! -d "$run_root/credentials/baffle/secrets" ] && [ "$attempt" -lt 30 ]; do
   attempt=$((attempt + 1))
   sleep 1
 done
-test -d "$run_root/credentials/baffle/secrets"
-test -z "$(find "$run_root/credentials/baffle/secrets" -mindepth 1 -print -quit)"
+if [ ! -d "$run_root/credentials/baffle/secrets" ]; then
+  echo "one-off runtime did not create its private secrets directory" >&2
+  exit 1
+fi
+if [ -n "$(find "$run_root/credentials/baffle/secrets" -mindepth 1 -print -quit)" ]; then
+  echo "one-off runtime copied project secrets into its private credentials" >&2
+  exit 1
+fi
+phase="verify one-off command preserves its nonzero exit status"
 set +e
 wait "$run_pid"
 set -e
 run_status=$(cat "$temp_root/run.status")
 run_pid=
-test "$run_status" -eq 7
-test ! -e "$run_root"
+if [ "$run_status" -ne 7 ]; then
+  echo "one-off command exited with status $run_status; expected 7" >&2
+  exit 1
+fi
+phase="verify one-off runtime root cleanup"
+if [ -e "$run_root" ]; then
+  echo "one-off runtime root remains after the command exits: $run_root" >&2
+  exit 1
+fi
+phase="verify one-off Podman resource cleanup"
 run_name=$(sed -n 's/^starting one-off instance: //p' "$temp_root/run.log" | head -n 1)
-test -n "$run_name"
+if [ -z "$run_name" ]; then
+  echo "one-off command did not report its runtime name" >&2
+  exit 1
+fi
 if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sandbox)(-instance)?$" >/dev/null; then
   echo "one-off runtime left a Podman resource behind" >&2
   exit 1
