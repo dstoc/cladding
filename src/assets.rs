@@ -369,10 +369,20 @@ mod tests {
         let daemon_path = temp.join("proxy/daemon.toml");
         let edited = "# user configuration\n[secrets]\nallowed = [\"model-api\"]\n";
         fs::write(&daemon_path, edited).expect("edit daemon config");
+        let session_path = temp.join("proxy/sessions/agent.toml");
+        let session_edited = r#"version = 2
+persistent = true
+socket_name = "agent/proxy.sock"
+unmatched = "deny"
+
+[rules."registry.example"]
+"#;
+        fs::write(&session_path, session_edited).expect("edit agent session");
 
         materialize_config(&temp).expect("materialize configuration again");
 
         assert_eq!(fs::read_to_string(daemon_path).unwrap(), edited);
+        assert_eq!(fs::read_to_string(session_path).unwrap(), session_edited);
         fs::remove_dir_all(temp).expect("remove temporary configuration");
     }
 
@@ -444,10 +454,10 @@ mod tests {
         assert_eq!(session["persistent"].as_bool(), Some(true));
         assert_eq!(session["socket_name"].as_str(), Some(socket_name));
         assert_eq!(session["unmatched"].as_str(), Some("deny"));
-        let rule = &session["rules"]["example.com"];
-        assert!(rule.is_table(), "hostname-keyed rule should be a table");
-        assert!(rule.get("mode").is_none());
-        assert!(rule.get("ports").is_none());
+        assert!(
+            session.get("rules").is_none(),
+            "generated policy must have no explicit allow rules"
+        );
     }
 
     fn create_temp_dir(name: &str) -> PathBuf {

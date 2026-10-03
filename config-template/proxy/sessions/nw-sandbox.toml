@@ -3,4 +3,6 @@ persistent = true
 socket_name = "nw-sandbox/proxy.sock"
 unmatched = "deny"
 
-[rules."example.com"]
+# Add a hostname table below to allow a destination.
+# For example, this table allows HTTPS through CONNECT to api.example.com:
+# [rules."api.example.com"]

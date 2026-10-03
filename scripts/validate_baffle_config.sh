@@ -121,6 +121,19 @@ report_failure_output() {
   echo "::error title=$title::$message output=$details"
 }
 
+install_socket_test_rule() {
+  rule_component=$1
+  cat > "$project_root/config/proxy/sessions/$rule_component.toml" <<EOF
+version = 2
+persistent = true
+socket_name = "$rule_component/proxy.sock"
+unmatched = "deny"
+
+[rules."example.com"]
+EOF
+  podman exec "$relay_proxy_name" /opt/tools/bin/baffle reload --all
+}
+
 rootless=$(podman info --format '{{.Host.Security.Rootless}}')
 if [ "$rootless" != true ]; then
   echo "Baffle config validation requires rootless Podman" >&2
@@ -142,6 +155,17 @@ current_phase="configure Baffle fixture"
 jq '.agent.image = "docker.io/library/debian:trixie-slim" | .nw_sandbox.image = "docker.io/library/debian:trixie-slim"' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
+for session_file in agent.toml nw-sandbox.toml; do
+  session_path="$project_root/config/proxy/sessions/$session_file"
+  if ! grep -Fqx 'unmatched = "deny"' "$session_path"; then
+    echo "generated Baffle session does not deny unmatched hosts: $session_path" >&2
+    exit 1
+  fi
+  if grep -Eq '^\[\[?rules\.' "$session_path"; then
+    echo "generated Baffle session contains an active allow rule: $session_path" >&2
+    exit 1
+  fi
+done
 current_phase="build Cladding proxy image"
 "$cladding_bin" --cladding-dir "$project_root" build
 current_phase="verify embedded Baffle binary"
@@ -193,6 +217,51 @@ verify_scoped_socket_access() {
     set -- podman run
   fi
   output_file="$temp_root/socket-test-$component-$socket_runtime.log"
+  if [ "$component" = agent ]; then
+    test_rule_enabled=$socket_test_rule_agent
+  else
+    test_rule_enabled=$socket_test_rule_nw_sandbox
+  fi
+  if [ "$test_rule_enabled" != true ]; then
+    denial_output_file="$temp_root/socket-denial-$component-$socket_runtime.log"
+    if "$@" --rm --network none --userns keep-id \
+      --user "$container_uid:$container_gid" \
+      --volume "$component_mount" \
+      --entrypoint /bin/sh "$socket_test_image" -ec '
+        socket_path=$1
+        test -S "$socket_path"
+        socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr \
+          UNIX-CONNECT:"$socket_path" &
+        bridge_pid=$!
+        trap '\''kill "$bridge_pid" 2>/dev/null || true; wait "$bridge_pid" 2>/dev/null || true'\'' EXIT
+        sleep 1
+        if curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+          --proxy http://127.0.0.1:3128 --output /dev/null https://example.com/; then
+          echo "generated Baffle policy unexpectedly allowed example.com" >&2
+          exit 88
+        fi
+      ' socket-denial "/run/cladding/proxy/$component/proxy.sock" \
+      >"$denial_output_file" 2>&1; then
+      :
+    else
+      status=$?
+      cat "$denial_output_file" >&2
+      if [ "$status" -eq 88 ]; then
+        echo "generated Baffle policy unexpectedly allowed example.com for $component" >&2
+      else
+        report_failure_output "Baffle default-deny socket check failed" \
+          "component=$component runtime=$socket_runtime exit=$status" "$denial_output_file"
+      fi
+      exit "$status"
+    fi
+
+    install_socket_test_rule "$component"
+    if [ "$component" = agent ]; then
+      socket_test_rule_agent=true
+    else
+      socket_test_rule_nw_sandbox=true
+    fi
+  fi
   if "$@" --rm --network none --userns keep-id \
     --user "$container_uid:$container_gid" \
     --volume "$component_mount" \
@@ -222,6 +291,12 @@ run_proxy_startup() {
   name=$1
   sandbox_enabled=$2
   sandbox_state=$3
+  cp "$script_dir/../config-template/proxy/sessions/agent.toml" \
+    "$project_root/config/proxy/sessions/agent.toml"
+  cp "$script_dir/../config-template/proxy/sessions/nw-sandbox.toml" \
+    "$project_root/config/proxy/sessions/nw-sandbox.toml"
+  socket_test_rule_agent=false
+  socket_test_rule_nw_sandbox=false
   relay_proxy_name=$name
   socket_dir="$temp_root/sockets-$name"
   current_phase="start proxy ($name)"
