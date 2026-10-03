@@ -19,7 +19,7 @@ const CA_INIT_PENDING_FILE: &str = ".ca-init-pending";
 /// Existing CA material is validated and never replaced. Only a newly created
 /// credentials directory is allowed to defer CA creation until runtime startup.
 pub fn ensure_baffle_credentials(project_root: &Path) -> Result<()> {
-    ensure_baffle_credentials_inner(project_root, None).map_err(Error::from)
+    ensure_baffle_credentials_inner(project_root, None, false).map_err(Error::from)
 }
 
 /// Ensure valid CA material exists, using the supplied Baffle initializer only
@@ -28,14 +28,32 @@ pub fn ensure_baffle_ca(
     project_root: &Path,
     mut initialize_ca: impl FnMut() -> anyhow::Result<()>,
 ) -> Result<()> {
-    ensure_baffle_credentials_inner(project_root, Some(&mut initialize_ca)).map_err(Error::from)
+    ensure_baffle_credentials_inner(project_root, Some(&mut initialize_ca), false)
+        .map_err(Error::from)
+}
+
+/// Validate the persistent Baffle CA without bootstrapping it.
+pub fn validate_baffle_ca(project_root: &Path) -> Result<()> {
+    ensure_baffle_credentials_inner(project_root, None, true).map_err(Error::from)
 }
 
 fn ensure_baffle_credentials_inner(
     project_root: &Path,
     initialize_ca: Option<&mut dyn FnMut() -> anyhow::Result<()>>,
+    require_ca: bool,
 ) -> anyhow::Result<()> {
     let credentials_root = project_root.join(CREDENTIALS_DIR);
+    if require_ca && let Err(error) = fs::symlink_metadata(&credentials_root) {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            bail!("Baffle CA is not initialized; run `cladding build` to initialize it");
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "failed to inspect Baffle credentials directory {}",
+                credentials_root.display()
+            )
+        });
+    }
     ensure_private_directory(&credentials_root)?;
     let _lock = acquire_credentials_lock(&credentials_root)?;
     remove_stale_staging_directories(&credentials_root)?;
@@ -53,6 +71,9 @@ fn ensure_baffle_credentials_inner(
             set_mode(&baffle_dir, 0o700)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if require_ca {
+                bail!("Baffle CA is not initialized; run `cladding build` to initialize it");
+            }
             create_credentials_atomically(&credentials_root, &baffle_dir)?;
         }
         Err(error) => {
@@ -74,6 +95,9 @@ fn ensure_baffle_credentials_inner(
         remove_ca_init_pending_marker(&baffle_dir)?;
     } else if ca_init_pending {
         validate_ca_init_pending_marker(&baffle_dir)?;
+        if initialize_ca.is_none() && require_ca {
+            bail!("Baffle CA is not initialized; run `cladding build` to initialize it");
+        }
     } else {
         validate_existing_ca(&baffle_dir)?;
     }
@@ -664,6 +688,47 @@ mod tests {
     }
 
     #[test]
+    fn validation_rejects_pending_ca_without_bootstrapping_it() {
+        let root = temp_project();
+        ensure_baffle_credentials(&root).unwrap();
+        let baffle_dir = root.join("credentials/baffle");
+        let pending = baffle_dir.join(CA_INIT_PENDING_FILE);
+
+        let error = validate_baffle_ca(&root).unwrap_err().to_string();
+
+        assert!(error.contains("run `cladding build`"), "{error}");
+        assert!(pending.is_file());
+        assert!(!baffle_dir.join(CERTIFICATE_FILE).exists());
+        assert!(!baffle_dir.join(PRIVATE_KEY_FILE).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validation_rejects_corrupt_ca_without_replacing_it() {
+        let root = temp_project();
+        let baffle_dir = root.join("credentials/baffle");
+        ensure_baffle_ca(&root, || {
+            write_generated_ca(&baffle_dir);
+            Ok(())
+        })
+        .unwrap();
+        let cert_path = baffle_dir.join(CERTIFICATE_FILE);
+        fs::write(&cert_path, b"corrupt certificate").unwrap();
+        let corrupt_certificate = fs::read(&cert_path).unwrap();
+        let private_key = fs::read(baffle_dir.join(PRIVATE_KEY_FILE)).unwrap();
+
+        let error = validate_baffle_ca(&root).unwrap_err().to_string();
+
+        assert!(error.contains("invalid Baffle CA material"), "{error}");
+        assert_eq!(fs::read(cert_path).unwrap(), corrupt_certificate);
+        assert_eq!(
+            fs::read(baffle_dir.join(PRIVATE_KEY_FILE)).unwrap(),
+            private_key
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn missing_ca_after_success_is_reported_without_reinitializing() {
         let root = temp_project();
         let baffle_dir = root.join("credentials/baffle");
@@ -674,6 +739,12 @@ mod tests {
         .unwrap();
         fs::remove_file(baffle_dir.join(CERTIFICATE_FILE)).unwrap();
         fs::remove_file(baffle_dir.join(PRIVATE_KEY_FILE)).unwrap();
+
+        let validation_error = validate_baffle_ca(&root).unwrap_err().to_string();
+        assert!(
+            validation_error.contains("incomplete Baffle CA"),
+            "{validation_error}"
+        );
 
         let mut init_count = 0;
         let error = ensure_baffle_ca(&root, || {

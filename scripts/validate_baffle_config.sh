@@ -185,17 +185,9 @@ run_baffle_ca_init() {
     ca init --config /opt/config/proxy/daemon.toml
 }
 
-current_phase="initialize CA with Baffle daemon configuration"
-ca_init_output="$temp_root/ca-init.log"
-if run_baffle_ca_init >"$ca_init_output" 2>&1; then
-  cat "$ca_init_output"
-else
-  status=$?
-  cat "$ca_init_output" >&2
-  report_failure_output "Baffle CA initialization failed" \
-    "exit=$status config=/opt/config/proxy/daemon.toml" "$ca_init_output"
-  exit "$status"
-fi
+current_phase="validate CA initialized by cladding build"
+test -f "$project_root/credentials/baffle/ca.crt"
+test -f "$project_root/credentials/baffle/ca-key.pem"
 test "$(stat_mode "$project_root/credentials/baffle/ca.crt")" = 644
 test "$(stat_mode "$project_root/credentials/baffle/ca-key.pem")" = 600
 if [ "$(stat_uid "$project_root/credentials/baffle/ca.crt")" != "$runner_uid" ]; then
@@ -208,14 +200,19 @@ if [ "$(stat_uid "$project_root/credentials/baffle/ca-key.pem")" != "$runner_uid
 fi
 ca_init_cert_before=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
 ca_init_key_before=$(sha256sum "$project_root/credentials/baffle/ca-key.pem" | cut -d ' ' -f 1)
+
+current_phase="verify Baffle refuses to overwrite the initialized CA"
+ca_init_output="$temp_root/ca-init.log"
 if run_baffle_ca_init >"$ca_init_output" 2>&1; then
+  cat "$ca_init_output" >&2
   echo "Baffle CA initialization unexpectedly replaced existing CA material" >&2
   exit 1
-fi
-if ! grep -F "refusing to overwrite existing" "$ca_init_output" >/dev/null; then
-  cat "$ca_init_output" >&2
-  echo "Baffle CA initialization did not report the existing-file conflict" >&2
-  exit 1
+else
+  if ! grep -F "refusing to overwrite existing" "$ca_init_output" >/dev/null; then
+    cat "$ca_init_output" >&2
+    echo "Baffle CA initialization did not report the existing-file conflict" >&2
+    exit 1
+  fi
 fi
 test "$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)" = "$ca_init_cert_before"
 test "$(sha256sum "$project_root/credentials/baffle/ca-key.pem" | cut -d ' ' -f 1)" = "$ca_init_key_before"

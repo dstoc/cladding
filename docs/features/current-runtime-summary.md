@@ -19,9 +19,16 @@ This file is the quick reference for the current Cladding runtime.
 - Cladding does not wait for Baffle sessions to become ready before it starts execution containers. Early requests to the local proxy can fail during startup.
 
 ## CLI execution and lifecycle
+`cladding init` creates project configuration and layout. `cladding build`
+builds local images, refreshes embedded tools, and initializes the persistent
+project Baffle CA when needed. Later builds validate and reuse that CA.
+`cladding check` and `cladding up` validate the same project prerequisites,
+including the CA. They do not initialize or rotate persistent CA material.
+
 `cladding run <command> [args...]` creates a unique temporary runtime, runs
 the command in its agent container, and removes the runtime when the command
-ends. Each invocation uses private runtime and credential paths.
+ends. Each invocation uses private runtime and credential paths and initializes
+its own temporary CA without requiring a project build.
 
 `cladding exec [--target agent|nw-sandbox|fs-sandbox] <command> [args...]`
 runs a command in an already-running project. It defaults to `agent`; a
@@ -36,15 +43,16 @@ sandbox can read those non-secret configuration files, but the Baffle control
 socket stays private inside the proxy container.
 
 Each project has a persistent CA under `.cladding/credentials/baffle/`.
-During the first `cladding up`, Cladding runs Baffle's
-`ca init --config /opt/config/proxy/daemon.toml` in the selected proxy image
-before it creates the runtime containers. Cladding validates the CA and reuses
-it on later starts. After each agent and enabled network-sandbox container
-starts, Cladding uses `podman exec --user 0` to install the public certificate
-in that container's system trust store. This exec uses container root; the
-application remains unprivileged. The default image sets
-`NODE_USE_SYSTEM_CA=1`. Custom images must provide a compatible command to
-install the certificate. The filesystem sandbox does not receive the CA.
+During the first successful `cladding build`, Cladding runs Baffle's
+`ca init --config /opt/config/proxy/daemon.toml` in the selected proxy image.
+Cladding validates and reuses the CA on later builds. `check` and `up` validate
+the CA and fail when it is missing or invalid; `up` never initializes it.
+After each agent and enabled network-sandbox container starts, Cladding uses
+`podman exec --user 0` to install the public certificate in that container's
+system trust store. This exec uses container root; the application remains
+unprivileged. The default image sets `NODE_USE_SYSTEM_CA=1`. Custom images
+must provide a compatible command to install the certificate. The filesystem
+sandbox does not receive the CA.
 
 Injection secrets are provisioned separately under
 `.cladding/credentials/baffle/secrets/`. The proxy receives the credentials

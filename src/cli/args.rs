@@ -29,13 +29,13 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum CommandSpec {
-    /// Build local container images and refresh embedded tools
+    /// Build local images, refresh embedded tools, and initialize the project Baffle CA
     Build,
-    /// Create default config, Baffle credentials, and mount directories
+    /// Create project config and runtime layout
     Init { name: Option<String> },
-    /// Check requirements
+    /// Check project requirements, including the Baffle CA
     Check,
-    /// Start the proxy and enabled execution containers
+    /// Validate requirements and start the proxy and enabled execution containers
     Up {
         /// Show Podman commands before executing them
         #[arg(short, long)]
@@ -259,9 +259,10 @@ mod tests {
         for (name, expected) in [
             ("run", "temporary runtime"),
             ("exec", "already-running"),
-            ("init", "Baffle credentials"),
-            ("build", "embedded tools"),
-            ("up", "proxy"),
+            ("init", "runtime layout"),
+            ("build", "Baffle CA"),
+            ("check", "Baffle CA"),
+            ("up", "Validate requirements"),
             ("reload-proxy", "Baffle sessions"),
         ] {
             let summary = command

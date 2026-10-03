@@ -23,8 +23,14 @@ Use this setup sequence:
 cladding init
 # Edit .cladding/config/proxy/daemon.toml and the session files as needed.
 cladding build
+cladding check
 cladding up
 ```
+
+`cladding build` initializes the persistent project CA when needed and
+validates and reuses it on later builds. `cladding check` and `cladding up`
+validate the CA but do not initialize or rotate it. Run `cladding build` before
+`up` when the project CA is not initialized.
 
 `cladding up` starts the Baffle proxy pod and enabled execution containers. The
 proxy starts its daemon and creates the persistent agent session. It creates
@@ -106,11 +112,13 @@ read, rewrite, or log secret values. The proxy mounts the credentials
 directory read-only. Execution containers do not receive it.
 
 The project CA and injection credentials are separate. `cladding init`
-creates private credential storage. On the first `cladding up`, Cladding runs
+creates private credential storage but does not create the CA. On the first
+successful `cladding build`, Cladding runs
 `baffle ca init --config /opt/config/proxy/daemon.toml` in the selected proxy
-image before it creates the runtime containers. Baffle writes the configured
-CA pair under `.cladding/credentials/baffle/`. Cladding validates the pair and
-reuses it on later starts. Baffle creates an ECDSA P-256 certificate that
+image. Baffle writes the configured CA pair under
+`.cladding/credentials/baffle/`. Cladding validates and reuses the pair on
+later builds. `cladding check` and `cladding up` validate it before runtime
+creation. Baffle creates an ECDSA P-256 certificate that
 expires after 365 days, a mode-`0600` private key, and a mode-`0644` public
 certificate. A missing or invalid pair after bootstrap is an error; Cladding
 does not replace it automatically.
@@ -127,7 +135,7 @@ may reject intercepted connections.
 
 To rotate the CA, stop the project and move the full
 `.cladding/credentials/baffle/` directory to a protected backup outside
-version control. Start the project to generate a new CA, then provision the
+version control. Run `cladding build` to generate a new CA, then provision the
 required secret files again. Distribute the new public certificate and update
 client trust stores before removing trust in the old CA. The backup includes
 the private CA key and any injection secrets.
