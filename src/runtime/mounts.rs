@@ -25,6 +25,7 @@ impl RuntimeSpec {
 
 pub(super) fn build_proxy_mounts(
     project_root: &Path,
+    runtime_root: &Path,
     _custom_mounts: &[RuntimeCustomMount],
 ) -> Vec<RuntimeMount> {
     let mounts = vec![
@@ -53,14 +54,14 @@ pub(super) fn build_proxy_mounts(
             mount_path: "/opt/scripts/proxy_startup.sh".to_string(),
             read_only: true,
             source: RuntimeMountSource::HostPath {
-                path: project_root.join("runtime/scripts/proxy_startup.sh"),
+                path: runtime_root.join("runtime/scripts/proxy_startup.sh"),
             },
         },
         RuntimeMount {
             mount_path: RUNTIME_PROXY_MOUNT_PATH.to_string(),
             read_only: false,
             source: RuntimeMountSource::HostPath {
-                path: project_root
+                path: runtime_root
                     .join("runtime/sockets")
                     .join(RUNTIME_PROXY_SOCKET_DIR),
             },
@@ -72,6 +73,7 @@ pub(super) fn build_proxy_mounts(
 pub(super) fn build_agent_mounts(
     project_root: &Path,
     workspace_root: &Path,
+    runtime_root: &Path,
     _custom_mounts: &[RuntimeCustomMount],
 ) -> Vec<RuntimeMount> {
     vec![
@@ -114,7 +116,7 @@ pub(super) fn build_agent_mounts(
             mount_path: "/home/user/workspace/.cladding".to_string(),
             read_only: true,
             source: RuntimeMountSource::GeneratedEmptyMask {
-                path: project_root.join("runtime/empty-mask"),
+                path: runtime_root.join("runtime/empty-mask"),
             },
         },
     ]
@@ -123,6 +125,7 @@ pub(super) fn build_agent_mounts(
 pub(super) fn build_sandbox_mounts(
     project_root: &Path,
     workspace_root: &Path,
+    runtime_root: &Path,
     _custom_mounts: &[RuntimeCustomMount],
 ) -> Vec<RuntimeMount> {
     vec![
@@ -165,7 +168,7 @@ pub(super) fn build_sandbox_mounts(
             mount_path: "/home/user/workspace/.cladding".to_string(),
             read_only: true,
             source: RuntimeMountSource::GeneratedEmptyMask {
-                path: project_root.join("runtime/empty-mask"),
+                path: runtime_root.join("runtime/empty-mask"),
             },
         },
     ]
@@ -230,6 +233,7 @@ pub(super) fn apply_custom_mounts(
 
 pub(super) fn build_custom_mounts(
     project_root: &Path,
+    runtime_root: &Path,
     project_name: &str,
     mounts: &[ResolvedMountConfig],
 ) -> Vec<RuntimeCustomMount> {
@@ -244,7 +248,7 @@ pub(super) fn build_custom_mounts(
         })
         .collect::<Vec<_>>();
 
-    let empty_mask = project_root.join("runtime/empty-mask");
+    let empty_mask = runtime_root.join("runtime/empty-mask");
     let protected_root = canonical_or_normalized(project_root);
     for mount in mounts.iter().filter(|mount| {
         !mount.ignore && matches!(mount.mount_type, MountType::Readonly | MountType::Overlay)
@@ -471,7 +475,7 @@ mod tests {
             ],
             false,
         );
-        let custom_mounts = build_custom_mounts(project_root, "demo", &config.mounts);
+        let custom_mounts = build_custom_mounts(project_root, project_root, "demo", &config.mounts);
 
         assert!(matches!(
             &custom_mounts[0].source,
@@ -494,12 +498,12 @@ mod tests {
 
         let workspace_root = project_root.join("..");
         let agent_mounts = apply_custom_mounts(
-            build_agent_mounts(project_root, &workspace_root, &custom_mounts),
+            build_agent_mounts(project_root, &workspace_root, project_root, &custom_mounts),
             &custom_mounts,
             MountTarget::Agent,
         );
         let nw_sandbox_mounts = apply_custom_mounts(
-            build_sandbox_mounts(project_root, &workspace_root, &custom_mounts),
+            build_sandbox_mounts(project_root, &workspace_root, project_root, &custom_mounts),
             &custom_mounts,
             MountTarget::NwSandbox,
         );

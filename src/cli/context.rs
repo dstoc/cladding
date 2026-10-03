@@ -6,14 +6,14 @@ use cladding::config::{
 use cladding::error::{Error, Result};
 use cladding::fs_utils::canonicalize_path;
 use cladding::podman::list_running_projects;
-use cladding::runtime::{RuntimeMount, RuntimeMountSource, RuntimeSpec};
+use cladding::runtime::RuntimeSpec;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub(super) struct Context {
     pub(super) project_root: PathBuf,
     pub(super) workspace_root: PathBuf,
-    baffle_secrets_project_root: PathBuf,
+    pub(super) runtime_root: PathBuf,
     config_source: ConfigSource,
 }
 
@@ -32,11 +32,10 @@ impl Context {
         workspace_root: PathBuf,
         config_source: ConfigSource,
     ) -> Self {
-        let baffle_secrets_project_root = project_root.clone();
         Self {
+            runtime_root: project_root.clone(),
             project_root,
             workspace_root,
-            baffle_secrets_project_root,
             config_source,
         }
     }
@@ -68,39 +67,24 @@ impl Context {
 
     pub(super) fn with_resolved_config(
         &self,
-        project_root: PathBuf,
+        runtime_root: PathBuf,
         config: ExecutionConfig,
     ) -> Self {
-        let mut context = Self::new(
-            project_root,
-            self.workspace_root.clone(),
-            ConfigSource::Resolved(Box::new(config)),
-        );
-        context.baffle_secrets_project_root = self.baffle_secrets_project_root.clone();
-        context
+        Self {
+            project_root: self.project_root.clone(),
+            workspace_root: self.workspace_root.clone(),
+            runtime_root,
+            config_source: ConfigSource::Resolved(Box::new(config)),
+        }
     }
 
     pub(super) fn runtime_spec(&self, config: &ExecutionConfig) -> Result<RuntimeSpec> {
-        let mut spec = RuntimeSpec::build_with_workspace_root(
+        let spec = RuntimeSpec::build_with_roots(
             &self.project_root,
             &self.workspace_root,
+            &self.runtime_root,
             config,
         );
-        if self.baffle_secrets_project_root != self.project_root
-            && let Some(source) = cladding::credentials::validate_baffle_secrets_source(
-                &self.baffle_secrets_project_root,
-            )?
-        {
-            for container in &mut spec.proxy.containers {
-                container.mounts.push(RuntimeMount {
-                    mount_path: "/opt/credentials/baffle/secrets".to_string(),
-                    read_only: true,
-                    source: RuntimeMountSource::HostPath {
-                        path: source.clone(),
-                    },
-                });
-            }
-        }
         Ok(spec)
     }
 

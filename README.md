@@ -118,7 +118,7 @@ project.
   cladding run -v -- codex exec "Implement the task"
   ```
 
-  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It snapshots the selected project's `.cladding/config/` tree when the command starts, then fills in any missing default files. The snapshot includes Baffle session policies and sandbox policies. It uses the selected session filenames from `cladding.json`; later edits to project config do not change the active run. The run does not write its generated runtime state to the source tree. Cladding reads the selected JSON configuration at startup. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It uses the selected project's `.cladding/config/`, `tools/`, `credentials/`, and `home/` directly, including selected Baffle session files and the persistent project CA. It creates only runtime files and sockets in the private runtime directory, then removes that directory when the command ends. Run requires a project initialized with `cladding init` and prepared with `cladding build`; it validates the project CA and does not create or rotate it. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
 
   `cladding run` keeps successful startup and cleanup diagnostics quiet by default. Use `-v` or `--verbose` to show Podman and certificate setup output, instance details, and cleanup activity.
 
@@ -210,11 +210,10 @@ After Cladding creates the agent and enabled network-sandbox containers, it runs
 Custom agent and network-sandbox images must support the same initialization command. They need `sh`, `cp`, a writable `/usr/local/share/ca-certificates/` directory, and an `update-ca-certificates` command that adds certificates from that directory to the system trust store. Images with another trust-store layout can provide a compatible command in the image. Cladding does not provide a per-image initialization hook. Applications that use a private CA bundle or another application-specific trust store may need a separate import step. Certificate-pinned applications can reject intercepted connections even when the system trusts the CA.
 
 `cladding down` and `cladding destroy` remove runtime resources but keep the
-project CA and secrets. `cladding run` initializes a separate temporary CA and
-empty private secrets directory before it creates the runtime, then removes
-them during cleanup. For a selected project, the proxy mounts that project's
-secrets directory separately as read-only; it does not copy secret values into
-the temporary runtime. A run without a project has no injection secrets.
+project CA and secrets. `cladding run` uses the selected project's CA and
+credentials read-only. It does not create a separate CA or copy credentials into
+the temporary runtime. Its sockets and other generated runtime files stay in
+the UUID-scoped runtime directory and are removed during cleanup.
 
 To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then run `cladding build` to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
 

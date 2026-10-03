@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub struct RuntimeSpec {
     pub project_name: String,
     pub project_root: PathBuf,
+    pub runtime_root: PathBuf,
     pub use_runsc: bool,
     pub proxy: RuntimePod,
     pub agent: RuntimePod,

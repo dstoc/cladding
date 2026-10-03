@@ -4,7 +4,7 @@ use cladding::assets::tool_files;
 use cladding::config::{DEFAULT_PROXY_IMAGE, ExecutionConfig};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::is_executable;
-use cladding::podman::{initialize_baffle_ca, runsc_available};
+use cladding::podman::runsc_available;
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashSet;
 use std::fs;
@@ -15,14 +15,7 @@ pub(super) fn cmd_check(context: &Context) -> Result<()> {
     let legacy_config_entries_present = check_legacy_config_entries(context);
     let config = context.load_config()?;
     let spec = context.runtime_spec(&config)?;
-    check_project_readiness(
-        context,
-        &config,
-        &spec,
-        false,
-        false,
-        BaffleCaReadiness::Validate,
-    )?;
+    check_project_readiness(context, &config, &spec, false, false)?;
     if legacy_config_entries_present {
         return Err(Error::message("legacy config entries"));
     }
@@ -30,43 +23,24 @@ pub(super) fn cmd_check(context: &Context) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum BaffleCaReadiness {
-    Validate,
-    Initialize,
-}
-
-/// Check every project prerequisite needed before a persistent runtime starts.
-/// One-off runtimes use the same checks but initialize their private CA here.
+/// Check every project prerequisite needed before a runtime starts.
 pub(super) fn check_project_readiness(
     context: &Context,
     config: &ExecutionConfig,
     spec: &RuntimeSpec,
     verbose: bool,
     quiet_helpers: bool,
-    baffle_ca: BaffleCaReadiness,
 ) -> Result<()> {
     check_required_binaries(context, config)?;
     check_runsc_runtime(config, verbose, quiet_helpers)?;
     check_required_config_files(context, config)?;
     check_required_images(config, verbose, quiet_helpers)?;
-    check_baffle_ca_readiness(&context.project_root, baffle_ca, || {
-        initialize_baffle_ca(spec, verbose, quiet_helpers).map_err(anyhow::Error::new)
-    })?;
+    check_baffle_ca_readiness(&context.project_root)?;
     check_required_host_paths(spec)
 }
 
-fn check_baffle_ca_readiness(
-    project_root: &Path,
-    readiness: BaffleCaReadiness,
-    initialize_ca: impl FnMut() -> anyhow::Result<()>,
-) -> Result<()> {
-    match readiness {
-        BaffleCaReadiness::Validate => cladding::credentials::validate_baffle_ca(project_root),
-        BaffleCaReadiness::Initialize => {
-            cladding::credentials::ensure_baffle_ca(project_root, initialize_ca)
-        }
-    }
+fn check_baffle_ca_readiness(project_root: &Path) -> Result<()> {
+    cladding::credentials::validate_baffle_ca(project_root)
 }
 
 pub(super) fn check_required_binaries(context: &Context, config: &ExecutionConfig) -> Result<()> {
@@ -468,7 +442,6 @@ mod tests {
     use super::*;
     use cladding::assets::write_embedded_tools;
     use cladding::config::{ExecutionComponentConfig, ResolvedMountConfig};
-    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
@@ -477,55 +450,15 @@ mod tests {
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn readiness_validates_project_ca_but_bootstraps_an_ephemeral_ca() {
+    fn readiness_requires_a_project_ca_without_initializing_it() {
         let root = create_temp_dir("ca-readiness");
         cladding::credentials::ensure_baffle_credentials(&root).unwrap();
-        let baffle_dir = root.join("credentials/baffle");
-        let mut initializer_calls = 0;
 
-        let error = check_baffle_ca_readiness(&root, BaffleCaReadiness::Validate, || {
-            initializer_calls += 1;
-            anyhow::bail!("validation must not initialize a CA")
-        })
-        .unwrap_err()
-        .to_string();
+        let error = check_baffle_ca_readiness(&root).unwrap_err().to_string();
         assert!(error.contains("run `cladding build`"), "{error}");
-        assert_eq!(initializer_calls, 0);
-
-        check_baffle_ca_readiness(&root, BaffleCaReadiness::Initialize, || {
-            initializer_calls += 1;
-            write_test_ca(&baffle_dir)
-        })
-        .unwrap();
-        assert_eq!(initializer_calls, 1);
-        let certificate = fs::read(baffle_dir.join("ca.crt")).unwrap();
-
-        check_baffle_ca_readiness(&root, BaffleCaReadiness::Validate, || {
-            initializer_calls += 1;
-            anyhow::bail!("existing CA must be reused")
-        })
-        .unwrap();
-        assert_eq!(initializer_calls, 1);
-        assert_eq!(fs::read(baffle_dir.join("ca.crt")).unwrap(), certificate);
+        assert!(!root.join("credentials/baffle/ca.crt").exists());
+        assert!(!root.join("credentials/baffle/ca-key.pem").exists());
         fs::remove_dir_all(root).unwrap();
-    }
-
-    fn write_test_ca(baffle_dir: &std::path::Path) -> anyhow::Result<()> {
-        use time::{Duration, OffsetDateTime};
-
-        let mut params = CertificateParams::default();
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "Baffle Interception CA");
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        params.not_before = OffsetDateTime::now_utc() - Duration::days(1);
-        params.not_after = OffsetDateTime::now_utc() + Duration::days(3650);
-        let key_pair = KeyPair::generate()?;
-        let certificate = params.self_signed(&key_pair)?;
-        fs::write(baffle_dir.join("ca.crt"), certificate.pem())?;
-        fs::write(baffle_dir.join("ca-key.pem"), key_pair.serialize_pem())?;
-        Ok(())
     }
 
     #[test]
