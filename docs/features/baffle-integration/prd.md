@@ -175,7 +175,7 @@ Users or external secret managers provision one file per Baffle symbolic secret 
 
 The proxy container receives the full credentials directory read-only, with ownership mapped so its trusted UID can read the private files. The agent and network sandbox receive **only the public `ca.crt`**, as a separate read-only mount at `/run/cladding/ca/baffle.crt`. They must not receive the CA private key or injection secret files. Their existing read-only configuration mounts are unaffected.
 
-`cladding run` must retain its current private runtime and cleanup behavior. A one-off instance should have a private CA and runtime socket namespace; when an existing `.cladding` project has been explicitly selected, it may use its separately selected, read-only secret source without copying the secret values. When no project exists, create an ephemeral credentials directory with no injection secrets and remove it with the one-off runtime. The implementation should document any deliberate sharing of an existing project's persistent CA instead of accidentally depending on host paths.
+`cladding run` uses the selected project's existing config, tools, credentials, and home directly. This includes the selected Baffle session files, injection secrets, and persistent project CA. The project must be initialized and built before the run; the command validates the CA and never creates or rotates it. Each invocation creates a UUID-scoped runtime root for generated scripts, masks, sockets, containers, and volumes, then removes those resources during cleanup. It must not copy project config, tools, credentials, or home into that runtime root. Project symlinks must remain effective because runtime mounts use project paths directly.
 
 ## Proxy-container startup and supervision
 
@@ -244,7 +244,7 @@ Unit and integration coverage should establish:
 - The agent and enabled network sandbox receive distinct, correctly scoped data sockets; a disabled network sandbox produces no active Baffle session; the filesystem sandbox receives none.
 - Both execution containers can use intercepted HTTPS with a CA installed by `podman exec`; check the default `NODE_USE_SYSTEM_CA=1` behavior and representative curl/Git/Node applications.
 - Exact-host allow/deny, plaintext HTTP rejection, path-restricted interception, header injection and absence of secret material from execution-container mounts and logs.
-- Persistent project CA reuse, invalid/expired CA handling, secrets permissions, and `cladding run` isolation and cleanup.
+- Persistent project CA reuse, invalid/expired CA handling, secrets permissions, and `cladding run` shared project state with isolated runtime resources and cleanup.
 - Rootless Podman ownership and direct socket access; test `runsc` and macOS Podman-machine integration where Cladding claims support. Use a minimal trusted proxy-side bridge only if direct mapping cannot pass.
 - Reload reports changed, unchanged and failed sessions correctly, leaves established connections running, and picks up permitted credential changes on new connections.
 - Normal `up`, `down`, `destroy`, `run`, failure cleanup and container inventory without the former Squid sidecar. A test may wait for the proxy to become ready; production Cladding must not add a readiness barrier.

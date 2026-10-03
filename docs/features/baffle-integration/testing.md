@@ -29,8 +29,9 @@ it does not record credential values. It creates no external test service and
 requires no production readiness barrier.
 
 The Rust test suite also checks persistent CA reuse, invalid, expired, and
-partial CA material, credential file permissions, and one-off credential
-isolation without a container runtime.
+partial CA material, credential file permissions, direct project-state mounts
+for `cladding run`, symlinked tools, per-run runtime isolation, and runtime
+cleanup with mocked Podman.
 
 To run the client suite locally, build Cladding with the pinned Baffle binary
 and run these commands from the repository root:

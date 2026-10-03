@@ -1032,6 +1032,7 @@ mod tests {
         let spec = RuntimeSpec {
             project_name: "demo".to_string(),
             project_root: "/tmp/demo/.cladding".into(),
+            runtime_root: "/tmp/demo/.cladding".into(),
             use_runsc: false,
             proxy,
             agent: empty_pod("demo-agent"),
@@ -1081,6 +1082,7 @@ mod tests {
         let spec = RuntimeSpec {
             project_name: "demo".to_string(),
             project_root: "/tmp/demo/.cladding".into(),
+            runtime_root: "/tmp/demo/.cladding".into(),
             use_runsc: false,
             proxy: pod("demo-proxy"),
             agent: pod("demo-agent"),

@@ -35,15 +35,27 @@ impl RuntimeSpec {
         workspace_root: &Path,
         config: &ExecutionConfig,
     ) -> Self {
+        Self::build_with_roots(project_root, workspace_root, project_root, config)
+    }
+
+    pub fn build_with_roots(
+        project_root: &Path,
+        workspace_root: &Path,
+        runtime_root: &Path,
+        config: &ExecutionConfig,
+    ) -> Self {
         let project_root = project_root.to_path_buf();
         let workspace_root = workspace_root.to_path_buf();
-        let custom_mounts = build_custom_mounts(&project_root, &config.name, &config.mounts);
+        let runtime_root = runtime_root.to_path_buf();
+        let custom_mounts =
+            build_custom_mounts(&project_root, &runtime_root, &config.name, &config.mounts);
         let names = RuntimeNames::from_config(config);
 
-        let proxy = build_proxy_pod(&project_root, config, &names, &custom_mounts);
+        let proxy = build_proxy_pod(&project_root, &runtime_root, config, &names, &custom_mounts);
         let agent = build_agent_pod(
             &project_root,
             &workspace_root,
+            &runtime_root,
             config,
             &names,
             &custom_mounts,
@@ -52,6 +64,7 @@ impl RuntimeSpec {
             build_nw_sandbox_pod(
                 &project_root,
                 &workspace_root,
+                &runtime_root,
                 config,
                 component_name,
                 &custom_mounts,
@@ -60,6 +73,7 @@ impl RuntimeSpec {
         let fs_sandbox = names.fs_sandbox_name.as_ref().map(|component_name| {
             build_fs_sandbox_pod(
                 &project_root,
+                &runtime_root,
                 config,
                 &names,
                 component_name,
@@ -70,6 +84,7 @@ impl RuntimeSpec {
         Self {
             project_name: config.name.clone(),
             project_root,
+            runtime_root,
             use_runsc: config.use_runsc,
             proxy,
             agent,
@@ -81,11 +96,12 @@ impl RuntimeSpec {
 
 fn build_proxy_pod(
     project_root: &Path,
+    runtime_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
-    let mut mounts = build_proxy_mounts(project_root, custom_mounts);
+    let mut mounts = build_proxy_mounts(project_root, runtime_root, custom_mounts);
     if cfg!(target_os = "macos") {
         mounts.push(build_proxy_relay_volume_mount(
             &config.name,
@@ -148,22 +164,23 @@ fn build_proxy_pod(
 fn build_agent_pod(
     project_root: &Path,
     workspace_root: &Path,
+    runtime_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mut mounts = apply_custom_mounts(
-        build_agent_mounts(project_root, workspace_root, custom_mounts),
+        build_agent_mounts(project_root, workspace_root, runtime_root, custom_mounts),
         custom_mounts,
         MountTarget::Agent,
     );
     mounts.extend(build_scoped_socket_mount(
-        project_root,
+        runtime_root,
         RUNTIME_AGENT_INJECT_SOCKET_DIR,
         RUNTIME_AGENT_INJECT_MOUNT_PATH,
     ));
     mounts.extend(build_proxy_data_socket_mount(
-        project_root,
+        runtime_root,
         &config.name,
         "agent",
         RUNTIME_PROXY_AGENT_SOCKET_DIR,
@@ -171,14 +188,14 @@ fn build_agent_pod(
     ));
     if names.nw_sandbox_name.is_some() {
         mounts.extend(build_scoped_socket_mount(
-            project_root,
+            runtime_root,
             RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR,
             RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH,
         ));
     }
     if names.fs_sandbox_name.is_some() {
         mounts.extend(build_scoped_socket_mount(
-            project_root,
+            runtime_root,
             RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR,
             RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH,
         ));
@@ -255,24 +272,25 @@ fn build_agent_pod(
 fn build_nw_sandbox_pod(
     project_root: &Path,
     workspace_root: &Path,
+    runtime_root: &Path,
     config: &ExecutionConfig,
     component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimePod {
     let mut mounts = apply_custom_mounts(
-        build_sandbox_mounts(project_root, workspace_root, custom_mounts),
+        build_sandbox_mounts(project_root, workspace_root, runtime_root, custom_mounts),
         custom_mounts,
         MountTarget::NwSandbox,
     );
     mounts.extend(build_proxy_data_socket_mount(
-        project_root,
+        runtime_root,
         &config.name,
         "nw-sandbox",
         RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
         RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
     ));
     mounts.extend(build_scoped_socket_mount(
-        project_root,
+        runtime_root,
         RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR,
         RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH,
     ));
@@ -343,7 +361,7 @@ fn build_nw_sandbox_pod(
 }
 
 fn build_proxy_data_socket_mount(
-    project_root: &Path,
+    runtime_root: &Path,
     project_name: &str,
     component: &str,
     socket_dir: &str,
@@ -357,12 +375,13 @@ fn build_proxy_data_socket_mount(
             false,
         )]
     } else {
-        build_scoped_socket_mount(project_root, socket_dir, mount_path)
+        build_scoped_socket_mount(runtime_root, socket_dir, mount_path)
     }
 }
 
 fn build_fs_sandbox_pod(
     project_root: &Path,
+    runtime_root: &Path,
     config: &ExecutionConfig,
     _names: &RuntimeNames,
     component_name: &str,
@@ -374,7 +393,7 @@ fn build_fs_sandbox_pod(
         MountTarget::FsSandbox,
     );
     mounts.extend(build_scoped_socket_mount(
-        project_root,
+        runtime_root,
         RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR,
         RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH,
     ));

@@ -29,10 +29,10 @@ components have independent selections.
 
 `cladding check` validates the selected version 2 Baffle session file for each
 enabled component. A disabled network sandbox does not require its selected
-file. `cladding run` uses the same selected files from its private snapshot of
-the project's configuration. `cladding reload-proxy` reloads the active
-sessions from their selected files. To change a selection, recreate the proxy
-runtime with `cladding down` and `cladding up`.
+file. `cladding run` uses the selected files directly from the project config
+directory. `cladding reload-proxy` reloads the active sessions from their
+selected files. To change a selection, recreate the proxy runtime with
+`cladding down` and `cladding up`.
 
 Example `cladding.json`:
 

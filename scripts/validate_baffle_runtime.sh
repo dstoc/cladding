@@ -71,6 +71,9 @@ phase="initialize fixture"
   cd "$temp_root/workspace"
   "$cladding_bin" init "$project_name" >/dev/null
 )
+rmdir "$project_root/tools"
+mkdir -p "$temp_root/workspace/tools"
+ln -s ../tools "$project_root/tools"
 cmp "$script_dir/../config-template/nw_sandbox/main.rego" \
   "$project_root/config/nw_sandbox/main.rego"
 cmp "$script_dir/../config-template/nw_sandbox/curl.rego" \
@@ -152,6 +155,7 @@ podman build --pull=never -t "$origin_image" \
 
 phase="build Cladding proxy image"
 "$cladding_bin" --cladding-dir "$project_root" build
+printf '%s\n' "run tools symlink marker" > "$temp_root/workspace/tools/run-symlink-marker"
 
 phase="copy TLS origin CA into proxy build context"
 cp "$temp_root/origin/origin-ca.crt" "$temp_root/origin-ca.crt"
@@ -559,11 +563,13 @@ fi
 test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
 test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 
-phase="verify one-off CA isolation and nonzero-command cleanup"
+phase="verify one-off shared project state and isolated runtime cleanup"
 mkdir -m 0700 "$temp_root/run-tmp"
 (
+  cd "$temp_root/workspace"
   TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v -- \
-    /bin/sh -c 'sleep 3; exit 7' > "$temp_root/run.log" 2>&1 &
+    /bin/sh -c 'while [ ! -f /home/user/workspace/.run-finish ]; do sleep 1; done; exit 7' \
+    > "$temp_root/run.log" 2>&1 &
   run_child=$!
   trap 'kill "$run_child" 2>/dev/null || true; wait "$run_child" 2>/dev/null || true' HUP INT TERM
   if wait "$run_child"; then
@@ -579,43 +585,81 @@ run_root=
 attempt=0
 while [ "$attempt" -lt 60 ]; do
   run_root=$(find "$temp_root/run-tmp" -mindepth 2 -maxdepth 4 \
-    -path '*/credentials/baffle/ca.crt' -print -quit | sed 's|/credentials/baffle/ca.crt$||')
+    -path '*/runtime/scripts/proxy_startup.sh' -print -quit \
+    | sed 's|/runtime/scripts/proxy_startup.sh$||')
   if [ -n "$run_root" ]; then
     break
   fi
   if [ -f "$temp_root/run.status" ]; then
     cat "$temp_root/run.log" >&2
-    echo "one-off runtime exited before creating private credentials" >&2
+    echo "one-off runtime exited before creating its private runtime root" >&2
     exit 1
   fi
   attempt=$((attempt + 1))
   sleep 1
 done
 if [ -z "$run_root" ]; then
-  echo "one-off runtime did not expose its private CA while active" >&2
+  echo "one-off runtime did not create its private startup script" >&2
   exit 1
 fi
-phase="verify one-off CA differs from persistent project CA"
-run_ca=$(sha256sum "$run_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
-if [ "$run_ca" = "$ca_before" ]; then
-  echo "one-off runtime reused the persistent project CA" >&2
+test -d "$run_root/runtime/empty-mask"
+test -d "$run_root/runtime/sockets/proxy"
+for project_state in config tools credentials home; do
+  if [ -e "$run_root/$project_state" ]; then
+    echo "one-off runtime copied project state into $run_root/$project_state" >&2
+    exit 1
+  fi
+done
+run_name=$(sed -n 's/^starting one-off instance: //p' "$temp_root/run.log" | head -n 1)
+if [ -z "$run_name" ]; then
+  echo "one-off command did not report its runtime name" >&2
   exit 1
 fi
-phase="verify one-off secrets directory is private and empty"
 attempt=0
-while [ ! -d "$run_root/credentials/baffle/secrets" ] && [ "$attempt" -lt 30 ]; do
+while ! podman container exists "$run_name-proxy-instance" >/dev/null 2>&1 \
+  || ! podman container exists "$run_name-agent-instance" >/dev/null 2>&1; do
+  if [ "$attempt" -ge 60 ] || [ -f "$temp_root/run.status" ]; then
+    cat "$temp_root/run.log" >&2
+    echo "one-off runtime did not start its proxy and agent containers" >&2
+    exit 1
+  fi
   attempt=$((attempt + 1))
   sleep 1
 done
-if [ ! -d "$run_root/credentials/baffle/secrets" ]; then
-  echo "one-off runtime did not create its private secrets directory" >&2
-  exit 1
-fi
-if [ -n "$(find "$run_root/credentials/baffle/secrets" -mindepth 1 -print -quit)" ]; then
-  echo "one-off runtime copied project secrets into its private credentials" >&2
+run_proxy="$run_name-proxy-instance"
+run_agent="$run_name-agent-instance"
+assert_mount() {
+  container=$1
+  source=$2
+  destination=$3
+  if ! podman inspect "$container" | jq -e \
+    --arg source "$source" --arg destination "$destination" \
+    '.[0].Mounts | any(.Source == $source and .Destination == $destination)' \
+    >/dev/null; then
+    echo "$container does not mount $source at $destination" >&2
+    exit 1
+  fi
+}
+phase="verify one-off mounts use shared project files"
+assert_mount "$run_proxy" "$project_root/config" /opt/config
+assert_mount "$run_proxy" "$project_root/credentials/baffle" /opt/credentials/baffle
+assert_mount "$run_proxy" "$run_root/runtime/scripts/proxy_startup.sh" /opt/scripts/proxy_startup.sh
+assert_mount "$run_proxy" "$run_root/runtime/sockets/proxy" /run/cladding/proxy
+assert_mount "$run_agent" "$project_root/config" /opt/config
+assert_mount "$run_agent" "$project_root/home" /home/user
+assert_mount "$run_agent" "$temp_root/workspace" /home/user/workspace
+assert_mount "$run_agent" "$run_root/runtime/empty-mask" /home/user/workspace/.cladding
+podman exec "$run_agent" /bin/sh -ec \
+  'test -x /opt/tools/bin/baffle && test -f /opt/tools/run-symlink-marker'
+podman exec "$run_proxy" /bin/sh -ec \
+  'test -s /opt/credentials/baffle/ca.crt && test -f /opt/credentials/baffle/secrets/test-token-old'
+run_ca=$(podman exec "$run_proxy" sha256sum /opt/credentials/baffle/ca.crt | cut -d ' ' -f 1)
+if [ "$run_ca" != "$ca_before" ]; then
+  echo "one-off proxy is not using the persistent project CA" >&2
   exit 1
 fi
 phase="verify one-off command preserves its nonzero exit status"
+touch "$temp_root/workspace/.run-finish"
 set +e
 wait "$run_pid"
 set -e
@@ -630,15 +674,15 @@ if [ -e "$run_root" ]; then
   echo "one-off runtime root remains after the command exits: $run_root" >&2
   exit 1
 fi
-phase="verify one-off Podman resource cleanup"
-run_name=$(sed -n 's/^starting one-off instance: //p' "$temp_root/run.log" | head -n 1)
-if [ -z "$run_name" ]; then
-  echo "one-off command did not report its runtime name" >&2
+ca_after_run=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
+if [ "$ca_after_run" != "$ca_before" ]; then
+  echo "one-off run changed the persistent project CA" >&2
   exit 1
 fi
+phase="verify one-off Podman resource cleanup"
 if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sandbox)(-instance)?$" >/dev/null; then
   echo "one-off runtime left a Podman resource behind" >&2
   exit 1
 fi
 
-echo "Baffle policy, HTTPS clients, reload, trust, isolation, CA reuse, and run cleanup passed ($runtime runtime)"
+echo "Baffle policy, HTTPS clients, reload, trust, project-state reuse, CA reuse, and run cleanup passed ($runtime runtime)"

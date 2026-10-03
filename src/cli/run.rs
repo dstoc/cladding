@@ -59,10 +59,8 @@ pub(super) fn cmd_run(
     };
     let context = source_context.with_resolved_config(runtime_root.clone(), config);
 
-    if let Err(startup_error) =
-        lifecycle::prepare_ephemeral_runtime_root(&source_context.project_root, &runtime_root)
-    {
-        let root_cleanup = fs::remove_dir_all(&runtime_root).with_context(|| {
+    if let Err(setup_error) = lifecycle::prepare_run_runtime_root(&runtime_root) {
+        let root_cleanup = remove_private_runtime_root(&runtime_root).with_context(|| {
             format!(
                 "failed to remove private runtime root {}",
                 runtime_root.display()
@@ -74,12 +72,12 @@ pub(super) fn cmd_run(
         }
         if let Some(signal) = signal {
             eprintln!(
-                "error: one-off instance '{instance_name}' failed during setup: {startup_error}"
+                "error: one-off instance '{instance_name}' failed during setup: {setup_error}"
             );
             return Err(signal_status_error(signal));
         }
         return Err(Error::message(format!(
-            "one-off instance '{instance_name}' failed during setup: {startup_error}"
+            "one-off instance '{instance_name}' failed during setup: {setup_error}"
         )));
     }
 

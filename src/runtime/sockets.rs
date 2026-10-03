@@ -21,18 +21,18 @@ pub(super) const RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/fs
 impl RuntimeSpec {
     pub fn generated_runtime_socket_dirs(&self) -> Vec<PathBuf> {
         let mut paths = BTreeSet::new();
-        paths.insert(self.project_root.join(RUNTIME_SOCKET_DIR));
+        paths.insert(self.runtime_root.join(RUNTIME_SOCKET_DIR));
         paths.insert(runtime_scoped_socket_dir(
-            &self.project_root,
+            &self.runtime_root,
             RUNTIME_PROXY_SOCKET_DIR,
         ));
         paths.insert(runtime_scoped_socket_dir(
-            &self.project_root,
+            &self.runtime_root,
             RUNTIME_PROXY_AGENT_SOCKET_DIR,
         ));
         if self.nw_sandbox.is_some() {
             paths.insert(runtime_scoped_socket_dir(
-                &self.project_root,
+                &self.runtime_root,
                 RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
             ));
         }
@@ -63,7 +63,7 @@ pub(super) fn runtime_socket_mount_path(mount_dir: &str, socket_name: &str) -> S
 }
 
 pub(super) fn build_scoped_socket_mount(
-    project_root: &Path,
+    runtime_root: &Path,
     socket_dir: &str,
     mount_path: &str,
 ) -> Vec<RuntimeMount> {
@@ -71,7 +71,7 @@ pub(super) fn build_scoped_socket_mount(
         mount_path: mount_path.to_string(),
         read_only: false,
         source: RuntimeMountSource::HostPath {
-            path: runtime_scoped_socket_dir(project_root, socket_dir),
+            path: runtime_scoped_socket_dir(runtime_root, socket_dir),
         },
     }]
 }
