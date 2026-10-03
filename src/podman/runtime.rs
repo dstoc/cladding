@@ -1,10 +1,9 @@
 use crate::error::{Error, Result};
 use crate::runtime::{
-    RuntimeContainer, RuntimeMountSource, RuntimePlacement, RuntimePod, RuntimeSpec,
-    RuntimeUserNamespace,
+    RuntimeComponent, RuntimeContainer, RuntimeMountSource, RuntimeSpec, RuntimeUserNamespace,
 };
 use anyhow::Context as _;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -36,10 +35,9 @@ impl RuntimeInventory {
 
     pub fn is_fully_running(&self) -> bool {
         self.resources.len() == self.expected_count
-            && self
-                .resources
-                .iter()
-                .all(|resource| resource.state.eq_ignore_ascii_case("running"))
+            && self.resources.iter().all(|resource| {
+                resource.kind == "container" && resource.state.eq_ignore_ascii_case("running")
+            })
     }
 }
 
@@ -49,16 +47,16 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) ->
     ensure_runtime_empty_mask_dir(spec)?;
     ensure_proxy_relay_volumes(spec, verbose, quiet_helpers)?;
 
-    for pod in runtime_pods(spec) {
-        if pod.placement == RuntimePlacement::Pod {
-            pod_create(pod.use_runsc, pod, verbose, quiet_helpers)?;
-        }
-    }
-
-    for pod in runtime_pods(spec) {
-        for container in &pod.containers {
-            container_run(pod.use_runsc, pod, container, verbose, quiet_helpers)?;
-            if should_install_baffle_ca(spec, pod) {
+    for component in runtime_components(spec) {
+        for container in &component.containers {
+            container_run(
+                component.use_runsc,
+                component,
+                container,
+                verbose,
+                quiet_helpers,
+            )?;
+            if should_install_baffle_ca(spec, component) {
                 install_baffle_ca(container, verbose, quiet_helpers)?;
             }
         }
@@ -141,19 +139,8 @@ pub fn runtime_inventory(
     let mut expected_count = 0;
     let mut resources = Vec::new();
 
-    for pod in runtime_pods(spec) {
-        if pod.placement == RuntimePlacement::Pod {
-            expected_count += 1;
-            if let Some(state) = inspect_resource_state("pod", &pod.name, verbose, quiet_helpers)? {
-                resources.push(RuntimeResource {
-                    kind: "pod",
-                    name: pod.name.clone(),
-                    state,
-                });
-            }
-        }
-
-        for container in &pod.containers {
+    for component in runtime_components(spec) {
+        for container in &component.containers {
             expected_count += 1;
             if let Some(state) =
                 inspect_resource_state("container", &container.name, verbose, quiet_helpers)?
@@ -165,6 +152,18 @@ pub fn runtime_inventory(
                 });
             }
         }
+
+        // Detect pods created by older Cladding versions so `up` does not
+        // mistake their proxy containers for the current standalone runtime.
+        if let Some(state) =
+            inspect_resource_state("pod", &component.name, verbose, quiet_helpers)?
+        {
+            resources.push(RuntimeResource {
+                kind: "pod",
+                name: component.name.clone(),
+                state,
+            });
+        }
     }
 
     Ok(RuntimeInventory {
@@ -174,159 +173,90 @@ pub fn runtime_inventory(
 }
 
 pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
-    for pod in runtime_pods(spec) {
-        for container in &pod.containers {
-            container_rm(&container.name, verbose, quiet_helpers)?;
-        }
-        // For standalone components this is best-effort cleanup for projects
-        // started by older builds where execution components were still pods.
-        pod_rm(&pod.name, verbose, quiet_helpers)?;
-    }
-
-    remove_proxy_relay_volumes(spec, verbose, quiet_helpers)
-}
-
-/// Clean up resources only when their Podman labels identify this runtime.
-/// This is used by one-off startup and teardown paths so a name collision
-/// cannot cause cleanup to remove another project's resources.
-pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
-    let inventory = runtime_inventory(spec, verbose, quiet_helpers)?;
-    if inventory.is_empty() {
-        return remove_proxy_relay_volumes(spec, verbose, quiet_helpers);
-    }
-    let exists = |kind: &str, name: &str| {
-        inventory
-            .resources
-            .iter()
-            .any(|resource| resource.kind == kind && resource.name == name)
-    };
-
-    let mut owned_resources = HashMap::<(String, String), bool>::new();
-    for pod in runtime_pods(spec) {
-        let pod_exists = pod.placement == RuntimePlacement::Pod && exists("pod", &pod.name);
-        let pod_owned = if pod_exists {
-            resource_labels_match("pod", &pod.name, spec, verbose, quiet_helpers)?
-        } else {
-            false
-        };
-        if pod_exists {
-            owned_resources.insert(("pod".to_string(), pod.name.clone()), pod_owned);
-        }
-        let pod_id = if pod_owned {
-            Some(inspect_value(
+    let mut cleanup_error = None;
+    for component in runtime_components(spec) {
+        if inspect_resource_state("pod", &component.name, verbose, quiet_helpers)?.is_some() {
+            if resource_labels_match_component(
                 "pod",
-                &pod.name,
-                "{{.Id}}",
+                &component.name,
+                component,
                 verbose,
                 quiet_helpers,
-            )?)
+            )? {
+                record_cleanup_result(
+                    &mut cleanup_error,
+                    legacy_pod_rm(&component.name, verbose, quiet_helpers),
+                );
+            } else {
+                record_cleanup_result(
+                    &mut cleanup_error,
+                    Err(Error::message(format!(
+                        "refusing to remove pod '{}' because it is not owned by this Cladding component",
+                        component.name
+                    ))),
+                );
+            }
+            // A pod can contain the legacy proxy container. Do not remove a
+            // same-named container separately when the pod is not owned.
+            continue;
+        }
+
+        for container in &component.containers {
+            if inspect_resource_state("container", &container.name, verbose, quiet_helpers)?
+                .is_none()
+            {
+                continue;
+            }
+            if resource_labels_match_component(
+                "container",
+                &container.name,
+                component,
+                verbose,
+                quiet_helpers,
+            )? {
+                record_cleanup_result(
+                    &mut cleanup_error,
+                    container_rm(&container.name, verbose, quiet_helpers),
+                );
         } else {
-            None
-        };
-        for container in &pod.containers {
-            if !exists("container", &container.name) {
-                continue;
-            }
-
-            let owned = match pod.placement {
-                RuntimePlacement::Standalone => resource_labels_match(
-                    "container",
-                    &container.name,
-                    spec,
-                    verbose,
-                    quiet_helpers,
-                )?,
-                RuntimePlacement::Pod => {
-                    if let Some(pod_id) = pod_id.as_deref() {
-                        let container_pod = inspect_value(
-                            "container",
-                            &container.name,
-                            "{{.Pod}}",
-                            verbose,
-                            quiet_helpers,
-                        )?;
-                        container_pod == pod_id || container_pod == pod.name
-                    } else {
-                        false
-                    }
-                }
-            };
-            owned_resources.insert(("container".to_string(), container.name.clone()), owned);
-        }
-    }
-
-    if inventory.resources.iter().all(|resource| {
-        owned_resources
-            .get(&(resource.kind.to_string(), resource.name.clone()))
-            .copied()
-            .unwrap_or(false)
-    }) {
-        return runtime_cleanup(spec, verbose, quiet_helpers);
-    }
-
-    let mut cleanup_error = None;
-    for pod in runtime_pods(spec) {
-        let pod_exists = pod.placement == RuntimePlacement::Pod && exists("pod", &pod.name);
-        let pod_owned = owned_resources
-            .get(&("pod".to_string(), pod.name.clone()))
-            .copied()
-            .unwrap_or(false);
-        let mut pod_cleanup_failed = false;
-
-        for container in &pod.containers {
-            if !exists("container", &container.name) {
-                continue;
-            }
-            let container_owned = owned_resources
-                .get(&("container".to_string(), container.name.clone()))
-                .copied()
-                .unwrap_or(false);
-            if !container_owned {
-                pod_cleanup_failed = true;
                 record_cleanup_result(
                     &mut cleanup_error,
-                    Err(crate::error::Error::message(format!(
-                        "refusing to remove container '{}' because it is not owned by one-off instance '{}'",
-                        container.name, spec.project_name
-                    ))),
-                );
-                continue;
-            }
-            let result = container_rm(&container.name, verbose, quiet_helpers);
-            if result.is_err() {
-                pod_cleanup_failed = true;
-            }
-            record_cleanup_result(&mut cleanup_error, result);
-        }
-
-        if pod_exists {
-            if pod_owned && !pod_cleanup_failed {
-                record_cleanup_result(
-                    &mut cleanup_error,
-                    pod_rm(&pod.name, verbose, quiet_helpers),
-                );
-            } else if !pod_owned {
-                record_cleanup_result(
-                    &mut cleanup_error,
-                    Err(crate::error::Error::message(format!(
-                        "refusing to remove pod '{}' because it is not owned by one-off instance '{}'",
-                        pod.name, spec.project_name
+                    Err(Error::message(format!(
+                        "refusing to remove container '{}' because it is not owned by this Cladding component",
+                        container.name
                     ))),
                 );
             }
         }
     }
 
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_proxy_relay_volumes(spec, verbose, quiet_helpers),
+    );
     match cleanup_error {
         Some(err) => Err(err),
         None => Ok(()),
     }
 }
 
+/// Clean up resources only when their Podman labels identify this runtime.
+/// This is used by one-off startup and teardown paths so a name collision
+/// cannot cause cleanup to remove another project's resources.
+pub fn runtime_cleanup_owned(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    // runtime_cleanup checks the component labels on every existing resource,
+    // including legacy pods, before it removes anything.
+    runtime_cleanup(spec, verbose, quiet_helpers)
+}
+
 fn proxy_relay_volume_names(spec: &RuntimeSpec) -> Vec<String> {
     let mut names = BTreeSet::new();
-    for pod in runtime_pods(spec) {
-        for container in &pod.containers {
+    for component in runtime_components(spec) {
+        for container in &component.containers {
             for mount in &container.mounts {
                 if let RuntimeMountSource::NamedVolumeChown { claim_name } = &mount.source {
                     names.insert(claim_name.clone());
@@ -474,10 +404,10 @@ fn record_cleanup_result(target: &mut Option<crate::error::Error>, result: Resul
     }
 }
 
-fn resource_labels_match(
+fn resource_labels_match_component(
     kind: &str,
     name: &str,
-    spec: &RuntimeSpec,
+    component: &RuntimeComponent,
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<bool> {
@@ -489,12 +419,16 @@ fn resource_labels_match(
     let labels: serde_json::Value = serde_json::from_str(&labels)
         .with_context(|| format!("failed to parse labels for {kind} {name}"))?;
 
-    Ok(labels.get("cladding").and_then(serde_json::Value::as_str)
-        == Some(spec.project_name.as_str())
-        && labels
-            .get("project_root")
-            .and_then(serde_json::Value::as_str)
-            == Some(spec.project_root.to_string_lossy().as_ref()))
+    Ok(labels_match_expected(&labels, &component.labels))
+}
+
+fn labels_match_expected(
+    labels: &serde_json::Value,
+    expected: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    expected.iter().all(|(key, expected_value)| {
+        labels.get(key).and_then(serde_json::Value::as_str) == Some(expected_value.as_str())
+    })
 }
 
 fn inspect_value(
@@ -590,17 +524,7 @@ fn build_resource_inspect_command(kind: &str, name: &str) -> Command {
     cmd
 }
 
-pub fn pod_create(
-    use_runsc: bool,
-    pod: &RuntimePod,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<()> {
-    let mut cmd = build_pod_create_command(use_runsc, pod);
-    run_helper_command(&mut cmd, verbose, quiet_helpers, "podman pod create")
-}
-
-pub fn pod_rm(pod_name: &str, verbose: bool, quiet_helpers: bool) -> Result<()> {
+fn legacy_pod_rm(pod_name: &str, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cmd = build_pod_rm_command(pod_name);
     trace_command(&cmd, verbose);
     let output = cmd
@@ -628,21 +552,21 @@ pub fn pod_rm(pod_name: &str, verbose: bool, quiet_helpers: bool) -> Result<()> 
 
 pub fn container_run(
     use_runsc: bool,
-    pod: &RuntimePod,
+    component: &RuntimeComponent,
     container: &RuntimeContainer,
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<()> {
-    let mut cmd = build_container_run_command(use_runsc, pod, container);
+    let mut cmd = build_container_run_command(use_runsc, component, container);
     run_helper_command(&mut cmd, verbose, quiet_helpers, "podman run")
 }
 
-fn should_install_baffle_ca(spec: &RuntimeSpec, pod: &RuntimePod) -> bool {
-    pod.name == spec.agent.name
+fn should_install_baffle_ca(spec: &RuntimeSpec, component: &RuntimeComponent) -> bool {
+    component.name == spec.agent.name
         || spec
             .nw_sandbox
             .as_ref()
-            .is_some_and(|sandbox| sandbox.name == pod.name)
+            .is_some_and(|sandbox| sandbox.name == component.name)
 }
 
 fn install_baffle_ca(
@@ -718,15 +642,15 @@ fn remove_output_is_missing_pod(output: &Output) -> bool {
     stderr.contains("no such pod") || stderr.contains("no pod with name or id")
 }
 
-fn runtime_pods(spec: &RuntimeSpec) -> Vec<&RuntimePod> {
-    let mut pods = vec![&spec.proxy, &spec.agent];
-    if let Some(pod) = &spec.nw_sandbox {
-        pods.push(pod);
+fn runtime_components(spec: &RuntimeSpec) -> Vec<&RuntimeComponent> {
+    let mut components = vec![&spec.proxy, &spec.agent];
+    if let Some(component) = &spec.nw_sandbox {
+        components.push(component);
     }
-    if let Some(pod) = &spec.fs_sandbox {
-        pods.push(pod);
+    if let Some(component) = &spec.fs_sandbox {
+        components.push(component);
     }
-    pods
+    components
 }
 
 fn prepare_runtime_socket_dirs(spec: &RuntimeSpec) -> Result<()> {
@@ -806,18 +730,6 @@ fn ensure_runtime_empty_mask_dir(spec: &RuntimeSpec) -> Result<()> {
     Ok(())
 }
 
-fn build_pod_create_command(use_runsc: bool, pod: &RuntimePod) -> Command {
-    let mut cmd = podman_command_with_options(
-        PodmanRuntimeOptions::new(use_runsc).with_network_none(pod.network_name == "none"),
-    );
-    cmd.args(["pod", "create", "--name", &pod.name]);
-    append_label_args(&mut cmd, &pod.labels);
-    cmd.arg("--network");
-    cmd.arg(&pod.network_name);
-    append_user_namespace_args(&mut cmd, pod.user_namespace);
-    cmd
-}
-
 fn build_pod_rm_command(pod_name: &str) -> Command {
     let mut cmd = Command::new("podman");
     cmd.args(["pod", "rm", "-f", pod_name]);
@@ -826,30 +738,21 @@ fn build_pod_rm_command(pod_name: &str) -> Command {
 
 fn build_container_run_command(
     use_runsc: bool,
-    pod: &RuntimePod,
+    component: &RuntimeComponent,
     container: &RuntimeContainer,
 ) -> Command {
-    let mut cmd =
-        podman_command_with_options(PodmanRuntimeOptions::new(use_runsc).with_network_none(
-            pod.placement == RuntimePlacement::Standalone && pod.network_name == "none",
-        ));
+    let mut cmd = podman_command_with_options(
+        PodmanRuntimeOptions::new(use_runsc).with_network_none(component.network_name == "none"),
+    );
     cmd.arg("run");
     cmd.arg("-d");
     cmd.arg("--init");
-    match pod.placement {
-        RuntimePlacement::Pod => {
-            cmd.arg("--pod");
-            cmd.arg(&pod.name);
-        }
-        RuntimePlacement::Standalone => {
-            append_label_args(&mut cmd, &pod.labels);
-            cmd.arg("--network");
-            cmd.arg(&pod.network_name);
-            append_user_namespace_args(&mut cmd, pod.user_namespace);
-            cmd.arg("--hostname");
-            cmd.arg(&pod.name);
-        }
-    }
+    append_label_args(&mut cmd, &component.labels);
+    cmd.arg("--network");
+    cmd.arg(&component.network_name);
+    append_user_namespace_args(&mut cmd, component.user_namespace);
+    cmd.arg("--hostname");
+    cmd.arg(&component.name);
     cmd.arg("--name");
     cmd.arg(&container.name);
     if let Some(workdir) = &container.workdir {
@@ -864,7 +767,7 @@ fn build_container_run_command(
     }
 
     append_env_args(&mut cmd, &container.env);
-    append_mount_args(&mut cmd, &pod.name, &container.mounts);
+    append_mount_args(&mut cmd, &component.name, &container.mounts);
     append_port_args(&mut cmd, &container.ports);
     append_entrypoint_arg(&mut cmd, &container.command);
 
@@ -927,8 +830,8 @@ mod tests {
     use super::*;
     use crate::config::{ExecutionComponentConfig, ExecutionConfig};
     use crate::runtime::{
-        RuntimeContainer, RuntimeEnvVar, RuntimeMount, RuntimeMountSource, RuntimePlacement,
-        RuntimePod, RuntimeUserNamespace,
+        RuntimeComponent, RuntimeContainer, RuntimeEnvVar, RuntimeMount, RuntimeMountSource,
+        RuntimeUserNamespace,
     };
 
     fn command_args(cmd: &Command) -> Vec<String> {
@@ -1001,9 +904,8 @@ mod tests {
 
     #[test]
     fn baffle_ca_initialization_uses_proxy_image_config_and_private_credentials_mount() {
-        let proxy = RuntimePod {
+        let proxy = RuntimeComponent {
             name: "demo-proxy".to_string(),
-            placement: RuntimePlacement::Pod,
             use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
@@ -1020,9 +922,8 @@ mod tests {
             }],
             user_namespace: RuntimeUserNamespace::KeepId,
         };
-        let empty_pod = |name: &str| RuntimePod {
+        let empty_component = |name: &str| RuntimeComponent {
             name: name.to_string(),
-            placement: RuntimePlacement::Standalone,
             use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
@@ -1035,7 +936,7 @@ mod tests {
             runtime_root: "/tmp/demo/.cladding".into(),
             use_runsc: false,
             proxy,
-            agent: empty_pod("demo-agent"),
+            agent: empty_component("demo-agent"),
             nw_sandbox: None,
             fs_sandbox: None,
         };
@@ -1070,9 +971,8 @@ mod tests {
 
     #[test]
     fn baffle_ca_install_targets_agent_and_enabled_network_sandbox_only() {
-        let pod = |name: &str| RuntimePod {
+        let component = |name: &str| RuntimeComponent {
             name: name.to_string(),
-            placement: RuntimePlacement::Standalone,
             use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
@@ -1084,10 +984,10 @@ mod tests {
             project_root: "/tmp/demo/.cladding".into(),
             runtime_root: "/tmp/demo/.cladding".into(),
             use_runsc: false,
-            proxy: pod("demo-proxy"),
-            agent: pod("demo-agent"),
-            nw_sandbox: Some(pod("demo-nw-sandbox")),
-            fs_sandbox: Some(pod("demo-fs-sandbox")),
+            proxy: component("demo-proxy"),
+            agent: component("demo-agent"),
+            nw_sandbox: Some(component("demo-nw-sandbox")),
+            fs_sandbox: Some(component("demo-fs-sandbox")),
         };
 
         assert!(should_install_baffle_ca(&spec, &spec.agent));
@@ -1126,16 +1026,24 @@ mod tests {
             mounts: Vec::new(),
         };
         let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
-        let pods = runtime_pods(&spec);
+        let components = runtime_components(&spec);
 
-        assert_eq!(pods.len(), 4);
-        for pod in pods {
-            for container in &pod.containers {
-                let args =
-                    command_args(&build_container_run_command(pod.use_runsc, pod, container));
+        assert_eq!(components.len(), 4);
+        for component in components {
+            for container in &component.containers {
+                let args = command_args(&build_container_run_command(
+                    component.use_runsc,
+                    component,
+                    container,
+                ));
                 assert!(
                     args.iter().any(|arg| arg == "--init"),
                     "{} did not enable Podman init",
+                    container.name
+                );
+                assert!(
+                    !args.iter().any(|arg| arg == "--pod"),
+                    "{} must run as a standalone container",
                     container.name
                 );
             }
@@ -1149,43 +1057,43 @@ mod tests {
     #[test]
     fn runtime_inventory_requires_every_resource_to_be_running() {
         let complete = RuntimeInventory {
-            expected_count: 2,
-            resources: vec![
-                RuntimeResource {
-                    kind: "pod",
-                    name: "demo-proxy".to_string(),
-                    state: "Running".to_string(),
-                },
-                RuntimeResource {
-                    kind: "container",
-                    name: "demo-agent-instance".to_string(),
-                    state: "running".to_string(),
-                },
-            ],
+            expected_count: 1,
+            resources: vec![RuntimeResource {
+                kind: "container",
+                name: "demo-agent-instance".to_string(),
+                state: "running".to_string(),
+            }],
         };
         assert!(complete.is_fully_running());
 
         let partial = RuntimeInventory {
             expected_count: 2,
-            resources: complete.resources[..1].to_vec(),
+            resources: complete.resources.clone(),
         };
         assert!(!partial.is_fully_running());
 
         let stopped = RuntimeInventory {
-            expected_count: 2,
-            resources: vec![
-                complete.resources[0].clone(),
-                RuntimeResource {
-                    state: "exited".to_string(),
-                    ..complete.resources[1].clone()
-                },
-            ],
+            expected_count: 1,
+            resources: vec![RuntimeResource {
+                state: "exited".to_string(),
+                ..complete.resources[0].clone()
+            }],
         };
         assert!(!stopped.is_fully_running());
+
+        let legacy_pod = RuntimeInventory {
+            expected_count: 1,
+            resources: vec![RuntimeResource {
+                kind: "pod",
+                name: "demo-proxy".to_string(),
+                state: "Running".to_string(),
+            }],
+        };
+        assert!(!legacy_pod.is_fully_running());
     }
 
     #[test]
-    fn resource_inspection_commands_target_pods_and_containers() {
+    fn resource_inspection_commands_target_legacy_pods_and_containers() {
         assert_eq!(
             command_args(&build_resource_exists_command("pod", "demo-proxy")),
             vec!["pod", "exists", "demo-proxy"]
@@ -1220,98 +1128,71 @@ mod tests {
     }
 
     #[test]
-    fn build_pod_create_command_includes_labels_network_and_userns() {
-        let pod = RuntimePod {
-            name: "demo-agent".to_string(),
-            placement: RuntimePlacement::Pod,
-            use_runsc: false,
-            labels: std::collections::BTreeMap::from([
-                ("app".to_string(), "agent".to_string()),
-                ("cladding".to_string(), "demo".to_string()),
-                (
-                    "project_root".to_string(),
-                    "/tmp/demo/.cladding".to_string(),
-                ),
-            ]),
-            network_name: "default".to_string(),
-            containers: Vec::new(),
-            user_namespace: RuntimeUserNamespace::KeepId,
-        };
+    fn cleanup_requires_all_expected_component_ownership_labels() {
+        let expected = std::collections::BTreeMap::from([
+            ("app".to_string(), "proxy".to_string()),
+            ("cladding".to_string(), "demo".to_string()),
+            (
+                "project_root".to_string(),
+                "/tmp/demo/.cladding".to_string(),
+            ),
+        ]);
+        let owned = serde_json::json!({
+            "app": "proxy",
+            "cladding": "demo",
+            "project_root": "/tmp/demo/.cladding",
+        });
+        assert!(labels_match_expected(&owned, &expected));
 
-        let cmd = build_pod_create_command(false, &pod);
-        assert_eq!(
-            command_args(&cmd),
-            vec![
-                "pod",
-                "create",
-                "--name",
-                "demo-agent",
-                "--label",
-                "app=agent",
-                "--label",
-                "cladding=demo",
-                "--label",
-                "project_root=/tmp/demo/.cladding",
-                "--network",
-                "default",
-                "--userns",
-                "keep-id",
-            ]
-        );
+        let foreign_app = serde_json::json!({
+            "app": "unrelated",
+            "cladding": "demo",
+            "project_root": "/tmp/demo/.cladding",
+        });
+        assert!(!labels_match_expected(&foreign_app, &expected));
+
+        let foreign_root = serde_json::json!({
+            "app": "proxy",
+            "cladding": "demo",
+            "project_root": "/tmp/other/.cladding",
+        });
+        assert!(!labels_match_expected(&foreign_root, &expected));
     }
 
     #[test]
-    fn proxy_pod_preserves_the_invoking_user_identity() {
-        let pod = RuntimePod {
-            name: "demo-proxy".to_string(),
-            placement: RuntimePlacement::Pod,
+    fn proxy_container_uses_default_network_and_keep_id_without_a_pod() {
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
             use_runsc: false,
-            labels: std::collections::BTreeMap::new(),
-            network_name: "default".to_string(),
-            containers: Vec::new(),
-            user_namespace: RuntimeUserNamespace::KeepId,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+                build: None,
+            },
+            nw_sandbox: None,
+            fs_sandbox: None,
+            proxy: None,
+            mounts: Vec::new(),
         };
+        let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
+        let proxy = &spec.proxy;
+        let container = proxy.containers.first().expect("proxy container");
+        let args = command_args(&build_container_run_command(false, proxy, container));
 
-        let cmd = build_pod_create_command(false, &pod);
-
-        assert_eq!(
-            command_args(&cmd),
-            vec![
-                "pod",
-                "create",
-                "--name",
-                "demo-proxy",
-                "--network",
-                "default",
-                "--userns",
-                "keep-id",
-            ]
+        assert!(args.windows(2).any(|pair| pair == ["--network", "default"]));
+        assert!(args.windows(2).any(|pair| pair == ["--userns", "keep-id"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--name", "demo-proxy-instance"])
         );
-    }
-
-    #[test]
-    fn build_pod_create_command_does_not_include_runtime_flags() {
-        let pod = RuntimePod {
-            name: "demo-agent".to_string(),
-            placement: RuntimePlacement::Pod,
-            use_runsc: false,
-            labels: std::collections::BTreeMap::new(),
-            network_name: "default".to_string(),
-            containers: Vec::new(),
-            user_namespace: RuntimeUserNamespace::Default,
-        };
-
-        let cmd = build_pod_create_command(false, &pod);
-        let args = command_args(&cmd);
-        assert!(!args.iter().any(|arg| arg == "--runtime"));
-        assert!(!args.iter().any(|arg| arg == "--runtime-flag"));
+        assert!(!args.iter().any(|arg| arg == "--pod"));
+        assert!(args.iter().any(|arg| arg == "app=proxy"));
     }
 
     #[test]
     fn build_container_run_command_uses_standalone_container_flags() {
-        let pod = RuntimePod {
+        let component = RuntimeComponent {
             name: "demo-agent".to_string(),
-            placement: RuntimePlacement::Standalone,
             use_runsc: false,
             labels: std::collections::BTreeMap::from([
                 ("app".to_string(), "agent".to_string()),
@@ -1337,7 +1218,7 @@ mod tests {
             tty: false,
         };
 
-        let cmd = build_container_run_command(true, &pod, &container);
+        let cmd = build_container_run_command(true, &component, &container);
         assert_eq!(
             command_args(&cmd),
             vec![
@@ -1425,9 +1306,8 @@ mod tests {
             tty: true,
         };
 
-        let pod = RuntimePod {
+        let component = RuntimeComponent {
             name: "demo-agent".to_string(),
-            placement: RuntimePlacement::Pod,
             use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
@@ -1435,14 +1315,16 @@ mod tests {
             user_namespace: RuntimeUserNamespace::Default,
         };
 
-        let cmd = build_container_run_command(false, &pod, &container);
+        let cmd = build_container_run_command(false, &component, &container);
         assert_eq!(
             command_args(&cmd),
             vec![
                 "run",
                 "-d",
                 "--init",
-                "--pod",
+                "--network",
+                "default",
+                "--hostname",
                 "demo-agent",
                 "--name",
                 "demo-agent-instance",
@@ -1493,9 +1375,8 @@ mod tests {
             tty: false,
         };
 
-        let pod = RuntimePod {
+        let component = RuntimeComponent {
             name: "demo-agent".to_string(),
-            placement: RuntimePlacement::Pod,
             use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
@@ -1503,7 +1384,7 @@ mod tests {
             user_namespace: RuntimeUserNamespace::Default,
         };
 
-        let cmd = build_container_run_command(true, &pod, &container);
+        let cmd = build_container_run_command(true, &component, &container);
         assert_eq!(
             command_args(&cmd),
             vec![
@@ -1516,7 +1397,9 @@ mod tests {
                 "run",
                 "-d",
                 "--init",
-                "--pod",
+                "--network",
+                "default",
+                "--hostname",
                 "demo-agent",
                 "--name",
                 "demo-agent-instance",
@@ -1530,9 +1413,8 @@ mod tests {
 
     #[test]
     fn build_container_run_command_adds_network_for_standalone_containers() {
-        let pod = RuntimePod {
+        let component = RuntimeComponent {
             name: "demo-agent".to_string(),
-            placement: RuntimePlacement::Standalone,
             use_runsc: false,
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
@@ -1551,7 +1433,7 @@ mod tests {
             tty: false,
         };
 
-        let cmd = build_container_run_command(true, &pod, &container);
+        let cmd = build_container_run_command(true, &component, &container);
         assert_eq!(
             command_args(&cmd),
             vec![

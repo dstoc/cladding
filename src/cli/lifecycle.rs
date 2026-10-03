@@ -435,8 +435,8 @@ pub(super) fn cmd_ps(_context: &Context) -> Result<()> {
     println!("running cladding projects:");
     for project in projects {
         println!(
-            "{}  {}  (pods: {})",
-            project.name, project.project_root, project.pod_count
+            "{}  {}  (containers: {})",
+            project.name, project.project_root, project.container_count
         );
     }
 

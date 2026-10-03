@@ -15,7 +15,7 @@ The initial support should be configuration-driven and should pass the Podman ru
 ```
 
 ## Motivation
-gVisor provides an additional userspace kernel isolation boundary around containers. For Cladding, that is useful because the runtime already separates work across the proxy pod and standalone execution containers for the agent, optional network sandbox, and optional filesystem sandbox.
+gVisor provides an additional userspace kernel isolation boundary around containers. For Cladding, that is useful because the runtime separates work across the standalone proxy container and standalone execution containers for the agent, optional network sandbox, and optional filesystem sandbox.
 
 Cladding now manages Podman resources directly. The proxy stays on Podman's default runtime, while standalone execution containers run with `--network none` and communicate through scoped Unix-domain sockets. This gives Cladding a practical place to apply OCI runtime flags without changing the user-facing runtime model.
 
@@ -31,7 +31,7 @@ The initial gVisor support should stay narrow:
 ## Problem statement
 The current runtime has no way to select an alternate OCI runtime for Cladding-managed standalone execution containers.
 
-Users who want to test or use gVisor need Cladding to apply the runtime selection consistently across the execution containers it creates. Passing `--runtime` manually is not enough because Cladding creates a proxy pod plus separate standalone containers, and `cladding expose` is host-side rather than a Podman helper container flow.
+Users who want to test or use gVisor need Cladding to apply the runtime selection consistently across the execution containers it creates. Passing `--runtime` manually is not enough because Cladding creates separate standalone containers, and `cladding expose` is host-side rather than a Podman helper container flow.
 
 The implementation needs to add runtime selection without weakening existing behavior:
 
@@ -90,10 +90,10 @@ Apply the runtime consistently to the standalone execution containers only:
 - nw-sandbox instance container, when enabled
 - fs-sandbox instance container, when enabled
 
-Do not apply the runtime to the proxy pod, the proxy instance container, the proxy bridge sidecar, or `cladding expose`. The proxy pod remains on Podman's default runtime.
+Do not apply the runtime to the proxy container or `cladding expose`. The proxy container remains on Podman's default runtime.
 
 ### User namespace behavior
-The current direct runtime uses `--userns keep-id` for the agent, nw-sandbox, and fs-sandbox standalone containers, and does not use it for the proxy pod.
+The current runtime uses `--userns keep-id` for the proxy, agent, nw-sandbox, and fs-sandbox containers.
 
 The first implementation should preserve that behavior. The agent, nw-sandbox, and fs-sandbox containers should keep `--userns keep-id` under `use_runsc=true`.
 
@@ -103,7 +103,7 @@ Do not use execution pods or `--infra=false` workarounds in the current design.
 
 The standalone execution containers should continue to run with `--network none`. When `use_runsc=true`, Cladding should pass `--runtime-flag network=none` to those `podman run` commands.
 
-Keep the proxy pod on the default Podman runtime and default pod behavior. The proxy pod does not use `--userns keep-id`, and it is intentionally multi-container from startup.
+Keep the standalone proxy container on Podman's default runtime and default network. It uses `--userns keep-id` and runs Baffle in the proxy container.
 
 ### Scope of runtime selection
 Initial runtime selection should be limited to the standalone execution containers.
@@ -145,7 +145,7 @@ Validation should not require launching a container. The authoritative compatibi
 4. Thread the runtime setting into the runtime spec or Podman execution layer.
 5. Add a Podman command helper that appends `--runtime runsc --runtime-flag ignore-cgroups --runtime-flag host-uds=all` before Podman subcommands when enabled.
 6. Apply the helper only to standalone execution container startup.
-7. Keep the proxy pod on Podman's default runtime and default pod behavior.
+7. Keep the proxy container on Podman's default runtime and default network.
 8. Add `cladding check` validation for `runsc` availability when `use_runsc` is true.
 9. Add unit tests for command construction with and without `use_runsc`.
 10. Document the host prerequisite that Podman must be able to resolve `runsc`.

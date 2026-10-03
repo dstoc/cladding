@@ -78,11 +78,11 @@ fn podman_info_reports_runtime_named(value: &Value, runtime_name: &str) -> bool 
 pub struct RunningProject {
     pub name: String,
     pub project_root: String,
-    pub pod_count: usize,
+    pub container_count: usize,
 }
 
 pub fn list_running_projects(verbose: bool, quiet_helpers: bool) -> Result<Vec<RunningProject>> {
-    let items = list_running_pod_items(verbose, quiet_helpers)?;
+    let items = list_running_container_items(verbose, quiet_helpers)?;
     let mut projects: HashMap<(String, String), usize> = HashMap::new();
     for item in items {
         let key = (item.name, item.project_root);
@@ -92,10 +92,10 @@ pub fn list_running_projects(verbose: bool, quiet_helpers: bool) -> Result<Vec<R
 
     let mut results: Vec<RunningProject> = projects
         .into_iter()
-        .map(|((name, project_root), pod_count)| RunningProject {
+        .map(|((name, project_root), container_count)| RunningProject {
             name,
             project_root,
-            pod_count,
+            container_count,
         })
         .collect();
 
@@ -125,15 +125,18 @@ pub fn podman_container_exists(container_name: &str) -> Result<bool> {
 }
 
 #[derive(Debug, Clone)]
-struct RunningPodItem {
+struct RunningContainerItem {
     name: String,
     project_root: String,
 }
 
-fn list_running_pod_items(verbose: bool, quiet_helpers: bool) -> Result<Vec<RunningPodItem>> {
+fn list_running_container_items(
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<Vec<RunningContainerItem>> {
     let mut cmd = Command::new("podman");
     cmd.args([
-        "pod",
+        "container",
         "ps",
         "--filter",
         "label=cladding",
@@ -145,13 +148,13 @@ fn list_running_pod_items(verbose: bool, quiet_helpers: bool) -> Result<Vec<Runn
     trace_command(&cmd, verbose);
     let output = cmd
         .output()
-        .with_context(|| "failed to run podman pod ps")?;
+        .with_context(|| "failed to run podman container ps")?;
 
     if !output.status.success() {
         if quiet_helpers {
-            ensure_success_output_with_diagnostics(&output, "podman pod ps")?;
+            ensure_success_output_with_diagnostics(&output, "podman container ps")?;
         }
-        return ensure_success_output(&output, "podman pod ps").map(|_| Vec::new());
+        return ensure_success_output(&output, "podman container ps").map(|_| Vec::new());
     }
 
     if verbose {
@@ -160,12 +163,12 @@ fn list_running_pod_items(verbose: bool, quiet_helpers: bool) -> Result<Vec<Runn
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)
-        .with_context(|| "failed to parse podman pod ps json output")?;
+        .with_context(|| "failed to parse podman container ps json output")?;
     let Some(items) = parsed.as_array() else {
         return Ok(Vec::new());
     };
 
-    let mut pods = Vec::new();
+    let mut containers = Vec::new();
     for item in items {
         let Some(labels_value) = item.get("Labels") else {
             continue;
@@ -177,13 +180,13 @@ fn list_running_pod_items(verbose: bool, quiet_helpers: bool) -> Result<Vec<Runn
         let Some(project_root) = labels.get("project_root") else {
             continue;
         };
-        pods.push(RunningPodItem {
+        containers.push(RunningContainerItem {
             name: name.to_string(),
             project_root: project_root.to_string(),
         });
     }
 
-    Ok(pods)
+    Ok(containers)
 }
 
 fn parse_labels(value: &Value) -> HashMap<String, String> {

@@ -3,17 +3,15 @@
 This file is the quick reference for the current Cladding runtime.
 
 ## Managed resources
-- One proxy Podman pod per project: `<name>-proxy`.
-- One proxy instance container inside that pod: `<name>-proxy-instance`.
+- One standalone proxy container per project: `<name>-proxy-instance`.
 - The proxy instance runs one Baffle daemon and creates the persistent agent session and, when enabled, the network-sandbox session.
-- Standalone execution containers for `<name>-agent`, `<name>-nw-sandbox`, and `<name>-fs-sandbox` when those components are enabled.
-- Container names follow the `<pod-name>-instance` pattern for the execution containers.
+- Standalone execution containers use the names `<name>-agent-instance`, `<name>-nw-sandbox-instance`, and `<name>-fs-sandbox-instance` when enabled.
 
 ## Runtime shape
-- The proxy is the only Podman pod in the current design.
-- The proxy pod uses Podman's default runtime.
-- The agent, nw-sandbox, and fs-sandbox are standalone containers, not pods.
-- Execution containers run with `--network none`.
+- The proxy, agent, nw-sandbox, and fs-sandbox run as standalone containers.
+- The proxy uses Podman's default runtime.
+- The proxy uses Podman's default network. Execution containers use `--network none`.
+- All runtime containers use `--userns keep-id`.
 - Execution containers communicate through scoped Unix-domain socket mounts under `.cladding/runtime/sockets`.
 - The proxy creates a persistent Baffle session for the agent. It creates a network-sandbox session only when that component is enabled.
 - Cladding does not wait for Baffle sessions to become ready before it starts execution containers. Early requests to the local proxy can fail during startup.
@@ -92,7 +90,7 @@ CI checks Baffle's direct socket path with rootless Podman and its default OCI r
 
 ## `use_runsc`
 - `use_runsc` applies only to the standalone execution containers.
-- The proxy pod stays on Podman's default runtime.
+- The proxy stays on Podman's default runtime.
 - Optional `use_runsc` design details live in `docs/features/cladding-gvisor-runtime/prd.md`.
 - When `use_runsc` is enabled, Cladding passes `--runtime runsc`, `--runtime-flag ignore-cgroups`, `--runtime-flag host-uds=all`, and `--runtime-flag network=none` to the execution container startup command.
 - `cladding expose` does not receive Podman runtime flags; it is a host-side `socat` forwarder that delegates through `cladding exec`.

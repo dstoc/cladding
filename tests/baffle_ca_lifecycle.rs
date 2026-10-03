@@ -28,7 +28,7 @@ fn run_reuses_project_config_tools_credentials_and_persistent_ca() {
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$CLADDING_PODMAN_LOG"
 case "$1:$2" in
-  pod:create|pod:rm|run:*|exec:--user|rm:-f)
+  pod:rm|run:*|exec:--user|rm:-f)
     if [ "$CLADDING_TEST_HELPER_NOISE" = "1" ]; then
       printf 'helper stdout: %s %s\n' "$1" "$2"
       printf 'helper stderr: %s %s\n' "$1" "$2" >&2
@@ -57,56 +57,154 @@ fi
 if [ "$1" = "rm" ] && [ "$CLADDING_TEST_FAIL_CLEANUP" = "1" ]; then
   exit 43
 fi
-if [ "$1" = "pod" ] && [ "$2" = "ps" ]; then
-  if [ -f "$CLADDING_PODMAN_STATE" ]; then
-    project_name=$(sed -n '1p' "$CLADDING_PODMAN_STATE")
-    project_root=$(sed -n '2p' "$CLADDING_PODMAN_STATE")
-    printf '[{"Labels":{"cladding":"%s","project_root":"%s"}}]\n' "$project_name" "$project_root"
-  else
-    printf '[]\n'
-  fi
-  exit 0
-fi
-if [ "$1" = "pod" ] && [ "$2" = "create" ]; then
-  shift 2
-  project_name=
-  project_root=
-  while [ "$#" -gt 0 ]; do
-    if [ "$1" = "--label" ]; then
-      shift
-      case "$1" in
-        cladding=*) project_name=${1#cladding=} ;;
-        project_root=*) project_root=${1#project_root=} ;;
-      esac
-    fi
-    shift
-  done
-  printf '%s\n%s\n' "$project_name" "$project_root" > "$CLADDING_PODMAN_STATE"
-  exit 0
-fi
-if [ "$1" = "image" ] && [ "$2" = "exists" ]; then
-  exit 0
-fi
+state=$CLADDING_PODMAN_STATE
+if [ "$1" = "image" ] && [ "$2" = "exists" ]; then exit 0; fi
 if [ "$1" = "info" ]; then
   printf '{"runsc":{"path":"runsc"}}\n'
   exit 0
 fi
-if [ "$2" = "exists" ]; then
-  if [ -f "$CLADDING_PODMAN_STATE" ]; then exit 0; else exit 1; fi
+if [ "$1" = "container" ] && [ "$2" = "ps" ]; then
+  printf '['
+  separator=
+  if [ -f "$state" ]; then
+    while IFS='|' read -r name project_name project_root app; do
+      [ -n "$name" ] || continue
+      printf '%s{"Names":["%s"],"Labels":{"app":"%s","cladding":"%s","project_root":"%s"}}' \
+        "$separator" "$name" "$app" "$project_name" "$project_root"
+      separator=,
+    done < "$state"
+  fi
+  printf ']\n'
+  exit 0
 fi
-if [ "$2" = "inspect" ]; then
-  if { [ "$1" = "container" ] && [ "$4" = "{{json .Config.Labels}}" ]; } || \
-     { [ "$1" = "pod" ] && [ "$4" = "{{json .Labels}}" ]; }; then
-    project_name=$(sed -n '1p' "$CLADDING_PODMAN_STATE")
-    project_root=$(sed -n '2p' "$CLADDING_PODMAN_STATE")
-    printf '{"cladding":"%s","project_root":"%s"}\n' "$project_name" "$project_root"
+if [ "$1" = "container" ] && [ "$2" = "exists" ]; then
+  if [ -f "$state" ] && awk -F '|' -v name="$3" '$1 == name { found = 1 } END { exit !found }' "$state"; then
+    exit 0
+  fi
+  exit 1
+fi
+if [ "$1" = "pod" ] && [ "$2" = "exists" ]; then
+  if [ -f "$CLADDING_LEGACY_PODS" ] && awk -F '|' -v name="$3" '$1 == name { found = 1 } END { exit !found }' "$CLADDING_LEGACY_PODS"; then
+    exit 0
+  fi
+  exit 1
+fi
+if [ "$1" = "pod" ] && [ "$2" = "inspect" ]; then
+  row=$(awk -F '|' -v name="$5" '$1 == name { print; exit }' "$CLADDING_LEGACY_PODS")
+  if [ -z "$row" ]; then exit 1; fi
+  app=$(printf '%s\n' "$row" | cut -d '|' -f 2)
+  project_name=$(printf '%s\n' "$row" | cut -d '|' -f 3)
+  project_root=$(printf '%s\n' "$row" | cut -d '|' -f 4)
+  if [ "$4" = "{{json .Labels}}" ]; then
+    printf '{"app":"%s","cladding":"%s","project_root":"%s"}\n' \
+      "$app" "$project_name" "$project_root"
+  else
+    printf 'Running\n'
+  fi
+  exit 0
+fi
+if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
+  row=$(awk -F '|' -v name="$5" '$1 == name { print; exit }' "$state")
+  if [ -z "$row" ]; then exit 1; fi
+  project_name=$(printf '%s\n' "$row" | cut -d '|' -f 2)
+  project_root=$(printf '%s\n' "$row" | cut -d '|' -f 3)
+  app=$(printf '%s\n' "$row" | cut -d '|' -f 4)
+  if [ "$4" = "{{json .Config.Labels}}" ]; then
+    printf '{"app":"%s","cladding":"%s","project_root":"%s"}\n' \
+      "$app" "$project_name" "$project_root"
   else
     printf 'running\n'
   fi
   exit 0
 fi
-if [ "$1" = "run" ]; then
-  shift
+if [ "$1" = "rm" ]; then
+  name=$3
+  if [ -f "$state" ]; then
+    awk -F '|' -v name="$name" '$1 != name' "$state" > "$state.tmp"
+    mv "$state.tmp" "$state"
+  fi
+  exit 0
+fi
+if [ "$1" = "pod" ] && [ "$2" = "rm" ]; then
+  name=$4
+  awk -F '|' -v name="$name" '$1 != name' "$CLADDING_LEGACY_PODS" > "$CLADDING_LEGACY_PODS.tmp"
+  mv "$CLADDING_LEGACY_PODS.tmp" "$CLADDING_LEGACY_PODS"
+  awk -F '|' -v name="$name-instance" '$1 != name' "$state" > "$state.tmp"
+  mv "$state.tmp" "$state"
+  exit 0
+fi
+if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; then
+  run_seen=
+  detached=
+  name=
+  project_name=
+  project_root=
+  app=
+  next=
+  for argument in "$@"; do
+    if [ -n "$next" ]; then
+      case "$next" in
+        name) name=$argument ;;
+        label)
+          case "$argument" in
+            cladding=*) project_name=${argument#cladding=} ;;
+            project_root=*) project_root=${argument#project_root=} ;;
+            app=*) app=${argument#app=} ;;
+          esac
+          ;;
+      esac
+      next=
+      continue
+    fi
+    case "$argument" in
+      run) run_seen=yes ;;
+      -d) [ -n "$run_seen" ] && detached=yes ;;
+      --name) next=name ;;
+      --label) next=label ;;
+    esac
+  done
+  if [ -n "$detached" ] && [ -n "$name" ]; then
+    credentials_dir=
+    config_dir=
+    secret_source_dir=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--volume" ]; then
+        shift
+        case "$1" in
+          *:/opt/credentials/baffle/secrets:ro)
+            secret_source_dir=${1%:/opt/credentials/baffle/secrets:ro}
+            ;;
+          *:/opt/credentials/baffle:ro)
+            credentials_dir=${1%:/opt/credentials/baffle:ro}
+            ;;
+          *:/opt/credentials/baffle)
+            credentials_dir=${1%:/opt/credentials/baffle}
+            ;;
+          *:/opt/config:ro)
+            config_dir=${1%:/opt/config:ro}
+            ;;
+        esac
+      fi
+      shift
+    done
+    if [ -n "$config_dir" ] && [ -f "$config_dir/proxy/sessions/agent.toml" ]; then
+      printf '%s\n' 'PROJECT_AGENT_SESSION_SNAPSHOT' >> "$CLADDING_PODMAN_LOG"
+      cat "$config_dir/proxy/sessions/agent.toml" >> "$CLADDING_PODMAN_LOG"
+    fi
+    if [ -n "$secret_source_dir" ]; then
+      printf 'PROJECT_BAFFLE_SECRET_SOURCE=%s\n' "$secret_source_dir" >> "$CLADDING_PODMAN_LOG"
+    fi
+    if [ -n "$credentials_dir" ] && [ -n "$secret_source_dir" ] \
+      && [ "$secret_source_dir" != "$credentials_dir/secrets" ]; then
+      if [ -n "$(find "$credentials_dir/secrets" -mindepth 1 -print -quit)" ]; then
+        echo "one-off runtime copied project secrets into its private credentials" >&2
+        exit 1
+      fi
+      printf '%s\n' 'ONE_OFF_SECRET_SOURCE_IS_SEPARATE_AND_PRIVATE' >> "$CLADDING_PODMAN_LOG"
+    fi
+    printf '%s|%s|%s|%s\n' "$name" "$project_name" "$project_root" "$app" >> "$state"
+    exit 0
+  fi
   credentials_dir=
   config_dir=
   tools_dir=
@@ -602,6 +700,133 @@ exit 0
         private_key
     );
 
+    let mut up = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
+    assert_success(up.output().unwrap());
+    let startup_log = read_log(&podman_log);
+    assert!(
+        !startup_log.contains("pod create"),
+        "cladding up must not create Podman pods: {startup_log}"
+    );
+    let proxy_start = startup_log
+        .lines()
+        .find(|line| line.contains("--name demo-proxy-instance"))
+        .expect("up starts the named proxy container");
+    assert!(proxy_start.contains("--network default"), "{proxy_start}");
+    assert!(proxy_start.contains("--userns keep-id"), "{proxy_start}");
+    assert!(proxy_start.contains("--init"), "{proxy_start}");
+    assert!(proxy_start.contains("app=proxy"), "{proxy_start}");
+
+    let mut down = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    down.args([
+        "--cladding-dir",
+        project_root.to_str().unwrap(),
+        "down",
+        "-v",
+    ]);
+    assert_success(down.output().unwrap());
+    let cleanup_log = read_log(&podman_log);
+    assert!(
+        !cleanup_log.lines().any(|line| line.starts_with("pod rm ")),
+        "down must not remove pods for the standalone topology: {cleanup_log}"
+    );
+
+    let legacy_pods = podman_log.with_extension("legacy-pods");
+    let container_state = podman_log.with_extension("state");
+    fs::write(
+        &legacy_pods,
+        format!("demo-proxy|proxy|demo|{}\n", project_root.display()),
+    )
+    .unwrap();
+    fs::write(
+        &container_state,
+        format!(
+            "demo-proxy-instance|demo|{}|proxy\n",
+            project_root.display()
+        ),
+    )
+    .unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut down_legacy = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    down_legacy.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
+    assert_success(down_legacy.output().unwrap());
+    let legacy_cleanup_log = read_log(&podman_log);
+    assert_eq!(
+        legacy_cleanup_log
+            .lines()
+            .filter(|line| line.starts_with("pod rm -f demo-proxy"))
+            .count(),
+        1,
+        "down should remove an owned legacy proxy pod: {legacy_cleanup_log}"
+    );
+    assert!(fs::read_to_string(&legacy_pods).unwrap().is_empty());
+    assert!(fs::read_to_string(&container_state).unwrap().is_empty());
+
+    fs::write(
+        &legacy_pods,
+        format!("demo-agent|unrelated|demo|{}\n", project_root.display()),
+    )
+    .unwrap();
+    fs::write(
+        &container_state,
+        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n",
+    )
+    .unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut down_foreign_pod = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    down_foreign_pod.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
+    assert!(!down_foreign_pod.output().unwrap().status.success());
+    let foreign_pod_log = read_log(&podman_log);
+    assert!(!foreign_pod_log.contains("pod rm -f demo-agent"));
+    assert!(!foreign_pod_log.contains("rm -f demo-agent-instance"));
+    assert!(!fs::read_to_string(&legacy_pods).unwrap().is_empty());
+
+    fs::write(&legacy_pods, "").unwrap();
+    fs::write(
+        &container_state,
+        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n",
+    )
+    .unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut down_foreign_container = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    down_foreign_container.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
+    assert!(!down_foreign_container.output().unwrap().status.success());
+    assert!(!read_log(&podman_log).contains("rm -f demo-agent-instance"));
+    assert_eq!(
+        fs::read_to_string(&container_state).unwrap(),
+        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n"
+    );
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -623,6 +848,10 @@ fn cli(
         .env("PATH", path)
         .env("CLADDING_PODMAN_LOG", podman_log)
         .env("CLADDING_PODMAN_STATE", podman_log.with_extension("state"))
+        .env(
+            "CLADDING_LEGACY_PODS",
+            podman_log.with_extension("legacy-pods"),
+        )
         .env("CLADDING_TEST_CA_CERT", certificate_source)
         .env("CLADDING_TEST_CA_KEY", private_key_source);
     command

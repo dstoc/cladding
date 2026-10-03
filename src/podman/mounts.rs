@@ -1,7 +1,7 @@
 use crate::runtime::{RuntimeMount, RuntimeMountSource, RuntimeSpec};
 use std::process::Command;
 
-pub(super) fn append_mount_args(cmd: &mut Command, pod_name: &str, mounts: &[RuntimeMount]) {
+pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts: &[RuntimeMount]) {
     for mount in mounts {
         if let RuntimeMountSource::Tmpfs { size_bytes } = &mount.source {
             let mut spec = format!("type=tmpfs,dst={},tmpfs-mode=1777,U=true", mount.mount_path);
@@ -20,7 +20,9 @@ pub(super) fn append_mount_args(cmd: &mut Command, pod_name: &str, mounts: &[Run
             RuntimeMountSource::NamedVolumeChown { claim_name } => claim_name.clone(),
             RuntimeMountSource::GeneratedEmptyMask { path } => path.display().to_string(),
             RuntimeMountSource::Tmpfs { .. } => unreachable!("tmpfs mounts handled above"),
-            RuntimeMountSource::EmptyDir => empty_dir_volume_name(pod_name, &mount.mount_path),
+            RuntimeMountSource::EmptyDir => {
+                empty_dir_volume_name(component_name, &mount.mount_path)
+            }
         };
 
         let mut volume = format!("{source}:{}", mount.mount_path);
@@ -39,9 +41,9 @@ pub(super) fn append_mount_args(cmd: &mut Command, pod_name: &str, mounts: &[Run
     }
 }
 
-fn empty_dir_volume_name(pod_name: &str, mount_path: &str) -> String {
+fn empty_dir_volume_name(component_name: &str, mount_path: &str) -> String {
     format!(
-        "cladding-{pod_name}-empty-{}",
+        "cladding-{component_name}-empty-{}",
         sanitize_volume_fragment(mount_path)
     )
 }
@@ -49,8 +51,8 @@ fn empty_dir_volume_name(pod_name: &str, mount_path: &str) -> String {
 pub(super) fn generated_empty_mask_dirs(spec: &RuntimeSpec) -> Vec<std::path::PathBuf> {
     let mut paths = std::collections::BTreeSet::new();
 
-    for pod in runtime_pods(spec) {
-        for container in &pod.containers {
+    for component in runtime_components(spec) {
+        for container in &component.containers {
             for mount in &container.mounts {
                 if let RuntimeMountSource::GeneratedEmptyMask { path } = &mount.source {
                     paths.insert(path.clone());
@@ -62,15 +64,15 @@ pub(super) fn generated_empty_mask_dirs(spec: &RuntimeSpec) -> Vec<std::path::Pa
     paths.into_iter().collect()
 }
 
-fn runtime_pods(spec: &RuntimeSpec) -> Vec<&crate::runtime::RuntimePod> {
-    let mut pods = vec![&spec.proxy, &spec.agent];
-    if let Some(pod) = &spec.nw_sandbox {
-        pods.push(pod);
+fn runtime_components(spec: &RuntimeSpec) -> Vec<&crate::runtime::RuntimeComponent> {
+    let mut components = vec![&spec.proxy, &spec.agent];
+    if let Some(component) = &spec.nw_sandbox {
+        components.push(component);
     }
-    if let Some(pod) = &spec.fs_sandbox {
-        pods.push(pod);
+    if let Some(component) = &spec.fs_sandbox {
+        components.push(component);
     }
-    pods
+    components
 }
 
 fn sanitize_volume_fragment(value: &str) -> String {

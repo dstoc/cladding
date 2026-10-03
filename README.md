@@ -2,7 +2,7 @@ Cladding lets you run an agent in a constrained container environment where netw
 
 - The agent runs as a standalone `--network none` container named `<name>-agent-instance`.
 - Optional delegated sandboxes run as standalone `--network none` containers named `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance`.
-- HTTP(S) egress is mediated by the `<name>-proxy` pod. Execution containers keep their local `socat` listeners at `127.0.0.1:3128` and mount only their own Baffle data socket; no separate proxy bridge container is used.
+- HTTP(S) egress is mediated by the standalone `<name>-proxy-instance` container. Execution containers keep their local `socat` listeners at `127.0.0.1:3128` and mount only their own Baffle data socket; no separate proxy bridge container is used.
 - `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance` each serve [`mcp-run`](crates/mcp-run/README.md) on a mounted Unix socket and execute commands only when allowed by their Rego policy modules under `.cladding/config/`.
 - Proxy rules use native Baffle TOML under `.cladding/config/proxy/`.
 
@@ -386,7 +386,8 @@ Default mounts may be overridden by adding an entry with the same `mount` value,
 
 Current runtime shape:
 
-- `<name>-proxy` is the only Podman pod. It contains `<name>-proxy-instance`, which runs Baffle and creates persistent proxy sessions.
+- `<name>-proxy-instance` is a standalone container. It runs Baffle and creates persistent proxy sessions.
+- The proxy uses Podman's default network. Execution containers use `--network none`.
 - `<name>-agent-instance`, `<name>-nw-sandbox-instance`, and `<name>-fs-sandbox-instance` are standalone execution containers with `--network none`.
 - Execution containers communicate through scoped Unix-domain socket mounts under `.cladding/runtime/sockets`.
 - `use_runsc`, when enabled, applies only to the standalone execution containers.
@@ -413,7 +414,7 @@ flowchart TB
     FA[mcp-run on /run/cladding/run/fs-sandbox/run.sock]
   end
 
-  subgraph P["pod: <name>-proxy"]
+  subgraph P["standalone: <name>-proxy-instance"]
     PX[Baffle daemon]
     AGS[Persistent agent session]
     NWS[Optional persistent nw-sandbox session]
@@ -451,7 +452,7 @@ cladding expose <containerport> [hostport] [--bind-address <address>] # block wh
 cladding inject <host-endpoint> [containerport] # block while forwarding agent localhost containerport to a host-reachable endpoint
 cladding reload-proxy
 cladding logs [agent|proxy|nw-sandbox|fs-sandbox] [podman logs args...] # view container logs
-cladding down         # stop managed containers and the proxy pod
+cladding down         # stop managed containers
 cladding destroy      # force-remove running containers
 cladding up           # validate prerequisites and start the containers
 cladding logs proxy -f       # follow proxy logs

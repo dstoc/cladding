@@ -63,7 +63,7 @@ validates and reuses it on later builds. `cladding check` and `cladding up`
 validate the CA but do not initialize or rotate it. Run `cladding build` before
 `up` when the project CA is not initialized.
 
-`cladding up` starts the Baffle proxy pod and enabled execution containers. The
+`cladding up` starts the standalone Baffle proxy container and enabled execution containers. The
 proxy starts its daemon and creates the persistent agent session. It creates
 the network-sandbox session only when that component is enabled. Cladding does
 not wait for session readiness before starting execution containers, so an
@@ -87,7 +87,7 @@ default.
 
 ## Runtime status
 
-The proxy pod runs one Baffle daemon in a minimal Debian trixie-slim image. Its startup script verifies the mounted config and credentials, starts the daemon, waits until `baffle list` accepts control commands, then creates the persistent agent session and the network-sandbox session when enabled. On shutdown, the script forwards the signal to Baffle; the daemon stops its persistent sessions with the proxy container.
+The proxy container runs one Baffle daemon in a minimal Debian trixie-slim image. Its startup script verifies the mounted config and credentials, starts the daemon, waits until `baffle list` accepts control commands, then creates the persistent agent session and the network-sandbox session when enabled. On shutdown, the script forwards the signal to Baffle; the daemon stops its persistent sessions with the proxy container.
 
 Cladding does not wait for Baffle session readiness before it starts execution containers. Early proxy requests can fail while the proxy container starts. Startup errors appear in proxy logs and the container exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime. CI installs the pinned Baffle binary and validates both session files in rootless Podman.
 

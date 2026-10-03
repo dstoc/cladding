@@ -8,10 +8,10 @@ pub struct RuntimeSpec {
     pub project_root: PathBuf,
     pub runtime_root: PathBuf,
     pub use_runsc: bool,
-    pub proxy: RuntimePod,
-    pub agent: RuntimePod,
-    pub nw_sandbox: Option<RuntimePod>,
-    pub fs_sandbox: Option<RuntimePod>,
+    pub proxy: RuntimeComponent,
+    pub agent: RuntimeComponent,
+    pub nw_sandbox: Option<RuntimeComponent>,
+    pub fs_sandbox: Option<RuntimeComponent>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,20 +38,13 @@ impl RuntimeNames {
 }
 
 #[derive(Debug, Clone)]
-pub struct RuntimePod {
+pub struct RuntimeComponent {
     pub name: String,
-    pub placement: RuntimePlacement,
     pub use_runsc: bool,
     pub labels: BTreeMap<String, String>,
     pub network_name: String,
     pub containers: Vec<RuntimeContainer>,
     pub user_namespace: RuntimeUserNamespace,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimePlacement {
-    Pod,
-    Standalone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

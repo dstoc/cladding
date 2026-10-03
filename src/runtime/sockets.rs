@@ -1,4 +1,4 @@
-use super::types::{RuntimeMount, RuntimeMountSource, RuntimePod, RuntimeSpec};
+use super::types::{RuntimeComponent, RuntimeMount, RuntimeMountSource, RuntimeSpec};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -39,11 +39,11 @@ impl RuntimeSpec {
 
         collect_generated_runtime_socket_dirs(&self.proxy, &mut paths);
         collect_generated_runtime_socket_dirs(&self.agent, &mut paths);
-        if let Some(pod) = &self.nw_sandbox {
-            collect_generated_runtime_socket_dirs(pod, &mut paths);
+        if let Some(component) = &self.nw_sandbox {
+            collect_generated_runtime_socket_dirs(component, &mut paths);
         }
-        if let Some(pod) = &self.fs_sandbox {
-            collect_generated_runtime_socket_dirs(pod, &mut paths);
+        if let Some(component) = &self.fs_sandbox {
+            collect_generated_runtime_socket_dirs(component, &mut paths);
         }
 
         paths.into_iter().collect()
@@ -98,8 +98,11 @@ pub(super) fn proxy_relay_volume_name(project_name: &str, component: &str) -> St
     format!("cladding-{project_name}-baffle-relay-{component}")
 }
 
-fn collect_generated_runtime_socket_dirs(pod: &RuntimePod, paths: &mut BTreeSet<PathBuf>) {
-    for container in &pod.containers {
+fn collect_generated_runtime_socket_dirs(
+    component: &RuntimeComponent,
+    paths: &mut BTreeSet<PathBuf>,
+) {
+    for container in &component.containers {
         for mount in &container.mounts {
             if let RuntimeMountSource::HostPath { path } = &mount.source
                 && is_generated_runtime_socket_path(path)
