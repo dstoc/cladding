@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.3.6](https://github.com/dstoc/cladding/compare/v0.3.5...v0.3.6) (2026-10-03)
+
+
+### Features
+
+* add one-off execution with automatic teardown ([#38](https://github.com/dstoc/cladding/issues/38)) ([defd261](https://github.com/dstoc/cladding/commit/defd26128fadf6e0b305d41a03910f37eb74ca11))
+* Add shared --cladding-dir and --config CLI options ([#37](https://github.com/dstoc/cladding/issues/37)) ([b4f31c0](https://github.com/dstoc/cladding/commit/b4f31c045672bf770fe1fe1d8a415ecfebc30291))
+* allow per-component Baffle session configs ([#60](https://github.com/dstoc/cladding/issues/60)) ([f36ca94](https://github.com/dstoc/cladding/commit/f36ca9426327e0d454e5daa86c2dbc85dd7e088d))
+* **cli:** quiet cladding run by default ([#63](https://github.com/dstoc/cladding/issues/63)) ([f85bde1](https://github.com/dstoc/cladding/commit/f85bde143600c95a019eb0e51010bc68a983024d)), closes [#37](https://github.com/dstoc/cladding/issues/37)
+* **cli:** rename run and exec lifecycle commands ([#54](https://github.com/dstoc/cladding/issues/54)) ([556be35](https://github.com/dstoc/cladding/commit/556be357ad3352681e8bb6402de326578475f633))
+* **cli:** snapshot project config for run ([#59](https://github.com/dstoc/cladding/issues/59)) ([f42a887](https://github.com/dstoc/cladding/commit/f42a887cc5d4f143e34875924e6b3e76999347fc))
+* **cli:** unify run target selection ([#53](https://github.com/dstoc/cladding/issues/53)) ([63a5510](https://github.com/dstoc/cladding/commit/63a5510e9ab202c32f6dc0f99b2ccdcb5a129985))
+* configurable component images and builds ([#34](https://github.com/dstoc/cladding/issues/34)) ([c8db780](https://github.com/dstoc/cladding/commit/c8db780dcc29d8d97c973ae472f1ed88e89f8a52))
+* embed pinned Baffle proxy binary ([#43](https://github.com/dstoc/cladding/issues/43)) ([f904d6b](https://github.com/dstoc/cladding/commit/f904d6ba5feb1a6c1c4f44267865ee80a285efcd))
+* enable Podman init for long-lived runtime containers ([#62](https://github.com/dstoc/cladding/issues/62)) ([4f34823](https://github.com/dstoc/cladding/commit/4f348238293426cddc7fef122720b54d0d515765))
+* install Baffle CA in execution containers ([#45](https://github.com/dstoc/cladding/issues/45)) ([6873808](https://github.com/dstoc/cladding/commit/68738084cbced9da9a1da203c45927caae772801))
+* **lifecycle:** share Baffle runtime preparation ([#48](https://github.com/dstoc/cladding/issues/48)) ([cb5f2ca](https://github.com/dstoc/cladding/commit/cb5f2ca1e6a7141ba53f5c7fb0779676f47b8592))
+* provision Baffle project CA and credential storage ([#42](https://github.com/dstoc/cladding/issues/42)) ([8f36939](https://github.com/dstoc/cladding/commit/8f369398be3c11821ec33c42158ec1175ca0b379))
+* **proxy:** clarify and verify Baffle session reload ([#49](https://github.com/dstoc/cladding/issues/49)) ([038a6c0](https://github.com/dstoc/cladding/commit/038a6c098b5dfef6edd676b97cef6e62e55f412d))
+* **proxy:** connect scoped Baffle data sockets ([#47](https://github.com/dstoc/cladding/issues/47)) ([2708eaa](https://github.com/dstoc/cladding/commit/2708eaa5385ab956bf1d5b0a048a374ba23eb83c))
+* **proxy:** default to deny all destinations ([#56](https://github.com/dstoc/cladding/issues/56)) ([654df6d](https://github.com/dstoc/cladding/commit/654df6d94de033884e2212885454e39acf8765cf))
+* **proxy:** delegate CA bootstrap to Baffle ([#57](https://github.com/dstoc/cladding/issues/57)) ([804e527](https://github.com/dstoc/cladding/commit/804e527fff019012137c6e3f90eb08cfad684895))
+* **proxy:** materialize native Baffle TOML config ([#44](https://github.com/dstoc/cladding/issues/44)) ([33bec54](https://github.com/dstoc/cladding/commit/33bec544cfe342516c62cd230c2a415b17d693d9))
+* **proxy:** start and supervise Baffle in proxy container ([#46](https://github.com/dstoc/cladding/issues/46)) ([5b89652](https://github.com/dstoc/cladding/commit/5b896526357b57d9ec3cd602e7f07d40cdc9bb5e))
+* **proxy:** upgrade Baffle to 1.0 and session v2 ([#55](https://github.com/dstoc/cladding/issues/55)) ([286c0f5](https://github.com/dstoc/cladding/commit/286c0f54ab5df442e45627e876d799052cd5aabe))
+* run proxy as a standalone container ([#64](https://github.com/dstoc/cladding/issues/64)) ([8c0913d](https://github.com/dstoc/cladding/commit/8c0913d46b2d64917ba918703de6e7c4bc1ff081))
+* support read-only, overlay, and tmpfs mounts ([#40](https://github.com/dstoc/cladding/issues/40)) ([2a1f4de](https://github.com/dstoc/cladding/commit/2a1f4ded6472ab45bb6f6c384be2b86dc7f87bb0))
+
+
+### Bug Fixes
+
+* supervise long-lived execution containers ([#61](https://github.com/dstoc/cladding/issues/61)) ([c50aa64](https://github.com/dstoc/cladding/commit/c50aa648f21887b1a44c886c14f154c13e9e58d3))
+
 ## [0.3.5](https://github.com/dstoc/cladding/compare/v0.3.4...v0.3.5) (2026-09-12)
 
 
