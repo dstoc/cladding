@@ -63,11 +63,7 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
         }
     }
 
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     prepare_persistent_baffle_ca(&context.project_root, || {
         initialize_baffle_ca(&spec, false).map_err(anyhow::Error::new)
     })?;
@@ -312,11 +308,7 @@ fn cmd_up_inner(
 ) -> Result<()> {
     let config = context.load_config()?;
     let status = project_runtime_status(context, &config, verbose)?;
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     let inventory = runtime_inventory(&spec, verbose)?;
 
     if status.already_running && inventory.is_fully_running() {
@@ -369,18 +361,114 @@ fn cmd_up_inner(
     Ok(())
 }
 
-pub(super) fn prepare_ephemeral_runtime_root(project_root: &std::path::Path) -> Result<()> {
-    let config_dir = project_root.join("config");
-    let home_dir = project_root.join("home");
-    let tools_bin_dir = project_root.join("tools/bin");
+pub(super) fn prepare_ephemeral_runtime_root(
+    source_project_root: &std::path::Path,
+    runtime_root: &std::path::Path,
+) -> Result<()> {
+    let config_dir = runtime_root.join("config");
+    let home_dir = runtime_root.join("home");
+    let tools_bin_dir = runtime_root.join("tools/bin");
 
+    snapshot_project_config(&source_project_root.join("config"), &config_dir)?;
     fs::create_dir_all(&config_dir).with_context(|| "failed to create one-off config directory")?;
     materialize_config(&config_dir)?;
     fs::create_dir_all(&home_dir).with_context(|| "failed to create one-off home directory")?;
     fs::create_dir_all(&tools_bin_dir)
         .with_context(|| "failed to create one-off tools directory")?;
     write_embedded_tools(&tools_bin_dir)?;
-    prepare_baffle_runtime(project_root)
+    prepare_baffle_runtime(runtime_root)
+}
+
+fn snapshot_project_config(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!(
+                    "failed to inspect project config directory {}",
+                    source.display()
+                ))
+                .into());
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(anyhow::anyhow!(
+            "project config path is not a directory: {}",
+            source.display()
+        )
+        .into());
+    }
+
+    copy_config_directory(source, destination)
+}
+
+fn copy_config_directory(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    let source_metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to inspect config directory {}", source.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(anyhow::anyhow!(
+            "project config path is not a regular directory: {}",
+            source.display()
+        )
+        .into());
+    }
+    fs::create_dir(destination)
+        .with_context(|| format!("failed to create config snapshot {}", destination.display()))?;
+
+    for entry in fs::read_dir(source).with_context(|| {
+        format!(
+            "failed to read project config directory {}",
+            source.display()
+        )
+    })? {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read project config directory {}",
+                source.display()
+            )
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path).with_context(|| {
+            format!(
+                "failed to inspect project config path {}",
+                source_path.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow::anyhow!(
+                "project config snapshot does not support symbolic links: {}",
+                source_path.display()
+            )
+            .into());
+        }
+
+        if metadata.is_dir() {
+            copy_config_directory(&source_path, &destination_path)?;
+        } else if metadata.is_file() {
+            fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "failed to copy project config file {}",
+                    source_path.display()
+                )
+            })?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "project config snapshot requires regular files and directories: {}",
+                source_path.display()
+            )
+            .into());
+        }
+    }
+
+    fs::set_permissions(destination, source_metadata.permissions()).with_context(|| {
+        format!(
+            "failed to set config snapshot permissions on {}",
+            destination.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn prepare_baffle_runtime(project_root: &std::path::Path) -> Result<()> {
@@ -391,11 +479,7 @@ fn prepare_baffle_runtime(project_root: &std::path::Path) -> Result<()> {
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     let config = context.load_config()?;
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose));
 
@@ -417,11 +501,7 @@ pub(super) fn cmd_down_ephemeral(context: &Context) -> Result<()> {
 
 pub(super) fn cmd_destroy(context: &Context) -> Result<()> {
     let config = context.load_config()?;
-    let spec = RuntimeSpec::build_with_workspace_root(
-        &context.project_root,
-        &context.workspace_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     let mut cleanup_error = None;
     record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false));
 
@@ -638,7 +718,7 @@ mod tests {
         fs::create_dir_all(&ephemeral_root).unwrap();
         cladding::credentials::ensure_baffle_credentials(&persistent_root).unwrap();
 
-        prepare_ephemeral_runtime_root(&ephemeral_root).unwrap();
+        prepare_ephemeral_runtime_root(&persistent_root, &ephemeral_root).unwrap();
 
         assert!(!persistent_root.join("credentials/baffle/ca.crt").exists());
         assert!(!ephemeral_root.join("credentials/baffle/ca.crt").exists());
@@ -653,6 +733,100 @@ mod tests {
                 .next()
                 .is_none()
         );
+        assert!(
+            ephemeral_root
+                .join("config/proxy/sessions/agent.toml")
+                .is_file()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ephemeral_run_snapshots_project_config_and_keeps_concurrent_runs_isolated() {
+        let root = std::env::temp_dir().join(format!(
+            "cladding-run-config-snapshot-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let source_root = root.join("project/.cladding");
+        let first_runtime = root.join("run-one/.cladding");
+        let second_runtime = root.join("run-two/.cladding");
+        let source_session = source_root.join("config/proxy/sessions/agent.toml");
+        let source_policy = source_root.join("config/nw_sandbox/main.rego");
+        let session_snapshot =
+            "version = 2\npersistent = true\nunmatched = \"deny\"\n\n[rules.\"example.com\"]\n";
+        let policy_snapshot = "package cladding.snapshot\nallow := true\n";
+        fs::create_dir_all(source_session.parent().unwrap()).unwrap();
+        fs::create_dir_all(source_policy.parent().unwrap()).unwrap();
+        fs::write(&source_session, session_snapshot).unwrap();
+        fs::write(&source_policy, policy_snapshot).unwrap();
+        fs::create_dir_all(&first_runtime).unwrap();
+        fs::create_dir_all(&second_runtime).unwrap();
+
+        std::thread::scope(|scope| {
+            let first =
+                scope.spawn(|| prepare_ephemeral_runtime_root(&source_root, &first_runtime));
+            let second =
+                scope.spawn(|| prepare_ephemeral_runtime_root(&source_root, &second_runtime));
+            first.join().unwrap().unwrap();
+            second.join().unwrap().unwrap();
+        });
+
+        let first_config = first_runtime.join("config");
+        let second_config = second_runtime.join("config");
+        let first_session = first_config.join("proxy/sessions/agent.toml");
+        let second_session = second_config.join("proxy/sessions/agent.toml");
+        assert_eq!(
+            fs::read_to_string(&first_session).unwrap(),
+            session_snapshot
+        );
+        assert_eq!(
+            fs::read_to_string(&second_session).unwrap(),
+            session_snapshot
+        );
+        assert_eq!(
+            fs::read_to_string(first_config.join("nw_sandbox/main.rego")).unwrap(),
+            policy_snapshot
+        );
+        assert!(first_config.join("proxy/daemon.toml").is_file());
+        assert!(
+            second_config
+                .join("proxy/sessions/nw-sandbox.toml")
+                .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(&source_session).unwrap(),
+            session_snapshot
+        );
+        assert_eq!(fs::read_to_string(&source_policy).unwrap(), policy_snapshot);
+
+        fs::write(&source_session, "project changed after run start\n").unwrap();
+        fs::write(&source_policy, "project policy changed after run start\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(&first_session).unwrap(),
+            session_snapshot
+        );
+        assert_eq!(
+            fs::read_to_string(&second_session).unwrap(),
+            session_snapshot
+        );
+
+        fs::write(&first_session, "run one changed its private copy\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(&second_session).unwrap(),
+            session_snapshot
+        );
+        assert_eq!(
+            fs::read_to_string(&source_session).unwrap(),
+            "project changed after run start\n"
+        );
+        assert_ne!(
+            first_runtime.join("credentials/baffle"),
+            second_runtime.join("credentials/baffle")
+        );
+        assert!(!first_runtime.join("credentials/baffle/ca.crt").exists());
+        assert!(!second_runtime.join("credentials/baffle/ca.crt").exists());
+
         fs::remove_dir_all(root).unwrap();
     }
 

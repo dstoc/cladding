@@ -28,7 +28,15 @@ including the CA. They do not initialize or rotate persistent CA material.
 `cladding run <command> [args...]` creates a unique temporary runtime, runs
 the command in its agent container, and removes the runtime when the command
 ends. Each invocation uses private runtime and credential paths and initializes
-its own temporary CA without requiring a project build.
+its own temporary CA without requiring a project build. At startup, it copies
+the selected project's `.cladding/config/` tree into that runtime and fills in
+missing defaults. This snapshot includes Baffle session and sandbox policy
+files, so later project edits do not change the active run. The run does not
+write runtime state back to the project. When the selected project has a
+Baffle secrets directory, the proxy mounts it separately as read-only without
+copying secret values into the temporary runtime. The run keeps its CA and
+runtime sockets private. A run without a selected project has no injection
+secrets.
 
 `cladding exec [--target agent|nw-sandbox|fs-sandbox] <command> [args...]`
 runs a command in an already-running project. It defaults to `agent`; a

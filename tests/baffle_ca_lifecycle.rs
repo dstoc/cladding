@@ -77,17 +77,43 @@ fi
 if [ "$1" = "run" ]; then
   shift
   credentials_dir=
+  config_dir=
+  secret_source_dir=
   while [ "$#" -gt 0 ]; do
     if [ "$1" = "--volume" ]; then
       shift
       case "$1" in
-        *:/opt/credentials/baffle*)
-          credentials_dir=${1%%:/opt/credentials/baffle*}
+        *:/opt/credentials/baffle/secrets:ro)
+          secret_source_dir=${1%:/opt/credentials/baffle/secrets:ro}
+          ;;
+        *:/opt/credentials/baffle:ro)
+          credentials_dir=${1%:/opt/credentials/baffle:ro}
+          ;;
+        *:/opt/credentials/baffle)
+          credentials_dir=${1%:/opt/credentials/baffle}
+          ;;
+        *:/opt/config:ro)
+          config_dir=${1%:/opt/config:ro}
           ;;
       esac
     fi
     shift
   done
+  if [ -n "$config_dir" ] && [ -f "$config_dir/proxy/sessions/agent.toml" ]; then
+    printf '%s\n' 'PROJECT_AGENT_SESSION_SNAPSHOT' >> "$CLADDING_PODMAN_LOG"
+    cat "$config_dir/proxy/sessions/agent.toml" >> "$CLADDING_PODMAN_LOG"
+  fi
+  if [ -n "$secret_source_dir" ]; then
+    printf 'PROJECT_BAFFLE_SECRET_SOURCE=%s\n' "$secret_source_dir" >> "$CLADDING_PODMAN_LOG"
+  fi
+  if [ -n "$credentials_dir" ] && [ -n "$secret_source_dir" ] \
+    && [ "$credentials_dir" != "$secret_source_dir" ]; then
+    if [ -n "$(find "$credentials_dir/secrets" -mindepth 1 -print -quit)" ]; then
+      echo "one-off runtime copied project secrets into its private credentials" >&2
+      exit 1
+    fi
+    printf '%s\n' 'ONE_OFF_SECRET_SOURCE_IS_SEPARATE_AND_PRIVATE' >> "$CLADDING_PODMAN_LOG"
+  fi
   if [ -n "$credentials_dir" ]; then
     cp "$CLADDING_TEST_CA_CERT" "$credentials_dir/ca.crt"
     cp "$CLADDING_TEST_CA_KEY" "$credentials_dir/ca-key.pem"
@@ -114,6 +140,17 @@ exit 0
     ]);
     assert_success(init.output().unwrap());
 
+    let project_secret_path = project_root.join("credentials/baffle/secrets/test-token");
+    fs::write(&project_secret_path, b"project-only secret value").unwrap();
+    fs::set_permissions(&project_secret_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let agent_session_path = project_root.join("config/proxy/sessions/agent.toml");
+    let project_session = format!(
+        "{}\n[rules.\"example.com\"]\nports = [443]\npaths = [\"/**\"]\n\n[[rules.\"example.com\".inject]]\nheader = \"Authorization\"\nsecret = \"test-token\"\nformat = \"bearer\"\n",
+        fs::read_to_string(&agent_session_path).unwrap()
+    );
+    fs::write(&agent_session_path, &project_session).unwrap();
+
     let mut run_before_build = cli(
         &root,
         &bin_dir,
@@ -128,6 +165,32 @@ exit 0
         "true",
     ]);
     assert_success(run_before_build.output().unwrap());
+    assert!(
+        read_log(&podman_log).contains("[rules.\"example.com\"]"),
+        "cladding run did not pass the project agent session policy to its private runtime"
+    );
+    let podman_commands = read_log(&podman_log);
+    assert!(
+        podman_commands.contains(&format!(
+            "{}:/opt/credentials/baffle/secrets:ro",
+            project_root.join("credentials/baffle/secrets").display()
+        )),
+        "cladding run did not mount the selected project secrets read-only"
+    );
+    assert!(
+        podman_commands.contains("ONE_OFF_SECRET_SOURCE_IS_SEPARATE_AND_PRIVATE"),
+        "cladding run did not keep project secret values out of private runtime credentials"
+    );
+    assert_eq!(
+        fs::read(&project_secret_path).unwrap(),
+        b"project-only secret value",
+        "cladding run changed the project secret source"
+    );
+    assert_eq!(
+        fs::read_to_string(&agent_session_path).unwrap(),
+        project_session,
+        "cladding run changed the project's agent session policy"
+    );
     assert!(
         !project_root.join("credentials/baffle/ca.crt").exists(),
         "ephemeral run must not initialize the persistent project CA"

@@ -110,7 +110,7 @@ project.
   cladding run codex exec "Implement the task"
   ```
 
-  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It can use the shared `.cladding` discovery behavior or a supplied configuration without creating runtime state in the source tree. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It snapshots the selected project's `.cladding/config/` tree when the command starts, then fills in any missing default files. The snapshot includes Baffle session policies and sandbox policies. Later edits to project config do not change the active run, and the run does not write its generated runtime state to the source tree. Cladding reads the selected JSON configuration at startup. If it finds no `.cladding` directory, it uses the defaults from `cladding init` without writing them to the source tree. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
 
 * Temporarily publish a TCP port from the agent container to the host while the project is running:
 
@@ -201,8 +201,10 @@ Custom agent and network-sandbox images must support the same initialization com
 
 `cladding down` and `cladding destroy` remove runtime resources but keep the
 project CA and secrets. `cladding run` initializes a separate temporary CA and
-empty secrets directory before it creates the runtime, then removes them during
-cleanup.
+empty private secrets directory before it creates the runtime, then removes
+them during cleanup. For a selected project, the proxy mounts that project's
+secrets directory separately as read-only; it does not copy secret values into
+the temporary runtime. A run without a project has no injection secrets.
 
 To rotate a CA, stop the project, move the full `credentials/baffle` directory to a protected backup outside version control, then run `cladding build` to generate a new CA. Provision the required secret files again through the secret manager. Distribute the new `ca.crt` to clients, update their trust stores, and remove trust in the old CA after clients have moved. The backup contains both the private key and any provisioned secrets; protect it accordingly.
 
