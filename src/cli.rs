@@ -24,7 +24,6 @@ const DEFAULT_CLADDING_BUILD_IMAGE: &str = "localhost/cladding-default:latest";
 const DEFAULT_CLI_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
 const DEFAULT_SANDBOX_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
 const CONTAINER_HOME_DIR: &str = "/home/user";
-const CONTAINER_WORKSPACE_DIR: &str = "/home/user/workspace";
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
