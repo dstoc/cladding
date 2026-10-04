@@ -102,7 +102,7 @@ and reuse the same CA. `check` and `up` validate the CA and never initialize or
 rotate it. Run `cladding build` to initialize a missing CA before starting the
 project.
 
-* Execute commands in the agent container of an already-running project (workdir follows your host `cwd` relative to the directory containing `.cladding`; if it cannot be mapped, the command starts in `/home/user`):
+* Execute commands in the agent container of an already-running project. Cladding maps the host working directory through the most-specific active host-backed mount for the selected target. If no active host-backed mount contains it, the command starts in `/home/user`:
 
   ```bash
   cladding exec codex --yolo
