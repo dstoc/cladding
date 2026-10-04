@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.7](https://github.com/dstoc/cladding/compare/v0.3.6...v0.3.7) (2026-10-04)
+
+
+### Features
+
+* Resolve cwd from effective mounts ([#66](https://github.com/dstoc/cladding/issues/66)) ([d3c7193](https://github.com/dstoc/cladding/commit/d3c71937a5d17612df60ba4b6fc780e773de3ebb))
+
 ## [0.3.6](https://github.com/dstoc/cladding/compare/v0.3.5...v0.3.6) (2026-10-03)
 
 
