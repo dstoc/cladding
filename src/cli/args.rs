@@ -55,6 +55,13 @@ pub(super) enum CommandSpec {
         #[arg(short, long)]
         verbose: bool,
         #[arg(
+            long = "env",
+            value_name = "KEY[=VALUE]",
+            action = ArgAction::Append,
+            help = "Set an environment variable for the user command. Repeat to set multiple values"
+        )]
+        env: Vec<String>,
+        #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
             allow_hyphen_values = true,
@@ -67,7 +74,12 @@ pub(super) enum CommandSpec {
         /// Execution target. Sandbox targets run directly from the host and bypass agent-side delegation and policy checks
         #[arg(long, value_enum, default_value_t = ExecTarget::Agent)]
         target: ExecTarget,
-        #[arg(long = "env", value_name = "KEY[=VALUE]", action = ArgAction::Append)]
+        #[arg(
+            long = "env",
+            value_name = "KEY[=VALUE]",
+            action = ArgAction::Append,
+            help = "Set an environment variable for the user command. Repeat to set multiple values"
+        )]
         env: Vec<String>,
         #[arg(
             value_name = "COMMAND",
@@ -280,6 +292,23 @@ mod tests {
     }
 
     #[test]
+    fn run_and_exec_help_describe_environment_overrides_consistently() {
+        for name in ["run", "exec"] {
+            let help = Cli::command()
+                .find_subcommand_mut(name)
+                .expect("command should exist")
+                .render_help()
+                .to_string();
+
+            assert!(help.contains("--env <KEY[=VALUE]>"), "{name} help: {help}");
+            assert!(
+                help.contains("Repeat to set multiple values"),
+                "{name} help: {help}"
+            );
+        }
+    }
+
+    #[test]
     fn expose_container_port_parses() {
         let cli = Cli::try_parse_from(["cladding", "expose", "3000"]).expect("cli parse");
         match cli.command.expect("command") {
@@ -414,9 +443,10 @@ mod tests {
         ] {
             let cli = Cli::try_parse_from(argv).expect("run command should parse");
             match cli.command.expect("command") {
-                CommandSpec::Run { args, verbose } => {
+                CommandSpec::Run { args, env, verbose } => {
                     assert_eq!(args, ["codex", "exec", "--full-auto"]);
                     assert!(!verbose);
+                    assert!(env.is_empty());
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
@@ -432,12 +462,42 @@ mod tests {
             let cli = Cli::try_parse_from(["cladding", "run", flag, "--", "echo", "hello"])
                 .expect("run verbose flag should parse");
             match cli.command.expect("command") {
-                CommandSpec::Run { args, verbose } => {
+                CommandSpec::Run { args, env, verbose } => {
                     assert!(verbose);
                     assert_eq!(args, ["echo", "hello"]);
+                    assert!(env.is_empty());
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn run_and_exec_accept_repeated_environment_overrides() {
+        for name in ["run", "exec"] {
+            let cli = Cli::try_parse_from([
+                "cladding", name, "--env", "FOO=bar", "--env", "BAZ", "--", "env",
+            ])
+            .expect("repeated environment options should parse");
+
+            let (env, args) = match cli.command.expect("command") {
+                CommandSpec::Run { env, args, .. } | CommandSpec::Exec { env, args, .. } => {
+                    (env, args)
+                }
+                other => panic!("unexpected command: {other:?}"),
+            };
+            assert_eq!(env, ["FOO=bar", "BAZ"]);
+            assert_eq!(args, ["env"]);
+        }
+    }
+
+    #[test]
+    fn run_and_exec_reject_environment_options_without_a_value() {
+        for name in ["run", "exec"] {
+            assert!(
+                Cli::try_parse_from(["cladding", name, "--env", "--", "env"]).is_err(),
+                "{name} should reject --env without a value"
+            );
         }
     }
 

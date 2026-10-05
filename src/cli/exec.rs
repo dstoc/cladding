@@ -56,6 +56,7 @@ pub(super) fn cmd_exec(
 
 pub(super) fn cmd_run_command(
     context: &Context,
+    env_vars: &[String],
     args: &[String],
     forward_stdin: bool,
 ) -> Result<()> {
@@ -68,7 +69,7 @@ pub(super) fn cmd_run_command(
             command_name: "run",
             mount_target: MountTarget::Agent,
             container_name: &container_name,
-            env_vars: &[],
+            env_vars,
             args,
             allow_interactive: forward_stdin,
             forward_stdin,
