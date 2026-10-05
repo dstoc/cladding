@@ -14,7 +14,7 @@ case "$runtime" in
   *) echo "runtime must be default or runsc" >&2; exit 2 ;;
 esac
 
-for tool in podman jq openssl git sha256sum; do
+for tool in podman jq openssl git sha256sum python3; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required integration-test tool is missing: $tool" >&2
     exit 2
@@ -42,7 +42,19 @@ client_image="localhost/$project_name-client:latest"
 origin_image="localhost/$project_name-origin:latest"
 run_origin_name=
 run_pid=
+run_secret_value=
 phase=initialize
+
+redact_run_log() {
+  CLADDING_REDACT_SECRET="$run_secret_value" python3 -c '
+import os
+import sys
+
+secret = os.environb.get(b"CLADDING_REDACT_SECRET", b"")
+output = sys.stdin.buffer.read()
+sys.stdout.buffer.write(output.replace(secret, b"[REDACTED]") if secret else output)
+'
+}
 
 cleanup() {
   status=$?
@@ -58,6 +70,12 @@ cleanup() {
     echo "Baffle runtime integration failed during: $phase" >&2
     printf '::error title=Baffle runtime integration phase::%s (exit code %s)\n' \
       "$phase" "$status"
+    if [ -s "$temp_root/run.log" ]; then
+      echo "Saved cladding run output (secret values redacted):" >&2
+      if ! redact_run_log < "$temp_root/run.log" >&2; then
+        echo "Could not safely redact the saved cladding run output; log omitted." >&2
+      fi
+    fi
     podman logs "$project_name-proxy-instance" >&2 2>/dev/null || true
     podman logs "$origin_name" >&2 2>/dev/null || true
   fi
@@ -571,6 +589,13 @@ mkdir -m 0700 "$temp_root/run-tmp"
 run_secret_value="cladding-test-old-value"
 run_secret_name="run-token"
 run_persistent_secret_name="test-token-new"
+phase="verify integration log secret redaction"
+redacted_log=$(printf 'before:%s:after\n' "$run_secret_value" | redact_run_log)
+if [ "$redacted_log" != 'before:[REDACTED]:after' ]; then
+  echo "integration log redaction did not remove the run secret value" >&2
+  exit 1
+fi
+phase="verify one-off shared project state and isolated runtime cleanup"
 run_persistent_secret_before=$(sha256sum \
   "$project_root/credentials/baffle/secrets/$run_persistent_secret_name" | cut -d ' ' -f 1)
 write_agent_policy "$run_secret_name" "/replacement/**"
@@ -612,7 +637,6 @@ while [ "$attempt" -lt 60 ]; do
     break
   fi
   if [ -f "$temp_root/run.status" ]; then
-    cat "$temp_root/run.log" >&2
     echo "one-off runtime exited before creating its private runtime root" >&2
     exit 1
   fi
@@ -642,7 +666,6 @@ attempt=0
 while ! podman container exists "$run_name-proxy-instance" >/dev/null 2>&1 \
   || ! podman container exists "$run_name-agent-instance" >/dev/null 2>&1; do
   if [ "$attempt" -ge 60 ] || [ -f "$temp_root/run.status" ]; then
-    cat "$temp_root/run.log" >&2
     echo "one-off runtime did not start its proxy and agent containers" >&2
     exit 1
   fi
@@ -726,7 +749,6 @@ phase="verify Baffle resolves the run-only secret override"
 attempt=0
 while [ ! -f "$temp_root/workspace/.run-request-done" ]; do
   if [ "$attempt" -ge 60 ] || [ -f "$temp_root/run.status" ]; then
-    cat "$temp_root/run.log" >&2
     echo "one-off command did not complete its Baffle secret request" >&2
     exit 1
   fi
@@ -757,20 +779,23 @@ if [ "$run_status" -ne 7 ]; then
   echo "one-off command exited with status $run_status; expected 7" >&2
   exit 1
 fi
-phase="verify one-off runtime root cleanup"
+phase="verify one-off runtime root removal"
 if [ -e "$run_root" ]; then
   echo "one-off runtime root remains after the command exits: $run_root" >&2
   exit 1
 fi
+phase="verify run-only secret was not persisted"
 if [ -e "$project_root/credentials/baffle/secrets/$run_secret_name" ]; then
   echo "one-off run created a persistent Baffle secret file" >&2
   exit 1
 fi
+phase="verify other persistent Baffle secret is unchanged"
 if [ "$(sha256sum "$project_root/credentials/baffle/secrets/$run_persistent_secret_name" | cut -d ' ' -f 1)" \
   != "$run_persistent_secret_before" ]; then
   echo "one-off run changed a different persistent Baffle secret file" >&2
   exit 1
 fi
+phase="verify persistent project CA is unchanged"
 ca_after_run=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
 if [ "$ca_after_run" != "$ca_before" ]; then
   echo "one-off run changed the persistent project CA" >&2
