@@ -117,9 +117,14 @@ project.
   cladding run codex exec "Implement the task"
   cladding run --env FOO=bar -- env
   cladding run -v -- codex exec "Implement the task"
+  GITHUB_TOKEN="$(mint-short-lived-token)" cladding run \
+    --secret github-token=env:GITHUB_TOKEN -- codex exec "Implement the task"
+  cladding run --secret github-token=file:/run/user/1000/token -- codex
   ```
 
   `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It uses the selected project's `.cladding/config/`, `tools/`, `credentials/`, and `home/` directly, including selected Baffle session files and the persistent project CA. It creates only runtime files and sockets in the private runtime directory, then removes that directory when the command ends. Run requires a project initialized with `cladding init` and prepared with `cladding build`; it validates the project CA and does not create or rotate it. The command runs with the same agent working-directory and terminal behavior as `exec`. Use repeatable `--env KEY[=VALUE]` options before `--` to set environment variables for the command, as with `cladding exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+
+  Use repeatable `--secret NAME=env:VARIABLE` or `--secret NAME=file:PATH` options before `--` to provide Baffle secret values for one run. The symbolic name must match the name in the session rule and daemon allowlist. Cladding writes each value to a private `0600` file in the run directory and mounts that file read-only into the proxy. It does not change the project secret file or pass the value to the user command. The override file is removed with the runtime. Literal secret values are not accepted as `--secret` arguments. `--secret` applies only to `run`; persistent runtimes and `exec` continue to use project credentials.
 
   `cladding run` keeps successful startup and cleanup diagnostics quiet by default. Use `-v` or `--verbose` to show Podman and certificate setup output, instance details, and cleanup activity.
 
@@ -201,10 +206,13 @@ To use an injection credential, add its symbolic name to
 rule. Provision a regular file with that name under `secrets/`. Keep the
 credentials directory at mode `0700` and each secret file at mode `0600` on
 Unix hosts. Use a secret manager or another protected source to write the
-file; do not put a secret value in TOML, a command argument, an environment
-variable, or a log. Replace a secret file through the same protected process,
-then run `cladding reload-proxy`. The new value applies to new connections;
-open connections keep the value they already use.
+file; do not put a secret value in TOML, a command argument, or a log. For a
+single `cladding run`, use `--secret NAME=env:VARIABLE` or
+`--secret NAME=file:PATH` to provide a run-specific value. Cladding reads the
+host source into a private run file and does not add its value to the user
+command's environment. Replace a persistent secret file through the same
+protected process, then run `cladding reload-proxy`. The new value applies to
+new connections; open connections keep the value they already use.
 
 After Cladding creates the agent and enabled network-sandbox containers, it runs `podman exec --user 0` in each container. The command copies the public certificate to `/usr/local/share/ca-certificates/baffle.crt` and runs `update-ca-certificates`. UID 0 is container root for this exec; Cladding does not start the container as privileged. The workload still runs as its configured unprivileged user. The default `Containerfile.cladding` sets `NODE_USE_SYSTEM_CA=1` so Node.js uses the updated system trust store.
 
@@ -447,7 +455,7 @@ cladding init [name]  # create .cladding config and runtime layout
 cladding build       # build images, refresh embedded tools, initialize persistent Baffle CA
 cladding check        # verify project prerequisites, including the persistent Baffle CA
 cladding ps           # list running cladding projects
-cladding run [-v|--verbose] [--env KEY[=VALUE] ...] [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
+cladding run [-v|--verbose] [--env KEY[=VALUE] ...] [--secret NAME=env:VARIABLE|file:PATH ...] [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
 cladding exec [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] <cmd> [args...] # execute in the selected container of a running runtime
 cladding expose <containerport> [hostport] [--bind-address <address>] # block while forwarding host address/port to agent containerport
 cladding inject <host-endpoint> [containerport] # block while forwarding agent localhost containerport to a host-reachable endpoint

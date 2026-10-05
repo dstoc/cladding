@@ -8,6 +8,10 @@ fi
 
 cladding_bin=$1
 baffle_bin=$2
+command -v python3 >/dev/null 2>&1 || {
+  echo "required validation tool is missing: python3" >&2
+  exit 2
+}
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 control_check_script="$script_dir/validate_baffle_control_socket.sh"
 socket_probe_bin=${BAFFLE_SOCKET_PROBE_BIN:-}
@@ -30,10 +34,15 @@ relay_volume_agent=
 relay_volume_nw_sandbox=
 relay_proxy_name=
 current_phase="initialize validation"
+run_pid=
 
 cleanup() {
   status=$?
   trap - EXIT
+  if [ -n "$run_pid" ]; then
+    kill "$run_pid" 2>/dev/null || true
+    wait "$run_pid" 2>/dev/null || true
+  fi
   if [ "$status" -ne 0 ]; then
     echo "::error title=Baffle socket validation failed::phase=$current_phase; validator exited with code $status"
     for name in "$disabled_container" "$enabled_container"; do
@@ -72,6 +81,17 @@ stat_uid() {
 
 container_stat_mode() {
   podman exec "$1" stat -c '%a' "$2" 2>/dev/null
+}
+
+redact_run_secret_log() {
+  CLADDING_REDACT_SECRET="$run_secret_value" python3 -c '
+import os
+import sys
+
+secret = os.environb.get(b"CLADDING_REDACT_SECRET", b"")
+output = sys.stdin.buffer.read()
+sys.stdout.buffer.write(output.replace(secret, b"[REDACTED]") if secret else output)
+'
 }
 
 require_container_mode() {
@@ -509,4 +529,146 @@ run_proxy_startup() {
 
 run_proxy_startup "$disabled_container" false "agent"
 run_proxy_startup "$enabled_container" true "agent and network-sandbox"
-echo "Baffle proxy startup and persistent-session shutdown passed under rootless Podman"
+
+current_phase="verify private per-run Baffle secrets overlay"
+run_secret_name="mount-probe"
+run_secret_value="cladding-test-run-secret"
+run_project_secret_name="mount-project-probe"
+redacted_log=$(printf 'before:%s:after\n' "$run_secret_value" | redact_run_secret_log)
+if [ "$redacted_log" != 'before:[REDACTED]:after' ]; then
+  echo "Baffle validation log redaction did not remove the run secret value" >&2
+  exit 1
+fi
+printf '%s' "cladding-test-persistent-secret" \
+  > "$project_root/credentials/baffle/secrets/$run_secret_name"
+chmod 0600 "$project_root/credentials/baffle/secrets/$run_secret_name"
+printf '%s' "cladding-test-other-persistent-secret" \
+  > "$project_root/credentials/baffle/secrets/$run_project_secret_name"
+chmod 0600 "$project_root/credentials/baffle/secrets/$run_project_secret_name"
+run_persistent_secret_before=$(sha256sum \
+  "$project_root/credentials/baffle/secrets/$run_secret_name" | cut -d ' ' -f 1)
+run_project_secret_before=$(sha256sum \
+  "$project_root/credentials/baffle/secrets/$run_project_secret_name" | cut -d ' ' -f 1)
+jq '.agent.image = "localhost/cladding-proxy:latest" | .nw_sandbox.enabled = false' \
+  "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
+mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
+mkdir -m 0700 "$temp_root/run-tmp"
+(
+  cd "$temp_root/workspace"
+  export CLADDING_RUN_SECRET_PROBE="$run_secret_value"
+  if TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v \
+    --secret "$run_secret_name=env:CLADDING_RUN_SECRET_PROBE" -- \
+    /bin/sh -ec 'test -z "${CLADDING_RUN_SECRET_PROBE+x}"
+      while [ ! -f /home/user/workspace/.run-secret-mount-finish ]; do sleep 1; done'; then
+    run_status=0
+  else
+    run_status=$?
+  fi
+  printf '%s\n' "$run_status" > "$temp_root/run-secret-mount.status"
+  exit "$run_status"
+) > "$temp_root/run-secret-mount.log" 2>&1 &
+run_pid=$!
+run_root=
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+  run_root=$(find "$temp_root/run-tmp" -mindepth 2 -maxdepth 4 \
+    -path '*/runtime/scripts/proxy_startup.sh' -print -quit \
+    | sed 's|/runtime/scripts/proxy_startup.sh$||')
+  if [ -n "$run_root" ]; then
+    break
+  fi
+  if [ -f "$temp_root/run-secret-mount.status" ]; then
+    redact_run_secret_log < "$temp_root/run-secret-mount.log" >&2
+    echo "one-off secret mount runtime exited before creating its private runtime root" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+if [ -z "$run_root" ]; then
+  echo "one-off secret mount runtime did not create its private runtime root" >&2
+  exit 1
+fi
+run_name=$(sed -n 's/^starting one-off instance: //p' \
+  "$temp_root/run-secret-mount.log" | head -n 1)
+run_proxy="$run_name-proxy-instance"
+run_agent="$run_name-agent-instance"
+attempt=0
+while ! podman container exists "$run_proxy" >/dev/null 2>&1 \
+  || ! podman container exists "$run_agent" >/dev/null 2>&1; do
+  if [ "$attempt" -ge 60 ] || [ -f "$temp_root/run-secret-mount.status" ]; then
+    redact_run_secret_log < "$temp_root/run-secret-mount.log" >&2
+    echo "one-off secret mount runtime did not start proxy and agent containers" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+run_secret_directory="$run_root/runtime/secrets"
+run_secret_destination="/opt/credentials/baffle/secrets/$run_secret_name"
+require_mode "$run_secret_directory" 700 "Run secret directory mode mismatch"
+require_mode "$run_secret_directory/$run_secret_name" 600 "Run secret file mode mismatch"
+if ! podman inspect "$run_proxy" | jq -e \
+  --arg source "$run_secret_directory" \
+  --arg destination "/opt/credentials/baffle/secrets" \
+  '.[0].Mounts | any(.Source == $source and .Destination == $destination and .RW == false)' \
+  >/dev/null; then
+  echo "one-off proxy did not mount its run secret directory read-only over the Baffle secrets path" >&2
+  exit 1
+fi
+if ! podman inspect "$run_proxy" | jq -e \
+  --arg source "$project_root/credentials/baffle/secrets/$run_project_secret_name" \
+  --arg destination "/opt/credentials/baffle/secrets/$run_project_secret_name" \
+  '.[0].Mounts | any(.Source == $source and .Destination == $destination and .RW == false)' \
+  >/dev/null; then
+  echo "one-off proxy did not preserve the non-overridden project secret as a read-only mount" >&2
+  exit 1
+fi
+if podman inspect "$run_agent" | jq -e \
+  --arg source "$run_secret_directory" \
+  --arg destination "/opt/credentials/baffle/secrets" \
+  '.[0].Mounts | any(.Source == $source or .Destination == $destination or (.Destination | startswith($destination + "/")))' \
+  >/dev/null; then
+  echo "one-off agent received the run secret override" >&2
+  exit 1
+fi
+podman exec "$run_proxy" test -s /opt/credentials/baffle/ca.crt
+podman exec "$run_proxy" test -s "/opt/credentials/baffle/secrets/$run_secret_name"
+podman exec "$run_proxy" test -s "/opt/credentials/baffle/secrets/$run_project_secret_name"
+expected_run_secret_hash=$(printf '%s' "$run_secret_value" | sha256sum | cut -d ' ' -f 1)
+mounted_run_secret_hash=$(podman exec "$run_proxy" sha256sum "$run_secret_destination" | cut -d ' ' -f 1)
+if [ "$expected_run_secret_hash" != "$mounted_run_secret_hash" ]; then
+  echo "one-off proxy did not read the host environment secret value" >&2
+  exit 1
+fi
+expected_project_secret_hash=$(sha256sum \
+  "$project_root/credentials/baffle/secrets/$run_project_secret_name" | cut -d ' ' -f 1)
+mounted_project_secret_hash=$(podman exec "$run_proxy" sha256sum \
+  "/opt/credentials/baffle/secrets/$run_project_secret_name" | cut -d ' ' -f 1)
+if [ "$expected_project_secret_hash" != "$mounted_project_secret_hash" ]; then
+  echo "one-off proxy could not read the non-overridden project secret" >&2
+  exit 1
+fi
+if grep -F "$run_secret_value" "$temp_root/run-secret-mount.log" >/dev/null; then
+  echo "one-off verbose log contains the run secret value" >&2
+  exit 1
+fi
+touch "$temp_root/workspace/.run-secret-mount-finish"
+wait "$run_pid"
+run_pid=
+if [ -e "$run_root" ]; then
+  echo "one-off secret mount runtime directory remains after cleanup" >&2
+  exit 1
+fi
+if [ "$(sha256sum "$project_root/credentials/baffle/secrets/$run_secret_name" | cut -d ' ' -f 1)" \
+  != "$run_persistent_secret_before" ]; then
+  echo "one-off secret override changed the persistent Baffle secret file" >&2
+  exit 1
+fi
+if [ "$(sha256sum "$project_root/credentials/baffle/secrets/$run_project_secret_name" | cut -d ' ' -f 1)" \
+  != "$run_project_secret_before" ]; then
+  echo "one-off secret overlay changed the non-overridden project secret file" >&2
+  exit 1
+fi
+
+echo "Baffle proxy startup, run-secret overlay, project-secret passthrough, and persistent-session shutdown passed under rootless Podman"

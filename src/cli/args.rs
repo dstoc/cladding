@@ -62,6 +62,13 @@ pub(super) enum CommandSpec {
         )]
         env: Vec<String>,
         #[arg(
+            long = "secret",
+            value_name = "NAME=env:VARIABLE|file:PATH",
+            action = ArgAction::Append,
+            help = "Override a Baffle secret for this run from a host environment variable or file. Repeat to set multiple secrets"
+        )]
+        secret: Vec<String>,
+        #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
             allow_hyphen_values = true,
@@ -443,10 +450,16 @@ mod tests {
         ] {
             let cli = Cli::try_parse_from(argv).expect("run command should parse");
             match cli.command.expect("command") {
-                CommandSpec::Run { args, env, verbose } => {
+                CommandSpec::Run {
+                    args,
+                    env,
+                    secret,
+                    verbose,
+                } => {
                     assert_eq!(args, ["codex", "exec", "--full-auto"]);
                     assert!(!verbose);
                     assert!(env.is_empty());
+                    assert!(secret.is_empty());
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
@@ -462,10 +475,16 @@ mod tests {
             let cli = Cli::try_parse_from(["cladding", "run", flag, "--", "echo", "hello"])
                 .expect("run verbose flag should parse");
             match cli.command.expect("command") {
-                CommandSpec::Run { args, env, verbose } => {
+                CommandSpec::Run {
+                    args,
+                    env,
+                    secret,
+                    verbose,
+                } => {
                     assert!(verbose);
                     assert_eq!(args, ["echo", "hello"]);
                     assert!(env.is_empty());
+                    assert!(secret.is_empty());
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
@@ -488,6 +507,70 @@ mod tests {
             };
             assert_eq!(env, ["FOO=bar", "BAZ"]);
             assert_eq!(args, ["env"]);
+        }
+    }
+
+    #[test]
+    fn run_accepts_repeated_secret_overrides_before_the_command_delimiter() {
+        let cli = Cli::try_parse_from([
+            "cladding",
+            "run",
+            "--secret",
+            "github-token=env:GITHUB_TOKEN",
+            "--secret",
+            "other-token=file:/tmp/other-token",
+            "--",
+            "env",
+        ])
+        .expect("run secret overrides should parse");
+
+        match cli.command.expect("command") {
+            CommandSpec::Run {
+                secret, env, args, ..
+            } => {
+                assert_eq!(
+                    secret,
+                    [
+                        "github-token=env:GITHUB_TOKEN",
+                        "other-token=file:/tmp/other-token"
+                    ]
+                );
+                assert!(env.is_empty());
+                assert_eq!(args, ["env"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secret_overrides_are_only_available_for_run() {
+        let help = Cli::command()
+            .find_subcommand_mut("run")
+            .expect("run command")
+            .render_help()
+            .to_string();
+        assert!(help.contains("--secret <NAME=env:VARIABLE|file:PATH>"));
+
+        let exec_help = Cli::command()
+            .find_subcommand_mut("exec")
+            .expect("exec command")
+            .render_help()
+            .to_string();
+        assert!(!exec_help.contains("--secret"));
+        let cli = Cli::try_parse_from([
+            "cladding",
+            "exec",
+            "--secret",
+            "github-token=env:GITHUB_TOKEN",
+            "echo",
+        ])
+        .expect("exec accepts positional command arguments");
+        match cli.command.expect("command") {
+            CommandSpec::Exec { args, env, .. } => {
+                assert_eq!(args, ["--secret", "github-token=env:GITHUB_TOKEN", "echo"]);
+                assert!(env.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 
