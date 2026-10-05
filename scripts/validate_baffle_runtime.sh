@@ -674,7 +674,7 @@ while ! podman container exists "$run_name-proxy-instance" >/dev/null 2>&1 \
 done
 run_proxy="$run_name-proxy-instance"
 run_agent="$run_name-agent-instance"
-run_secret_source="$run_root/runtime/secrets/$run_secret_name"
+run_secret_directory="$run_root/runtime/secrets"
 assert_mount() {
   container=$1
   source=$2
@@ -691,12 +691,22 @@ phase="verify one-off mounts use shared project files"
 assert_mount "$run_proxy" "$project_root/config" /opt/config
 assert_mount "$run_proxy" "$project_root/credentials/baffle" /opt/credentials/baffle
 if ! podman inspect "$run_proxy" | jq -e \
-  --arg source "$run_secret_source" --arg destination "/opt/credentials/baffle/secrets/$run_secret_name" \
+  --arg source "$run_secret_directory" --arg destination "/opt/credentials/baffle/secrets" \
   '.[0].Mounts | any(.Source == $source and .Destination == $destination and .RW == false)' \
   >/dev/null; then
-  echo "one-off proxy did not mount its run secret file read-only over the Baffle secret path" >&2
+  echo "one-off proxy did not mount its run secret directory read-only over the Baffle secrets path" >&2
   exit 1
 fi
+for persistent_secret_name in test-token-old test-token-new; do
+  if ! podman inspect "$run_proxy" | jq -e \
+    --arg source "$project_root/credentials/baffle/secrets/$persistent_secret_name" \
+    --arg destination "/opt/credentials/baffle/secrets/$persistent_secret_name" \
+    '.[0].Mounts | any(.Source == $source and .Destination == $destination and .RW == false)' \
+    >/dev/null; then
+    echo "one-off proxy did not preserve project Baffle secret $persistent_secret_name as a read-only mount" >&2
+    exit 1
+  fi
+done
 assert_mount "$run_proxy" "$run_root/runtime/scripts/proxy_startup.sh" /opt/scripts/proxy_startup.sh
 assert_mount "$run_proxy" "$run_root/runtime/sockets/proxy" /run/cladding/proxy
 assert_mount "$run_agent" "$project_root/config" /opt/config
@@ -704,9 +714,10 @@ assert_mount "$run_agent" "$project_root/home" /home/user
 assert_mount "$run_agent" "$temp_root/workspace" /home/user/workspace
 assert_mount "$run_agent" "$run_root/runtime/empty-mask" /home/user/workspace/.cladding
 if podman inspect "$run_agent" | jq -e \
-  --arg source "$run_secret_source" \
-  --arg destination "/opt/credentials/baffle/secrets/$run_secret_name" \
-  '.[0].Mounts | any(.Source == $source or .Destination == $destination)' >/dev/null; then
+  --arg source "$run_secret_directory" \
+  --arg destination "/opt/credentials/baffle/secrets" \
+  '.[0].Mounts | any(.Source == $source or .Destination == $destination or (.Destination | startswith($destination + "/")))' \
+  >/dev/null; then
   echo "one-off agent received the run secret override" >&2
   exit 1
 fi

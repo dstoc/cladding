@@ -15,13 +15,19 @@ pub(super) struct Context {
     pub(super) workspace_root: PathBuf,
     pub(super) runtime_root: PathBuf,
     config_source: ConfigSource,
-    run_secret_mounts: Vec<RunSecretMount>,
+    run_secret_mounts: Option<RunSecretMounts>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct RunSecretMount {
     pub(super) name: String,
     pub(super) source: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RunSecretMounts {
+    pub(super) directory: PathBuf,
+    pub(super) project_secrets: Vec<RunSecretMount>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +50,7 @@ impl Context {
             project_root,
             workspace_root,
             config_source,
-            run_secret_mounts: Vec::new(),
+            run_secret_mounts: None,
         }
     }
 
@@ -87,8 +93,8 @@ impl Context {
         }
     }
 
-    pub(super) fn with_run_secret_mounts(mut self, mounts: Vec<RunSecretMount>) -> Self {
-        self.run_secret_mounts = mounts;
+    pub(super) fn with_run_secret_mounts(mut self, mounts: RunSecretMounts) -> Self {
+        self.run_secret_mounts = Some(mounts);
         self
     }
 
@@ -99,16 +105,28 @@ impl Context {
             &self.runtime_root,
             config,
         );
-        if let Some(proxy) = spec.proxy.containers.first_mut() {
-            proxy
-                .mounts
-                .extend(self.run_secret_mounts.iter().map(|secret| RuntimeMount {
-                    mount_path: format!("/opt/credentials/baffle/secrets/{}", secret.name),
-                    read_only: true,
-                    source: RuntimeMountSource::HostPath {
-                        path: secret.source.clone(),
-                    },
-                }));
+        if let Some(proxy) = spec.proxy.containers.first_mut()
+            && let Some(secret_mounts) = &self.run_secret_mounts
+        {
+            proxy.mounts.push(RuntimeMount {
+                mount_path: "/opt/credentials/baffle/secrets".to_string(),
+                read_only: true,
+                source: RuntimeMountSource::HostPath {
+                    path: secret_mounts.directory.clone(),
+                },
+            });
+            proxy.mounts.extend(
+                secret_mounts
+                    .project_secrets
+                    .iter()
+                    .map(|secret| RuntimeMount {
+                        mount_path: format!("/opt/credentials/baffle/secrets/{}", secret.name),
+                        read_only: true,
+                        source: RuntimeMountSource::HostPath {
+                            path: secret.source.clone(),
+                        },
+                    }),
+            );
         }
         Ok(spec)
     }
@@ -375,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn run_secret_override_mount_is_read_only_and_proxy_only() {
+    fn run_secret_overlay_and_project_secrets_are_read_only_and_proxy_only() {
         let temp = create_temp_dir("run-secret-mount");
         let project_root = temp.join(".cladding");
         let workspace_root = temp.clone();
@@ -390,27 +408,43 @@ mod tests {
         let mut config = source_context.load_config().unwrap();
         config.name = "cladding-run-test".to_string();
         let runtime_root = temp.join("run-root");
-        let secret_path = runtime_root.join("runtime/secrets/github-token");
-        fs::create_dir_all(secret_path.parent().unwrap()).unwrap();
-        fs::write(&secret_path, "test-secret").unwrap();
+        let secret_directory = runtime_root.join("runtime/secrets");
+        fs::create_dir_all(&secret_directory).unwrap();
+        fs::write(secret_directory.join("github-token"), "test-secret").unwrap();
+        let project_secret = project_root.join("credentials/baffle/secrets/other-token");
+        fs::create_dir_all(project_secret.parent().unwrap()).unwrap();
+        fs::write(&project_secret, "project-secret").unwrap();
 
         let context = source_context
             .with_resolved_config(runtime_root, config.clone())
-            .with_run_secret_mounts(vec![RunSecretMount {
-                name: "github-token".to_string(),
-                source: secret_path.clone(),
-            }]);
+            .with_run_secret_mounts(RunSecretMounts {
+                directory: secret_directory.clone(),
+                project_secrets: vec![RunSecretMount {
+                    name: "other-token".to_string(),
+                    source: project_secret.clone(),
+                }],
+            });
         let spec = context.runtime_spec(&config).unwrap();
-        let secret_mount = spec.proxy.containers[0]
+        let secret_directory_mount = spec.proxy.containers[0]
             .mounts
             .iter()
-            .find(|mount| mount.mount_path == "/opt/credentials/baffle/secrets/github-token")
-            .expect("run secret mount");
+            .find(|mount| mount.mount_path == "/opt/credentials/baffle/secrets")
+            .expect("run secret directory mount");
 
-        assert!(secret_mount.read_only);
+        assert!(secret_directory_mount.read_only);
         assert!(matches!(
-            &secret_mount.source,
-            RuntimeMountSource::HostPath { path } if path == &secret_path
+            &secret_directory_mount.source,
+            RuntimeMountSource::HostPath { path } if path == &secret_directory
+        ));
+        let project_secret_mount = spec.proxy.containers[0]
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/opt/credentials/baffle/secrets/other-token")
+            .expect("project secret file mount");
+        assert!(project_secret_mount.read_only);
+        assert!(matches!(
+            &project_secret_mount.source,
+            RuntimeMountSource::HostPath { path } if path == &project_secret
         ));
         assert!(spec.proxy.containers[0].mounts.iter().any(|mount| {
             mount.mount_path == "/opt/credentials/baffle"
@@ -427,10 +461,13 @@ mod tests {
         {
             assert!(execution.containers.iter().all(|container| {
                 container.mounts.iter().all(|mount| {
-                    mount.mount_path != "/opt/credentials/baffle/secrets/github-token"
+                    mount.mount_path != "/opt/credentials/baffle/secrets"
+                        && !mount
+                            .mount_path
+                            .starts_with("/opt/credentials/baffle/secrets/")
                         && !matches!(
                             &mount.source,
-                            RuntimeMountSource::HostPath { path } if path == &secret_path
+                            RuntimeMountSource::HostPath { path } if path == &secret_directory
                         )
                 })
             }));

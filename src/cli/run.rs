@@ -67,7 +67,11 @@ pub(super) fn cmd_run(
             )));
         }
     };
-    let secret_mounts = match materialize_run_secret_overrides(&runtime_root, &secret_overrides) {
+    let secret_mounts = match materialize_run_secret_overrides(
+        &runtime_root,
+        &source_context.project_root,
+        &secret_overrides,
+    ) {
         Ok(mounts) => mounts,
         Err(setup_error) => {
             let root_cleanup = remove_private_runtime_root(&runtime_root).with_context(|| {
@@ -91,9 +95,11 @@ pub(super) fn cmd_run(
             )));
         }
     };
-    let context = source_context
-        .with_resolved_config(runtime_root.clone(), config)
-        .with_run_secret_mounts(secret_mounts);
+    let context = source_context.with_resolved_config(runtime_root.clone(), config);
+    let context = match secret_mounts {
+        Some(secret_mounts) => context.with_run_secret_mounts(secret_mounts),
+        None => context,
+    };
 
     if let Err(setup_error) = lifecycle::prepare_run_runtime_root(&runtime_root) {
         let root_cleanup = remove_private_runtime_root(&runtime_root).with_context(|| {
@@ -287,9 +293,17 @@ fn parse_run_secret_overrides(raw_overrides: &[String]) -> Result<Vec<RunSecretS
 }
 
 fn is_baffle_secret_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(ch) if ch.is_ascii_alphanumeric())
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && !bytes
+            .last()
+            .is_some_and(|byte| matches!(byte, b'.' | b'_' | b'-'))
+        && !name.contains("..")
 }
 
 fn is_environment_variable_name(name: &str) -> bool {
@@ -300,10 +314,11 @@ fn is_environment_variable_name(name: &str) -> bool {
 
 fn materialize_run_secret_overrides(
     runtime_root: &Path,
+    project_root: &Path,
     secrets: &[ResolvedRunSecret],
-) -> anyhow::Result<Vec<super::context::RunSecretMount>> {
+) -> anyhow::Result<Option<super::context::RunSecretMounts>> {
     if secrets.is_empty() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
 
     let secret_dir = runtime_root.join("runtime/secrets");
@@ -348,45 +363,121 @@ fn materialize_run_secret_overrides(
         })?;
     }
 
-    let mut mounts = Vec::with_capacity(secrets.len());
+    let mut overridden = HashSet::with_capacity(secrets.len());
     for secret in secrets {
         let path = secret_dir.join(&secret.name);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&path).with_context(|| {
-            format!(
-                "failed to create private run secret file {}",
-                path.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .with_context(|| {
-                    format!(
-                        "failed to secure private run secret file {}",
-                        path.display()
-                    )
-                })?;
-        }
-        file.write_all(&secret.contents).with_context(|| {
-            format!("failed to write private run secret file {}", path.display())
-        })?;
-        file.sync_all().with_context(|| {
-            format!("failed to sync private run secret file {}", path.display())
-        })?;
-        mounts.push(super::context::RunSecretMount {
-            name: secret.name.clone(),
-            source: path,
-        });
+        write_private_run_secret(&path, &secret.contents)?;
+        overridden.insert(secret.name.as_str());
     }
-    Ok(mounts)
+
+    let project_secrets_dir = project_root.join("credentials/baffle/secrets");
+    let mut project_secrets = Vec::new();
+    let mut project_secrets_exist = true;
+    for directory in [
+        project_root.join("credentials"),
+        project_root.join("credentials/baffle"),
+        project_secrets_dir.clone(),
+    ] {
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {}
+            Ok(_) => anyhow::bail!(
+                "project Baffle secret path is not a regular directory: {}",
+                directory.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                project_secrets_exist = false;
+                break;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect project Baffle secret directory {}",
+                        directory.display()
+                    )
+                });
+            }
+        }
+    }
+    if project_secrets_exist {
+        match fs::read_dir(&project_secrets_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.with_context(|| {
+                        format!(
+                            "failed to read project Baffle secret directory {}",
+                            project_secrets_dir.display()
+                        )
+                    })?;
+                    let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                        continue;
+                    };
+                    if !is_baffle_secret_identifier(&name) || overridden.contains(name.as_str()) {
+                        continue;
+                    }
+                    let source = entry.path();
+                    let metadata = fs::symlink_metadata(&source).with_context(|| {
+                        format!(
+                            "failed to inspect project Baffle secret file {}",
+                            source.display()
+                        )
+                    })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_file() {
+                        anyhow::bail!(
+                            "project Baffle secret entry is not a regular file: {}",
+                            source.display()
+                        );
+                    }
+                    write_private_run_secret(&secret_dir.join(&name), &[])?;
+                    project_secrets.push(super::context::RunSecretMount { name, source });
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to read project Baffle secret directory {}",
+                        project_secrets_dir.display()
+                    )
+                });
+            }
+        }
+    }
+
+    Ok(Some(super::context::RunSecretMounts {
+        directory: secret_dir,
+        project_secrets,
+    }))
+}
+
+fn write_private_run_secret(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).with_context(|| {
+        format!(
+            "failed to create private run secret file {}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!(
+                    "failed to secure private run secret file {}",
+                    path.display()
+                )
+            })?;
+    }
+    file.write_all(contents)
+        .with_context(|| format!("failed to write private run secret file {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync private run secret file {}", path.display()))?;
+    Ok(())
 }
 
 fn cleanup_ephemeral_runtime(
@@ -707,10 +798,22 @@ mod tests {
 
     #[test]
     fn run_secret_overrides_reject_path_names_and_missing_sources_safely() {
-        for name in ["", "../token", "/tmp/token", "nested/token", ".."] {
+        for name in [
+            "",
+            "../token",
+            "/tmp/token",
+            "nested/token",
+            "..",
+            "secret.",
+            "secret-",
+            "secret_",
+            "secret..value",
+        ] {
             let raw = vec![format!("{name}=env:CLADDING_TEST_TOKEN")];
             assert!(parse_run_secret_overrides(&raw).is_err(), "name={name:?}");
         }
+        let overlong_name = format!("{}=env:CLADDING_TEST_TOKEN", "a".repeat(65));
+        assert!(parse_run_secret_overrides(&[overlong_name]).is_err());
 
         let error = resolve_run_secret_overrides(
             &["token=env:CLADDING_MISSING_TOKEN".to_string()],
@@ -760,6 +863,14 @@ mod tests {
             Path::new("/workspace"),
         )
         .unwrap();
+        let project_root = first_root
+            .parent()
+            .unwrap()
+            .join(format!("project-{}", generate_uuid_v4().unwrap()));
+        let project_secrets = project_root.join("credentials/baffle/secrets");
+        fs::create_dir_all(&project_secrets).unwrap();
+        fs::write(project_secrets.join("github-token"), b"persistent-token").unwrap();
+        fs::write(project_secrets.join("other-token"), b"project-token").unwrap();
         let first = ResolvedRunSecret {
             name: "github-token".to_string(),
             contents: b"first-run-secret".to_vec(),
@@ -771,25 +882,53 @@ mod tests {
 
         let (first_mounts, second_mounts) = std::thread::scope(|scope| {
             let first_task = scope.spawn(|| {
-                materialize_run_secret_overrides(&first_root, std::slice::from_ref(&first))
+                materialize_run_secret_overrides(
+                    &first_root,
+                    &project_root,
+                    std::slice::from_ref(&first),
+                )
             });
             let second_task = scope.spawn(|| {
-                materialize_run_secret_overrides(&second_root, std::slice::from_ref(&second))
+                materialize_run_secret_overrides(
+                    &second_root,
+                    &project_root,
+                    std::slice::from_ref(&second),
+                )
             });
             (
-                first_task.join().unwrap().unwrap(),
-                second_task.join().unwrap().unwrap(),
+                first_task.join().unwrap().unwrap().unwrap(),
+                second_task.join().unwrap().unwrap().unwrap(),
             )
         });
-        let first_path = &first_mounts[0].source;
-        let second_path = &second_mounts[0].source;
+        let first_path = first_mounts.directory.join("github-token");
+        let second_path = second_mounts.directory.join("github-token");
 
         assert_ne!(first_path, second_path);
-        assert!(fs::read(first_path).unwrap() == b"first-run-secret");
-        assert!(fs::read(second_path).unwrap() == b"second-run-secret");
+        assert_eq!(fs::read(&first_path).unwrap(), b"first-run-secret");
+        assert_eq!(fs::read(&second_path).unwrap(), b"second-run-secret");
+        assert_eq!(
+            fs::read(first_mounts.directory.join("other-token")).unwrap(),
+            b""
+        );
+        assert_eq!(
+            fs::read(second_mounts.directory.join("other-token")).unwrap(),
+            b""
+        );
+        for mounts in [&first_mounts, &second_mounts] {
+            assert_eq!(mounts.project_secrets.len(), 1);
+            assert_eq!(mounts.project_secrets[0].name, "other-token");
+            assert_eq!(
+                mounts.project_secrets[0].source,
+                project_secrets.join("other-token")
+            );
+        }
+        assert_eq!(
+            fs::read(project_secrets.join("github-token")).unwrap(),
+            b"persistent-token"
+        );
         #[cfg(unix)]
         assert_eq!(
-            fs::metadata(first_path.parent().unwrap())
+            fs::metadata(&first_mounts.directory)
                 .unwrap()
                 .permissions()
                 .mode()
@@ -798,7 +937,25 @@ mod tests {
         );
         #[cfg(unix)]
         assert_eq!(
-            fs::metadata(first_path).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&first_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(first_mounts.directory.join("other-token"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(second_mounts.directory.join("other-token"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o600
         );
 
@@ -806,5 +963,10 @@ mod tests {
         remove_private_runtime_root(&second_root).unwrap();
         assert!(!first_root.exists());
         assert!(!second_root.exists());
+        assert_eq!(
+            fs::read(project_secrets.join("github-token")).unwrap(),
+            b"persistent-token"
+        );
+        fs::remove_dir_all(project_root).unwrap();
     }
 }
