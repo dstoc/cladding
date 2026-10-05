@@ -12,6 +12,7 @@ use cladding::podman::{
     initialize_baffle_ca, list_running_projects, podman_build_image, podman_build_proxy_image,
     podman_required, runtime_cleanup, runtime_cleanup_owned, runtime_create, runtime_inventory,
 };
+#[cfg(test)]
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashMap;
 use std::fs;
@@ -403,12 +404,7 @@ pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
 
 pub(super) fn cmd_down_ephemeral(context: &Context, verbose: bool) -> Result<()> {
     let config = context.load_config()?;
-    let spec = RuntimeSpec::build_with_roots(
-        &context.project_root,
-        &context.workspace_root,
-        &context.runtime_root,
-        &config,
-    );
+    let spec = context.runtime_spec(&config)?;
     runtime_cleanup_owned(&spec, verbose, !verbose)
 }
 

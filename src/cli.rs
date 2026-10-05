@@ -73,9 +73,12 @@ pub fn run() -> Result<()> {
         CommandSpec::Up { verbose } => lifecycle::cmd_up(&context, verbose),
         CommandSpec::Down { verbose } => lifecycle::cmd_down(&context, verbose),
         CommandSpec::Destroy => lifecycle::cmd_destroy(&context),
-        CommandSpec::Run { args, env, verbose } => {
-            run::cmd_run(&context, &env, &args, config_uses_stdin, verbose)
-        }
+        CommandSpec::Run {
+            args,
+            env,
+            secret,
+            verbose,
+        } => run::cmd_run(&context, &env, &secret, &args, config_uses_stdin, verbose),
         CommandSpec::Exec { target, env, args } => exec::cmd_exec(&context, target, &env, &args),
         CommandSpec::Logs { target, args } => exec::cmd_logs(&context, target, &args),
         CommandSpec::ReloadProxy => exec::cmd_reload_proxy(&context),

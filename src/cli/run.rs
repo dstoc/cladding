@@ -4,8 +4,10 @@ use anyhow::Context as _;
 use cladding::error::{Error, Result};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
-use std::fs::{self, File};
-use std::io::Read as _;
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -14,6 +16,7 @@ use std::thread::{self, JoinHandle};
 pub(super) fn cmd_run(
     source_context: &Context,
     env_vars: &[String],
+    secret_overrides: &[String],
     args: &[String],
     config_uses_stdin: bool,
     verbose: bool,
@@ -21,6 +24,12 @@ pub(super) fn cmd_run(
     if args.is_empty() {
         return Err(Error::message("missing run command"));
     }
+
+    let secret_overrides = resolve_run_secret_overrides(
+        secret_overrides,
+        |name| std::env::var_os(name),
+        read_run_secret_file,
+    )?;
 
     let instance_name = format!("cladding-run-{}", generate_uuid_v4()?);
     if verbose {
@@ -58,7 +67,33 @@ pub(super) fn cmd_run(
             )));
         }
     };
-    let context = source_context.with_resolved_config(runtime_root.clone(), config);
+    let secret_mounts = match materialize_run_secret_overrides(&runtime_root, &secret_overrides) {
+        Ok(mounts) => mounts,
+        Err(setup_error) => {
+            let root_cleanup = remove_private_runtime_root(&runtime_root).with_context(|| {
+                format!(
+                    "failed to remove private runtime root {}",
+                    runtime_root.display()
+                )
+            });
+            let signal = signals.finish();
+            if let Err(cleanup_error) = root_cleanup {
+                report_cleanup_failure(&instance_name, &runtime_root, &Error::from(cleanup_error));
+            }
+            if let Some(signal) = signal {
+                eprintln!(
+                    "error: one-off instance '{instance_name}' failed during setup: {setup_error}"
+                );
+                return Err(signal_status_error(signal));
+            }
+            return Err(Error::message(format!(
+                "one-off instance '{instance_name}' failed during setup: {setup_error}"
+            )));
+        }
+    };
+    let context = source_context
+        .with_resolved_config(runtime_root.clone(), config)
+        .with_run_secret_mounts(secret_mounts);
 
     if let Err(setup_error) = lifecycle::prepare_run_runtime_root(&runtime_root) {
         let root_cleanup = remove_private_runtime_root(&runtime_root).with_context(|| {
@@ -119,6 +154,239 @@ pub(super) fn cmd_run(
         cleanup_error,
         signal,
     )
+}
+
+enum RunSecretSource {
+    Environment(String),
+    File(PathBuf),
+}
+
+struct RunSecretSpec {
+    name: String,
+    source: RunSecretSource,
+}
+
+struct ResolvedRunSecret {
+    name: String,
+    contents: Vec<u8>,
+}
+
+fn resolve_run_secret_overrides(
+    raw_overrides: &[String],
+    read_environment: impl Fn(&str) -> Option<OsString>,
+    read_file: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<Vec<ResolvedRunSecret>> {
+    let specs = parse_run_secret_overrides(raw_overrides)?;
+    specs
+        .into_iter()
+        .map(|spec| {
+            let contents = match spec.source {
+                RunSecretSource::Environment(variable) => {
+                    let value = read_environment(&variable).ok_or_else(|| {
+                        Error::message(format!(
+                            "host environment variable '{variable}' for Baffle secret '{}' is not set",
+                            spec.name
+                        ))
+                    })?;
+                    value.into_string().map_err(|_| {
+                        Error::message(format!(
+                            "host environment variable '{variable}' for Baffle secret '{}' is not valid UTF-8",
+                            spec.name
+                        ))
+                    })?.into_bytes()
+                }
+                RunSecretSource::File(path) => read_file(&path).map_err(|error| {
+                    Error::message(format!(
+                        "failed to read host file for Baffle secret '{}': {error}",
+                        spec.name
+                    ))
+                })?,
+            };
+            Ok(ResolvedRunSecret {
+                name: spec.name,
+                contents,
+            })
+        })
+        .collect()
+}
+
+fn read_run_secret_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret source is not a regular file",
+        ));
+    }
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+    Ok(contents)
+}
+
+fn parse_run_secret_overrides(raw_overrides: &[String]) -> Result<Vec<RunSecretSpec>> {
+    let mut names = HashSet::new();
+    let mut specs = Vec::with_capacity(raw_overrides.len());
+
+    for raw in raw_overrides {
+        let Some((name, source)) = raw.split_once('=') else {
+            return Err(Error::message(
+                "Baffle secret override must use NAME=env:VARIABLE or NAME=file:PATH",
+            ));
+        };
+        if !is_baffle_secret_identifier(name) {
+            return Err(Error::message(
+                "Baffle secret name must be a simple identifier containing only letters, digits, '.', '_' or '-' and starting with a letter or digit",
+            ));
+        }
+        if !names.insert(name.to_string()) {
+            return Err(Error::message(format!(
+                "duplicate Baffle secret override for '{name}'"
+            )));
+        }
+
+        let Some((kind, value)) = source.split_once(':') else {
+            return Err(Error::message(
+                "Baffle secret source must use env:VARIABLE or file:PATH; literal values are not accepted",
+            ));
+        };
+        let parsed_source = match kind {
+            "env" if is_environment_variable_name(value) => {
+                RunSecretSource::Environment(value.to_string())
+            }
+            "file" if !value.is_empty() => RunSecretSource::File(PathBuf::from(value)),
+            "env" => {
+                return Err(Error::message(
+                    "environment-backed Baffle secret source requires a valid variable name",
+                ));
+            }
+            "file" => {
+                return Err(Error::message(
+                    "file-backed Baffle secret source requires a path",
+                ));
+            }
+            _ => {
+                return Err(Error::message(
+                    "Baffle secret source must use env:VARIABLE or file:PATH; literal values are not accepted",
+                ));
+            }
+        };
+        specs.push(RunSecretSpec {
+            name: name.to_string(),
+            source: parsed_source,
+        });
+    }
+
+    Ok(specs)
+}
+
+fn is_baffle_secret_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_alphanumeric())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+fn is_environment_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn materialize_run_secret_overrides(
+    runtime_root: &Path,
+    secrets: &[ResolvedRunSecret],
+) -> anyhow::Result<Vec<super::context::RunSecretMount>> {
+    if secrets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let secret_dir = runtime_root.join("runtime/secrets");
+    let runtime_dir = secret_dir
+        .parent()
+        .expect("runtime secret directory has parent");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        for directory in [runtime_dir, secret_dir.as_path()] {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(directory).with_context(|| {
+                format!(
+                    "failed to create private run secret directory {}",
+                    directory.display()
+                )
+            })?;
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).with_context(
+                || {
+                    format!(
+                        "failed to secure private run secret directory {}",
+                        directory.display()
+                    )
+                },
+            )?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(runtime_dir).with_context(|| {
+            format!(
+                "failed to create private run runtime directory {}",
+                runtime_dir.display()
+            )
+        })?;
+        fs::create_dir(&secret_dir).with_context(|| {
+            format!(
+                "failed to create private run secret directory {}",
+                secret_dir.display()
+            )
+        })?;
+    }
+
+    let mut mounts = Vec::with_capacity(secrets.len());
+    for secret in secrets {
+        let path = secret_dir.join(&secret.name);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).with_context(|| {
+            format!(
+                "failed to create private run secret file {}",
+                path.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .with_context(|| {
+                    format!(
+                        "failed to secure private run secret file {}",
+                        path.display()
+                    )
+                })?;
+        }
+        file.write_all(&secret.contents).with_context(|| {
+            format!("failed to write private run secret file {}", path.display())
+        })?;
+        file.sync_all().with_context(|| {
+            format!("failed to sync private run secret file {}", path.display())
+        })?;
+        mounts.push(super::context::RunSecretMount {
+            name: secret.name.clone(),
+            source: path,
+        });
+    }
+    Ok(mounts)
 }
 
 fn cleanup_ephemeral_runtime(
@@ -243,7 +511,7 @@ fn create_private_runtime_root(instance_name: &str, workspace_root: &Path) -> Re
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::DirBuilderExt as _;
+            use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
             let mut builder = fs::DirBuilder::new();
             builder.mode(0o700);
             builder.create(&root).with_context(|| {
@@ -251,6 +519,9 @@ fn create_private_runtime_root(instance_name: &str, workspace_root: &Path) -> Re
                     "failed to create private runtime root {} (name collisions are not reused)",
                     root.display()
                 )
+            })?;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).with_context(|| {
+                format!("failed to secure private runtime root {}", root.display())
             })?;
         }
         #[cfg(not(unix))]
@@ -316,6 +587,8 @@ impl SignalWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn generated_instance_suffix_is_uuid_v4() {
@@ -379,5 +652,159 @@ mod tests {
 
         assert_eq!(error.exit_code(), 1);
         assert!(error.to_string().contains("cladding-run-test"));
+    }
+
+    #[test]
+    fn run_secret_overrides_resolve_environment_and_file_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "cladding-run-secret-sources-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let file_path = root.join("token-file");
+        fs::write(&file_path, b"file-secret\n").unwrap();
+        let raw = vec![
+            "env-token=env:CLADDING_TEST_TOKEN".to_string(),
+            format!("file-token=file:{}", file_path.display()),
+        ];
+
+        let resolved = resolve_run_secret_overrides(
+            &raw,
+            |name| (name == "CLADDING_TEST_TOKEN").then(|| OsString::from("env-secret")),
+            read_run_secret_file,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved[0].name == "env-token" && resolved[0].contents == b"env-secret");
+        assert!(resolved[1].name == "file-token" && resolved[1].contents == b"file-secret\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_secret_overrides_reject_duplicates_and_literal_values_without_echoing_them() {
+        let duplicate = vec![
+            "github-token=env:FIRST_TOKEN".to_string(),
+            "github-token=env:SECOND_TOKEN".to_string(),
+        ];
+        assert!(
+            parse_run_secret_overrides(&duplicate)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("duplicate Baffle secret override")
+        );
+
+        let literal = "github-token=cladding-test-literal-secret";
+        let error = parse_run_secret_overrides(&[literal.to_string()])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("literal values are not accepted"));
+        assert!(!error.contains("cladding-test-literal-secret"));
+    }
+
+    #[test]
+    fn run_secret_overrides_reject_path_names_and_missing_sources_safely() {
+        for name in ["", "../token", "/tmp/token", "nested/token", ".."] {
+            let raw = vec![format!("{name}=env:CLADDING_TEST_TOKEN")];
+            assert!(parse_run_secret_overrides(&raw).is_err(), "name={name:?}");
+        }
+
+        let error = resolve_run_secret_overrides(
+            &["token=env:CLADDING_MISSING_TOKEN".to_string()],
+            |_| None,
+            read_run_secret_file,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("CLADDING_MISSING_TOKEN"));
+        assert!(!error.contains("secret-content"));
+
+        let missing_file = resolve_run_secret_overrides(
+            &["token=file:/no/such/cladding-secret-file".to_string()],
+            |_| None,
+            read_run_secret_file,
+        );
+        assert!(missing_file.is_err());
+        assert!(
+            !missing_file
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("secret-content")
+        );
+
+        #[cfg(unix)]
+        {
+            let non_file = resolve_run_secret_overrides(
+                &["token=file:/dev/null".to_string()],
+                |_| None,
+                read_run_secret_file,
+            );
+            assert!(non_file.is_err());
+        }
+    }
+
+    #[test]
+    fn run_secret_files_are_private_independent_and_removed_with_the_runtime() {
+        let first_root = create_private_runtime_root(
+            &format!("cladding-run-{}", generate_uuid_v4().unwrap()),
+            Path::new("/workspace"),
+        )
+        .unwrap();
+        let second_root = create_private_runtime_root(
+            &format!("cladding-run-{}", generate_uuid_v4().unwrap()),
+            Path::new("/workspace"),
+        )
+        .unwrap();
+        let first = ResolvedRunSecret {
+            name: "github-token".to_string(),
+            contents: b"first-run-secret".to_vec(),
+        };
+        let second = ResolvedRunSecret {
+            name: "github-token".to_string(),
+            contents: b"second-run-secret".to_vec(),
+        };
+
+        let (first_mounts, second_mounts) = std::thread::scope(|scope| {
+            let first_task = scope.spawn(|| {
+                materialize_run_secret_overrides(&first_root, std::slice::from_ref(&first))
+            });
+            let second_task = scope.spawn(|| {
+                materialize_run_secret_overrides(&second_root, std::slice::from_ref(&second))
+            });
+            (
+                first_task.join().unwrap().unwrap(),
+                second_task.join().unwrap().unwrap(),
+            )
+        });
+        let first_path = &first_mounts[0].source;
+        let second_path = &second_mounts[0].source;
+
+        assert_ne!(first_path, second_path);
+        assert!(fs::read(first_path).unwrap() == b"first-run-secret");
+        assert!(fs::read(second_path).unwrap() == b"second-run-secret");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(first_path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(first_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        remove_private_runtime_root(&first_root).unwrap();
+        remove_private_runtime_root(&second_root).unwrap();
+        assert!(!first_root.exists());
+        assert!(!second_root.exists());
     }
 }

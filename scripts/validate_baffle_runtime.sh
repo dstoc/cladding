@@ -180,7 +180,7 @@ private_key = "/opt/credentials/baffle/ca-key.pem"
 
 [secrets]
 directory = "/opt/credentials/baffle/secrets"
-allowed = ["test-token-old", "test-token-new", "missing-token"]
+allowed = ["test-token-old", "test-token-new", "missing-token", "run-token"]
 EOF
 write_agent_policy() {
   token=$1
@@ -564,10 +564,28 @@ test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 
 phase="verify one-off shared project state and isolated runtime cleanup"
 mkdir -m 0700 "$temp_root/run-tmp"
+run_secret_value="cladding-test-old-value"
+run_secret_name="run-token"
+run_persistent_secret_name="test-token-new"
+run_persistent_secret_before=$(sha256sum \
+  "$project_root/credentials/baffle/secrets/$run_persistent_secret_name" | cut -d ' ' -f 1)
+write_agent_policy "$run_secret_name" "/replacement/**"
+run_session_before=$(sha256sum \
+  "$project_root/config/proxy/sessions/$agent_session_config" | cut -d ' ' -f 1)
+test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
 (
   cd "$temp_root/workspace"
-  TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v -- \
-    /bin/sh -c 'while [ ! -f /home/user/workspace/.run-finish ]; do sleep 1; done; exit 7' \
+  export CLADDING_RUN_SECRET_OVERRIDE="$run_secret_value"
+  TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v \
+    --secret "$run_secret_name=env:CLADDING_RUN_SECRET_OVERRIDE" -- \
+    /bin/sh -ec 'test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
+      while [ ! -f /home/user/workspace/.run-origin-ready ]; do sleep 1; done
+      curl --fail --silent --show-error --proxy http://127.0.0.1:3128 --noproxy "" \
+        https://localhost:8443/replacement/run-secret \
+        > /home/user/workspace/.run-secret-response
+      touch /home/user/workspace/.run-request-done
+      while [ ! -f /home/user/workspace/.run-finish ]; do sleep 1; done
+      exit 7' \
     > "$temp_root/run.log" 2>&1 &
   run_child=$!
   trap 'kill "$run_child" 2>/dev/null || true; wait "$run_child" 2>/dev/null || true' HUP INT TERM
@@ -603,6 +621,8 @@ if [ -z "$run_root" ]; then
 fi
 test -d "$run_root/runtime/empty-mask"
 test -d "$run_root/runtime/sockets/proxy"
+test "$(stat -c '%a' "$run_root/runtime/secrets")" = 700
+test "$(stat -c '%a' "$run_root/runtime/secrets/$run_secret_name")" = 600
 for project_state in config tools credentials home; do
   if [ -e "$run_root/$project_state" ]; then
     echo "one-off runtime copied project state into $run_root/$project_state" >&2
@@ -627,6 +647,7 @@ while ! podman container exists "$run_name-proxy-instance" >/dev/null 2>&1 \
 done
 run_proxy="$run_name-proxy-instance"
 run_agent="$run_name-agent-instance"
+run_secret_source="$run_root/runtime/secrets/$run_secret_name"
 assert_mount() {
   container=$1
   source=$2
@@ -642,16 +663,33 @@ assert_mount() {
 phase="verify one-off mounts use shared project files"
 assert_mount "$run_proxy" "$project_root/config" /opt/config
 assert_mount "$run_proxy" "$project_root/credentials/baffle" /opt/credentials/baffle
+if ! podman inspect "$run_proxy" | jq -e \
+  --arg source "$run_secret_source" --arg destination "/opt/credentials/baffle/secrets/$run_secret_name" \
+  '.[0].Mounts | any(.Source == $source and .Destination == $destination and .RW == false)' \
+  >/dev/null; then
+  echo "one-off proxy did not mount its run secret file read-only over the Baffle secret path" >&2
+  exit 1
+fi
 assert_mount "$run_proxy" "$run_root/runtime/scripts/proxy_startup.sh" /opt/scripts/proxy_startup.sh
 assert_mount "$run_proxy" "$run_root/runtime/sockets/proxy" /run/cladding/proxy
 assert_mount "$run_agent" "$project_root/config" /opt/config
 assert_mount "$run_agent" "$project_root/home" /home/user
 assert_mount "$run_agent" "$temp_root/workspace" /home/user/workspace
 assert_mount "$run_agent" "$run_root/runtime/empty-mask" /home/user/workspace/.cladding
+if podman inspect "$run_agent" | jq -e \
+  --arg source "$run_secret_source" \
+  --arg destination "/opt/credentials/baffle/secrets/$run_secret_name" \
+  '.[0].Mounts | any(.Source == $source or .Destination == $destination)' >/dev/null; then
+  echo "one-off agent received the run secret override" >&2
+  exit 1
+fi
 podman exec "$run_agent" /bin/sh -ec \
   'test -x /opt/tools/bin/baffle && test -f /opt/tools/run-symlink-marker'
+podman exec "$run_agent" /bin/sh -ec 'test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"'
 podman exec "$run_proxy" /bin/sh -ec \
-  'test -s /opt/credentials/baffle/ca.crt && test -f /opt/credentials/baffle/secrets/test-token-old'
+  'test -s /opt/credentials/baffle/ca.crt
+   test -f /opt/credentials/baffle/secrets/test-token-old
+   test -f /opt/credentials/baffle/secrets/test-token-new'
 podman inspect "$run_proxy" | jq -e \
   --arg expected "CLADDING_AGENT_SESSION_CONFIG=$agent_session_config" \
   '.[0].Config.Env | any(. == $expected)' >/dev/null
@@ -664,6 +702,41 @@ fi
 run_ca=$(podman exec "$run_proxy" sha256sum /opt/credentials/baffle/ca.crt | cut -d ' ' -f 1)
 if [ "$run_ca" != "$ca_before" ]; then
   echo "one-off proxy is not using the persistent project CA" >&2
+  exit 1
+fi
+run_origin_name="$project_name-run-origin"
+phase="start TLS origin in the one-off proxy network"
+podman run --detach --name "$run_origin_name" --network "container:$run_proxy" "$origin_image" >/dev/null
+attempt=0
+while ! podman exec "$run_origin_name" curl --insecure --fail --silent \
+  https://localhost:8443/health >/dev/null 2>&1; do
+  if [ "$attempt" -ge 60 ]; then
+    echo "one-off TLS origin did not become ready" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+touch "$temp_root/workspace/.run-origin-ready"
+phase="verify Baffle resolves the run-only secret override"
+attempt=0
+while [ ! -f "$temp_root/workspace/.run-request-done" ]; do
+  if [ "$attempt" -ge 60 ] || [ -f "$temp_root/run.status" ]; then
+    cat "$temp_root/run.log" >&2
+    echo "one-off command did not complete its Baffle secret request" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+jq -e '.authorization == "old"' "$temp_root/workspace/.run-secret-response" >/dev/null
+if [ "$(sha256sum "$project_root/config/proxy/sessions/$agent_session_config" | cut -d ' ' -f 1)" \
+  != "$run_session_before" ]; then
+  echo "one-off run changed the persistent Baffle session configuration" >&2
+  exit 1
+fi
+if grep -F "$run_secret_value" "$temp_root/run.log" >/dev/null; then
+  echo "one-off verbose log contains the run secret value" >&2
   exit 1
 fi
 phase="verify one-off command preserves its nonzero exit status"
@@ -682,12 +755,22 @@ if [ -e "$run_root" ]; then
   echo "one-off runtime root remains after the command exits: $run_root" >&2
   exit 1
 fi
+if [ -e "$project_root/credentials/baffle/secrets/$run_secret_name" ]; then
+  echo "one-off run created a persistent Baffle secret file" >&2
+  exit 1
+fi
+if [ "$(sha256sum "$project_root/credentials/baffle/secrets/$run_persistent_secret_name" | cut -d ' ' -f 1)" \
+  != "$run_persistent_secret_before" ]; then
+  echo "one-off run changed a different persistent Baffle secret file" >&2
+  exit 1
+fi
 ca_after_run=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
 if [ "$ca_after_run" != "$ca_before" ]; then
   echo "one-off run changed the persistent project CA" >&2
   exit 1
 fi
 phase="verify one-off Podman resource cleanup"
+podman rm -f "$run_origin_name" >/dev/null
 if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sandbox)(-instance)?$" >/dev/null; then
   echo "one-off runtime left a Podman resource behind" >&2
   exit 1
