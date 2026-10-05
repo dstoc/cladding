@@ -13,6 +13,7 @@ use std::thread::{self, JoinHandle};
 
 pub(super) fn cmd_run(
     source_context: &Context,
+    env_vars: &[String],
     args: &[String],
     config_uses_stdin: bool,
     verbose: bool,
@@ -106,7 +107,7 @@ pub(super) fn cmd_run(
 
     let command_result = match signals.received() {
         Some(signal) => Err(signal_status_error(signal)),
-        None => exec::cmd_run_command(&context, args, !config_uses_stdin),
+        None => exec::cmd_run_command(&context, env_vars, args, !config_uses_stdin),
     };
     let cleanup_error = cleanup_ephemeral_runtime(&context, &runtime_root, &instance_name, verbose);
     let signal = signals.finish();

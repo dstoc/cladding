@@ -115,10 +115,11 @@ project.
   cladding --config job.json run -- codex exec "Implement the task"
   cladding --cladding-dir /tmp/job/.cladding --config - run -- cargo test --workspace
   cladding run codex exec "Implement the task"
+  cladding run --env FOO=bar -- env
   cladding run -v -- codex exec "Implement the task"
   ```
 
-  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It uses the selected project's `.cladding/config/`, `tools/`, `credentials/`, and `home/` directly, including selected Baffle session files and the persistent project CA. It creates only runtime files and sockets in the private runtime directory, then removes that directory when the command ends. Run requires a project initialized with `cladding init` and prepared with `cladding build`; it validates the project CA and does not create or rotate it. The command runs with the same agent working-directory and terminal behavior as `exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+  `run` creates a UUID-named instance and a private runtime directory outside the source workspace. It uses the selected project's `.cladding/config/`, `tools/`, `credentials/`, and `home/` directly, including selected Baffle session files and the persistent project CA. It creates only runtime files and sockets in the private runtime directory, then removes that directory when the command ends. Run requires a project initialized with `cladding init` and prepared with `cladding build`; it validates the project CA and does not create or rotate it. The command runs with the same agent working-directory and terminal behavior as `exec`. Use repeatable `--env KEY[=VALUE]` options before `--` to set environment variables for the command, as with `cladding exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
 
   `cladding run` keeps successful startup and cleanup diagnostics quiet by default. Use `-v` or `--verbose` to show Podman and certificate setup output, instance details, and cleanup activity.
 
@@ -446,7 +447,7 @@ cladding init [name]  # create .cladding config and runtime layout
 cladding build       # build images, refresh embedded tools, initialize persistent Baffle CA
 cladding check        # verify project prerequisites, including the persistent Baffle CA
 cladding ps           # list running cladding projects
-cladding run [-v|--verbose] [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
+cladding run [-v|--verbose] [--env KEY[=VALUE] ...] [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
 cladding exec [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] <cmd> [args...] # execute in the selected container of a running runtime
 cladding expose <containerport> [hostport] [--bind-address <address>] # block while forwarding host address/port to agent containerport
 cladding inject <host-endpoint> [containerport] # block while forwarding agent localhost containerport to a host-reachable endpoint

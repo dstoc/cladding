@@ -319,6 +319,7 @@ mod tests {
             None,
             &CommandSpec::Run {
                 verbose: false,
+                env: Vec::new(),
                 args: vec!["echo".to_string()],
             },
         )

@@ -586,6 +586,10 @@ exit 0
         project_root.to_str().unwrap(),
         "run",
         "--verbose",
+        "--env",
+        "LANG=run-value",
+        "--env",
+        "RUN_ONLY=command-value",
         "--",
         "sh",
         "-c",
@@ -607,6 +611,20 @@ exit 0
     assert!(verbose_stderr.contains("user-error"));
 
     let run_log = read_log(&podman_log);
+    let command_env_calls = run_log
+        .lines()
+        .filter(|line| line.contains("LANG=run-value") || line.contains("RUN_ONLY=command-value"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        command_env_calls.len(),
+        1,
+        "command environment overrides should reach only the user command: {run_log}"
+    );
+    assert!(command_env_calls[0].starts_with("exec -i -w "));
+    assert!(
+        command_env_calls[0]
+            .contains("--env LANG=C.UTF-8 --env LANG=run-value --env RUN_ONLY=command-value")
+    );
     assert!(run_log.contains("PROJECT_AGENT_SESSION_CONFIG=custom/agent.toml"));
     assert!(run_log.contains("PROJECT_NW_SANDBOX_SESSION_CONFIG=restricted/network.toml"));
     assert!(run_log.contains("[rules.\"example.com\"]"));
