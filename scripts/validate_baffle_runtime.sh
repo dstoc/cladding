@@ -40,12 +40,16 @@ proxy="$project_name-proxy-instance"
 proxy_image="localhost/$project_name-proxy:latest"
 client_image="localhost/$project_name-client:latest"
 origin_image="localhost/$project_name-origin:latest"
+run_origin_name=
 run_pid=
 phase=initialize
 
 cleanup() {
   status=$?
   trap - EXIT
+  if [ -n "$run_origin_name" ]; then
+    podman rm -f "$run_origin_name" >/dev/null 2>&1 || true
+  fi
   if [ -n "$run_pid" ]; then
     kill "$run_pid" 2>/dev/null || true
     wait "$run_pid" 2>/dev/null || true
@@ -739,6 +743,9 @@ if grep -F "$run_secret_value" "$temp_root/run.log" >/dev/null; then
   echo "one-off verbose log contains the run secret value" >&2
   exit 1
 fi
+phase="stop one-off TLS origin before runtime cleanup"
+podman rm -f "$run_origin_name" >/dev/null
+run_origin_name=
 phase="verify one-off command preserves its nonzero exit status"
 touch "$temp_root/workspace/.run-finish"
 set +e
@@ -770,7 +777,6 @@ if [ "$ca_after_run" != "$ca_before" ]; then
   exit 1
 fi
 phase="verify one-off Podman resource cleanup"
-podman rm -f "$run_origin_name" >/dev/null
 if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sandbox)(-instance)?$" >/dev/null; then
   echo "one-off runtime left a Podman resource behind" >&2
   exit 1
