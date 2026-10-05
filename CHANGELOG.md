@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.8](https://github.com/dstoc/cladding/compare/v0.3.7...v0.3.8) (2026-10-05)
+
+
+### Features
+
+* add --env support to cladding run ([#68](https://github.com/dstoc/cladding/issues/68)) ([a40813c](https://github.com/dstoc/cladding/commit/a40813ce33d7ba04a614a238c962fa1ada738dad))
+* add per-run Baffle secret overrides ([#70](https://github.com/dstoc/cladding/issues/70)) ([a6dcf8f](https://github.com/dstoc/cladding/commit/a6dcf8fdf0312b8b677925030c40746fade231c3))
+
 ## [0.3.7](https://github.com/dstoc/cladding/compare/v0.3.6...v0.3.7) (2026-10-04)
 
 
