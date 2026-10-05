@@ -528,6 +528,7 @@ jq '.agent.image = "localhost/cladding-proxy:latest" | .nw_sandbox.enabled = fal
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 mkdir -m 0700 "$temp_root/run-tmp"
 (
+  cd "$temp_root/workspace"
   export CLADDING_RUN_SECRET_PROBE="$run_secret_value"
   if TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v \
     --secret "$run_secret_name=env:CLADDING_RUN_SECRET_PROBE" -- \
