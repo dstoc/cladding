@@ -119,7 +119,8 @@ ln -s .dotfile "$workspace/snapshot-source/link"
   cd "$workspace"
   "$cladding_bin" init "$project_name" >/dev/null
 )
-jq --arg image docker.io/library/debian:trixie-slim \
+# Execution fixtures need the CA tools that Cladding runs during startup.
+jq --arg image localhost/cladding-proxy:latest \
   --arg runtime "$runtime" \
   '.agent.image = $image
    | .nw_sandbox.enabled = true
