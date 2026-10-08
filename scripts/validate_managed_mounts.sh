@@ -142,9 +142,9 @@ require_copy_seed_marker_count 1
 persistent_names=$(managed_volume_names)
 
 phase="verify copy seed, permissions, symlink, source isolation, and shared writes"
-expected_uid=$(exec_in agent id -u)
-expected_gid=$(exec_in agent id -g)
 exec_in agent sh -ec '
+  expected_uid=$(id -u)
+  expected_gid=$(id -g)
   test "$(cat /snapshot/.dotfile)" = "original snapshot data"
   test -L /snapshot/link
   test "$(cat /snapshot/link)" = "original snapshot data"
