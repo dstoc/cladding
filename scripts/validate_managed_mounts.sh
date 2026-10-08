@@ -64,6 +64,20 @@ require_volume_count() {
   fi
 }
 
+require_copy_seed_marker_count() {
+  expected=$1
+  marker_dir="$project_root/runtime/managed-mounts"
+  if [ -d "$marker_dir" ]; then
+    observed=$(find "$marker_dir" -type f -name '*.copy-seeded' | wc -l | tr -d ' ')
+  else
+    observed=0
+  fi
+  if [ "$observed" -ne "$expected" ]; then
+    echo "copy seed marker count mismatch: expected=$expected observed=$observed" >&2
+    exit 1
+  fi
+}
+
 exec_in() {
   target=$1
   shift
@@ -124,9 +138,12 @@ phase="build project images and initialize CA"
 phase="start persistent runtime and create shared volumes"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up)
 require_volume_count 2
+require_copy_seed_marker_count 1
 persistent_names=$(managed_volume_names)
 
 phase="verify copy seed, permissions, symlink, source isolation, and shared writes"
+expected_uid=$(exec_in agent id -u)
+expected_gid=$(exec_in agent id -g)
 exec_in agent sh -ec '
   test "$(cat /snapshot/.dotfile)" = "original snapshot data"
   test -L /snapshot/link
@@ -134,7 +151,8 @@ exec_in agent sh -ec '
   test "$(stat -c %a /snapshot)" = 750
   test "$(stat -c %a /snapshot/payload)" = 640
   test "$(stat -c %a /snapshot/private)" = 600
-  test "$(stat -c %u /snapshot/private)" = 1000
+  test "$(stat -c %u /snapshot/private)" = "$expected_uid"
+  test "$(stat -c %g /snapshot/private)" = "$expected_gid"
   test -r /snapshot/private
   test ! -e /snapshot/host-after-start
   printf "agent write\n" > /snapshot/from-agent
@@ -162,10 +180,12 @@ test "$(cat "$workspace/snapshot-source/payload")" = "permission fixture"
 phase="remove persistent runtime volumes on down"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
 require_volume_count 0
+require_copy_seed_marker_count 0
 
 phase="reseed copy snapshot and clear tmpfs on a new runtime"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up)
 require_volume_count 2
+require_copy_seed_marker_count 1
 exec_in agent sh -ec '
   test "$(cat /snapshot/.dotfile)" = "changed after startup"
   test -f /snapshot/host-after-start
@@ -173,6 +193,7 @@ exec_in agent sh -ec '
 '
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
 require_volume_count 0
+require_copy_seed_marker_count 0
 
 phase="create run-scoped volumes and clean them after successful command"
 rm -f "$workspace/run-ready" "$workspace/run-exit"

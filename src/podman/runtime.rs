@@ -409,7 +409,7 @@ fn ensure_managed_mount_volumes(
 
         match kind {
             ManagedVolumeKind::Copy { source } => {
-                if existing && managed_copy_seed_is_complete(spec, &name, verbose, quiet_helpers)? {
+                if existing && managed_copy_seed_is_complete(spec, &name)? {
                     continue;
                 }
                 if !source.is_dir() {
@@ -418,11 +418,13 @@ fn ensure_managed_mount_volumes(
                         source.display()
                     )));
                 }
+                remove_managed_copy_seed_marker(spec, &name)?;
                 if existing {
                     remove_managed_mount_volume(spec, &name, verbose, quiet_helpers)?;
                 }
                 create_managed_mount_volume(spec, &name, None, verbose, quiet_helpers)?;
                 seed_managed_copy_volume(spec, &name, &source, verbose, quiet_helpers)?;
+                mark_managed_copy_seed_complete(spec, &name)?;
             }
             ManagedVolumeKind::Tmpfs { size_bytes } => {
                 if !existing {
@@ -542,6 +544,7 @@ fn remove_managed_mount_volume(
     quiet_helpers: bool,
 ) -> Result<()> {
     if inspect_resource_state("volume", name, verbose, quiet_helpers)?.is_none() {
+        remove_managed_copy_seed_marker(spec, name)?;
         return Ok(());
     }
     if !managed_mount_volume_labels_match(name, spec, verbose, quiet_helpers)? {
@@ -559,6 +562,7 @@ fn remove_managed_mount_volume(
         if verbose {
             forward_output(&output)?;
         }
+        remove_managed_copy_seed_marker(spec, name)?;
         return Ok(());
     }
     if quiet_helpers {
@@ -570,42 +574,62 @@ fn remove_managed_mount_volume(
     ensure_success_output(&output, "podman volume rm")
 }
 
-fn managed_copy_seed_is_complete(
-    spec: &RuntimeSpec,
-    volume_name: &str,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<bool> {
-    let mut cmd = build_managed_mount_helper_command(
-        spec,
-        volume_name,
-        None,
-        true,
-        "test -f /volume/.cladding-copy-seed-complete",
-    );
-    trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to inspect copy mount volume '{volume_name}'"))?;
-    match output.status.code() {
-        Some(0) => {
-            if verbose {
-                forward_output(&output)?;
-            }
-            Ok(true)
+fn managed_copy_seed_marker_path(spec: &RuntimeSpec, volume_name: &str) -> std::path::PathBuf {
+    spec.runtime_root
+        .join("runtime/managed-mounts")
+        .join(format!("{volume_name}.copy-seeded"))
+}
+
+fn managed_copy_seed_is_complete(spec: &RuntimeSpec, volume_name: &str) -> Result<bool> {
+    let marker = managed_copy_seed_marker_path(spec, volume_name);
+    let contents = match fs::read(&marker) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(anyhow::Error::new(err)
+                .context(format!(
+                    "failed to read copy mount seed marker {}",
+                    marker.display()
+                ))
+                .into());
         }
-        Some(1) => Ok(false),
-        _ => {
-            if quiet_helpers {
-                ensure_success_output_with_diagnostics(&output, "copy volume inspection")?;
-            }
-            if verbose {
-                forward_output(&output)?;
-            }
-            ensure_success_output(&output, "copy volume inspection")?;
-            Ok(false)
-        }
+    };
+    Ok(contents == b"cladding-copy-seed-v1\n")
+}
+
+fn remove_managed_copy_seed_marker(spec: &RuntimeSpec, volume_name: &str) -> Result<()> {
+    let marker = managed_copy_seed_marker_path(spec, volume_name);
+    match fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(anyhow::Error::new(err)
+            .context(format!(
+                "failed to remove copy mount seed marker {}",
+                marker.display()
+            ))
+            .into()),
     }
+}
+
+fn mark_managed_copy_seed_complete(spec: &RuntimeSpec, volume_name: &str) -> Result<()> {
+    let marker = managed_copy_seed_marker_path(spec, volume_name);
+    let parent = marker
+        .parent()
+        .expect("managed copy seed marker path has a parent");
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create managed mount state directory {}",
+            parent.display()
+        )
+    })?;
+    set_restrictive_dir_permissions(parent)?;
+    fs::write(&marker, b"cladding-copy-seed-v1\n").with_context(|| {
+        format!(
+            "failed to write copy mount seed marker {}",
+            marker.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn seed_managed_copy_volume(
@@ -615,17 +639,12 @@ fn seed_managed_copy_volume(
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<()> {
-    let script = concat!(
-        "set -eu\n",
-        "test -d /source || { echo 'copy mount source must be a directory' >&2; exit 1; }\n",
-        "mkdir -p /volume/payload\n",
-        "cp -a --no-preserve=ownership /source/. /volume/payload/\n",
-        "chown -R 1000:1000 /volume/payload\n",
-        "chmod --reference=/source /volume/payload\n",
-        ": > /volume/.cladding-copy-seed-complete\n"
+    let mut cmd = build_managed_mount_helper_command(
+        spec,
+        volume_name,
+        Some(source),
+        managed_copy_seed_script(),
     );
-    let mut cmd =
-        build_managed_mount_helper_command(spec, volume_name, Some(source), false, script);
     run_helper_command(
         &mut cmd,
         verbose,
@@ -634,11 +653,19 @@ fn seed_managed_copy_volume(
     )
 }
 
+fn managed_copy_seed_script() -> &'static str {
+    concat!(
+        "set -eu\n",
+        "test -d /source || { echo 'copy mount source must be a directory' >&2; exit 1; }\n",
+        "cp -a --no-preserve=ownership /source/. /volume/\n",
+        "chmod --reference=/source /volume\n"
+    )
+}
+
 fn build_managed_mount_helper_command(
     spec: &RuntimeSpec,
     volume_name: &str,
     source: Option<&Path>,
-    volume_read_only: bool,
     script: &str,
 ) -> Command {
     let helper_name = managed_mount_seed_helper_name(volume_name);
@@ -651,8 +678,6 @@ fn build_managed_mount_helper_command(
         "none",
         "--userns",
         "keep-id",
-        "--user",
-        "0:0",
         "--name",
         &helper_name,
     ]);
@@ -665,8 +690,7 @@ fn build_managed_mount_helper_command(
         cmd.arg(format!("{}:/source:ro", source.display()));
     }
     cmd.arg("--volume");
-    let suffix = if volume_read_only { ":ro" } else { ":U" };
-    cmd.arg(format!("{volume_name}:/volume{suffix}"));
+    cmd.arg(format!("{volume_name}:/volume:U"));
     cmd.args(["--entrypoint", "/bin/sh"]);
     let proxy_image = spec
         .proxy
@@ -1351,7 +1375,6 @@ mod tests {
             &spec,
             "cladding-mount-0123456789abcdef",
             Some(Path::new("/tmp/project/source")),
-            false,
             "copy script",
         );
         let args = command_args(&cmd);
@@ -1359,7 +1382,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
         assert!(args.iter().any(|arg| arg == "--pull=never"));
         assert!(args.windows(2).any(|pair| pair == ["--userns", "keep-id"]));
-        assert!(args.windows(2).any(|pair| pair == ["--user", "0:0"]));
+        assert!(!args.iter().any(|arg| arg == "--user"));
         assert!(
             args.iter()
                 .any(|arg| arg == "cladding-mount-0123456789abcdef-seed")
@@ -1377,6 +1400,39 @@ mod tests {
                 .any(|arg| arg == "localhost/cladding-proxy:latest")
         );
         assert_eq!(args[args.len() - 2..], ["-ec", "copy script"]);
+    }
+
+    #[test]
+    fn managed_copy_seed_runs_as_the_keep_id_user() {
+        let script = managed_copy_seed_script();
+
+        assert!(script.contains("cp -a --no-preserve=ownership /source/. /volume/"));
+        assert!(script.contains("chmod --reference=/source /volume"));
+        assert!(!script.contains("chown"));
+    }
+
+    #[test]
+    fn managed_copy_seed_marker_tracks_only_a_complete_seed() {
+        let marker_root =
+            std::env::temp_dir().join(format!("cladding-copy-seed-marker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&marker_root);
+        let mut spec = test_runtime_spec();
+        spec.runtime_root = marker_root.clone();
+        let volume_name = "cladding-mount-marker-test";
+
+        assert!(!managed_copy_seed_is_complete(&spec, volume_name).unwrap());
+        mark_managed_copy_seed_complete(&spec, volume_name).unwrap();
+        assert!(managed_copy_seed_is_complete(&spec, volume_name).unwrap());
+
+        fs::write(
+            managed_copy_seed_marker_path(&spec, volume_name),
+            b"incomplete\n",
+        )
+        .unwrap();
+        assert!(!managed_copy_seed_is_complete(&spec, volume_name).unwrap());
+        remove_managed_copy_seed_marker(&spec, volume_name).unwrap();
+        assert!(!managed_copy_seed_is_complete(&spec, volume_name).unwrap());
+        fs::remove_dir_all(marker_root).unwrap();
     }
 
     #[test]

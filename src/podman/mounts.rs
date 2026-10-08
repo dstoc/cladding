@@ -1,4 +1,4 @@
-use crate::runtime::{ManagedVolumeKind, RuntimeMount, RuntimeMountSource, RuntimeSpec};
+use crate::runtime::{RuntimeMount, RuntimeMountSource, RuntimeSpec};
 use std::process::Command;
 
 pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts: &[RuntimeMount]) {
@@ -15,15 +15,6 @@ pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts:
 
         if let RuntimeMountSource::ManagedVolume { claim_name, .. } = &mount.source {
             let mut spec = format!("type=volume,src={claim_name},dst={}", mount.mount_path);
-            if matches!(
-                &mount.source,
-                RuntimeMountSource::ManagedVolume {
-                    kind: ManagedVolumeKind::Copy { .. },
-                    ..
-                }
-            ) {
-                spec.push_str(",subpath=payload");
-            }
             if mount.read_only {
                 spec.push_str(",ro=true");
             }
@@ -114,6 +105,7 @@ fn sanitize_volume_fragment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::ManagedVolumeKind;
 
     fn command_args(cmd: &Command) -> Vec<String> {
         cmd.get_args()
@@ -237,11 +229,11 @@ mod tests {
             command_args(&cmd),
             vec![
                 "--mount",
-                "type=volume,src=cladding-mount-copy,dst=/workspace,subpath=payload",
+                "type=volume,src=cladding-mount-copy,dst=/workspace",
                 "--mount",
                 "type=tmpfs,dst=/tmp/cache,tmpfs-mode=1777,U=true,tmpfs-size=1073741824",
                 "--mount",
-                "type=volume,src=cladding-mount-readonly,dst=/readonly,subpath=payload,ro=true",
+                "type=volume,src=cladding-mount-readonly,dst=/readonly,ro=true",
                 "--mount",
                 "type=volume,src=cladding-mount-tmpfs,dst=/shared",
                 "--mount",
