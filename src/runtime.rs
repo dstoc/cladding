@@ -5,6 +5,6 @@ mod sockets;
 mod types;
 
 pub use types::{
-    RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeMount,
-    RuntimeMountSource, RuntimeSpec, RuntimeUserNamespace,
+    ManagedVolumeKind, RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar,
+    RuntimeMount, RuntimeMountSource, RuntimeSpec, RuntimeUserNamespace,
 };

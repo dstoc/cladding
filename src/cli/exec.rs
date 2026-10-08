@@ -5,7 +5,9 @@ use anyhow::Context as _;
 use cladding::config::{ExecutionConfig, MountTarget};
 use cladding::error::{Error, Result};
 use cladding::podman::podman_required;
-use cladding::runtime::{RuntimeComponent, RuntimeMount, RuntimeMountSource, RuntimeSpec};
+use cladding::runtime::{
+    ManagedVolumeKind, RuntimeComponent, RuntimeMount, RuntimeMountSource, RuntimeSpec,
+};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::env;
@@ -424,11 +426,14 @@ fn resolve_container_workdir(
 
 fn host_path_for_mount(mount: &RuntimeMount) -> Option<&Path> {
     match &mount.source {
-        RuntimeMountSource::HostPath { path } | RuntimeMountSource::OverlayHostPath { path } => {
-            Some(path)
-        }
+        RuntimeMountSource::HostPath { path } => Some(path),
+        RuntimeMountSource::ManagedVolume {
+            kind: ManagedVolumeKind::Copy { source },
+            ..
+        } => Some(source),
         RuntimeMountSource::NamedVolume { .. }
         | RuntimeMountSource::NamedVolumeChown { .. }
+        | RuntimeMountSource::ManagedVolume { .. }
         | RuntimeMountSource::GeneratedEmptyMask { .. }
         | RuntimeMountSource::Tmpfs { .. }
         | RuntimeMountSource::EmptyDir => None,
@@ -635,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_container_workdir_maps_custom_host_mounts() {
+    fn resolve_container_workdir_maps_custom_copy_mount_sources() {
         let temp = create_temp_dir("custom-mount");
         let workspace = temp.join("workspace");
         let project_root = workspace.join(".cladding");
@@ -647,7 +652,7 @@ mod tests {
             mount_path: "/data".to_string(),
             host_path: Some(data),
             volume: None,
-            mount_type: MountType::Bind,
+            mount_type: MountType::Copy,
             tmpfs_size_bytes: None,
             read_only: false,
             targets: vec![MountTarget::Agent],

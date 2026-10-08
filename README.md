@@ -335,8 +335,8 @@ The default proxy image is built from Debian trixie slim. It includes GNU libc, 
 * `mount` (required, absolute path in the container)
 * `hostPath` (optional, host bind mount; relative paths are resolved from `.cladding/`)
 * `volume` (optional, named volume; mutually exclusive with `hostPath`)
-* `type` (optional: `bind`, `readonly`, `overlay`, or `tmpfs`; omitted `type` defaults host paths to writable binds and keeps existing volume and empty mount behavior)
-* `size` (optional size string for `type: "tmpfs"`, such as `1GiB`; if omitted, Podman chooses the size)
+* `type` (optional: `bind`, `readonly`, `copy`, or `tmpfs`; omitted `type` defaults host paths to writable binds and keeps existing volume and empty mount behavior)
+* `size` (optional size string for `type: "tmpfs"`, such as `1GiB`; the default limit is `64MiB`)
 * `readOnly` (deprecated; accepted for compatibility on existing mounts, but new read-only host mounts should use `type: "readonly"`)
 * `targets` (optional; explicit list of `agent`, `nw-sandbox`, `fs-sandbox`)
 * `ignore` (optional, default `false`; when true, removes an existing default mount at the same `mount` path instead of replacing it)
@@ -344,11 +344,17 @@ The default proxy image is built from Debian trixie slim. It includes GNU libc, 
 If `type` is omitted and neither `hostPath` nor `volume` is set, a managed empty runtime volume is mounted read-only. This is intended for masking or hiding underlying files.
 Mounts apply to the components named in `targets`. When `targets` is omitted, the mount applies to the agent and to `nw-sandbox` when it is enabled. `fs-sandbox` only receives custom mounts that explicitly target `fs-sandbox`.
 
-`bind`, `readonly`, and `overlay` require `hostPath`. `bind` is a writable host bind. `readonly` prevents container writes to the host source. `overlay` gives each container its own disposable writable layer over that source. If an overlay targets both the agent and `nw-sandbox`, writes in one container are not visible in the other. The host source stays unchanged. Overlay writes last only for that container's lifetime, so `cladding down` and the next `cladding up` discard them. Podman overlays are rejected for the agent when `use_runsc` is enabled. Legacy `readOnly: true` selects the same read-only bind behavior, while legacy `readOnly: false` keeps a bind writable.
+`bind`, `readonly`, and `copy` require `hostPath`. `bind` shares a live host directory. Writes affect the host source unless the mount is read-only. `readonly` prevents container writes to the host source.
 
-`tmpfs` is a writable, memory-backed mount and cannot use `hostPath` or `volume`. Cladding accepts byte values and `K`, `M`, `G`, `T`, `KiB`, `MiB`, `GiB`, and `TiB` size units; decimal `KB`, `MB`, `GB`, and `TB` units are also accepted. Podman receives the limit in bytes. Cladding sets mode `1777` and asks Podman to set ownership to the container's mapped user and group. Tmpfs contents disappear when the container stops. Existing named volumes keep their current persistence behavior.
+`copy` snapshots the host directory once into a Cladding-managed disposable volume. The snapshot includes dotfiles and preserves symlinks and permission bits. Cladding seeds the volume as the user selected by Podman's `keep-id` mapping, so workloads can access private files under rootless Podman, including on Podman machine. Containers can change the snapshot without changing the host source. When one `copy` declaration targets multiple containers, they mount the same volume and see each other's writes. Later changes to the host source do not appear in the running runtime. Cladding removes the volume on `down` or after `run` completes. Seeding the snapshot takes time and uses disk space proportional to the source tree.
 
-Cladding keeps the `.cladding` mask beneath workspace overlays and read-only mounts whose host source contains the private `.cladding` directory. A `readonly` or `overlay` mount cannot use a path inside `.cladding` as its host source.
+Cladding no longer supports `overlay`. Podman's normal `:O` mount gives each container a separate writable upper layer, so it cannot provide one shared filesystem to multiple targets. Cladding reports an error for existing `overlay` declarations and directs users to `copy`, which provides a host snapshot with shared writable state.
+
+`tmpfs` is a disposable, memory-backed mount and cannot use `hostPath` or `volume`. Cladding accepts byte values and `K`, `M`, `G`, `T`, `KiB`, `MiB`, `GiB`, and `TiB` size units; decimal `KB`, `MB`, `GB`, and `TB` units are also accepted. Podman receives the limit in bytes. Cladding sets mode `1777` and asks Podman to set ownership to the container's mapped user and group. One target uses a container tmpfs. Multiple targets share one Cladding-managed tmpfs-backed volume. Contents disappear when the runtime stops. The default limit is `64MiB` when `size` is omitted.
+
+`volume` keeps normal named-volume persistence semantics. Cladding does not remove these user-managed volumes on `down` or after `run`.
+
+Cladding keeps the `.cladding` mask beneath workspace copy and read-only mounts whose host source contains the private `.cladding` directory. A `readonly` or `copy` mount cannot use a path inside `.cladding` as its host source.
 
 Example:
 
@@ -364,8 +370,8 @@ Example:
   "mounts": [
     { "mount": "/home/user/workspace/.cache/npm", "volume": "npm-cache" },
     { "mount": "/opt/data", "hostPath": "../data", "type": "readonly" },
-    { "mount": "/home/user/workspace", "hostPath": "..", "type": "overlay" },
-    { "mount": "/tmp/cache", "type": "tmpfs", "size": "1GiB" },
+    { "mount": "/home/user/workspace", "hostPath": "..", "type": "copy", "targets": ["agent", "nw-sandbox"] },
+    { "mount": "/tmp/cache", "type": "tmpfs", "size": "1GiB", "targets": ["agent", "nw-sandbox"] },
     { "mount": "/tmp/isolated" },
     { "mount": "/opt/nw-sandbox-only", "hostPath": "../nw-sandbox-data", "targets": ["nw-sandbox"] },
     { "mount": "/opt/fs-sandbox-only", "hostPath": "../fs-sandbox-data", "targets": ["fs-sandbox"] }

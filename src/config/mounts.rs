@@ -118,13 +118,23 @@ pub(super) fn parse_mounts_v2(
                 Some(match mount_type {
                     "bind" => MountType::Bind,
                     "readonly" => MountType::Readonly,
-                    "overlay" => MountType::Overlay,
+                    "copy" => MountType::Copy,
                     "tmpfs" => MountType::Tmpfs,
+                    "overlay" => {
+                        eprintln!(
+                            "error: cladding.json invalid field 'mounts[{index}].type' (overlay mounts are no longer supported)"
+                        );
+                        eprintln!(
+                            "hint: use type: \"copy\" to snapshot a host directory into disposable shared storage"
+                        );
+                        eprintln!("file: {}", config_path.display());
+                        return Err(Error::message("unsupported mount type 'overlay'"));
+                    }
                     _ => {
                         eprintln!(
                             "error: cladding.json invalid field 'mounts[{index}].type' (unknown type '{mount_type}')"
                         );
-                        eprintln!("hint: valid mount types are bind, readonly, overlay, and tmpfs");
+                        eprintln!("hint: valid mount types are bind, readonly, copy, and tmpfs");
                         eprintln!("file: {}", config_path.display());
                         return Err(Error::message("invalid cladding.json"));
                     }
@@ -156,6 +166,7 @@ pub(super) fn parse_mounts_v2(
                     Error::message("invalid cladding.json")
                 })?)
             }
+            None if configured_type == Some(MountType::Tmpfs) => Some(64 * 1024 * 1024),
             None => None,
         };
 
@@ -165,22 +176,10 @@ pub(super) fn parse_mounts_v2(
             MountType::Bind
         });
 
-        if mount_type == MountType::Overlay
-            && execution_config.use_runsc
-            && targets.contains(&MountTarget::Agent)
-        {
-            eprintln!(
-                "error: cladding.json invalid field 'mounts[{index}].type' (overlay mounts are not supported for the agent when use_runsc is enabled)"
-            );
-            eprintln!("hint: remove the agent target or disable use_runsc for this runtime");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("unsupported overlay runtime"));
-        }
-
         if let Some(mount_type) = configured_type {
             let host_path_required = matches!(
                 mount_type,
-                MountType::Bind | MountType::Readonly | MountType::Overlay
+                MountType::Bind | MountType::Readonly | MountType::Copy
             );
             if host_path_required && host_path.is_none() {
                 eprintln!(
@@ -208,7 +207,6 @@ pub(super) fn parse_mounts_v2(
 
         match (configured_type, legacy_read_only) {
             (Some(MountType::Bind), Some(true))
-            | (Some(MountType::Overlay), Some(true))
             | (Some(MountType::Tmpfs), Some(true))
             | (Some(MountType::Readonly), Some(false)) => {
                 eprintln!(
@@ -295,6 +293,7 @@ pub(super) fn parse_mounts_v2(
         }
 
         let read_only = mount_type == MountType::Readonly
+            || (mount_type == MountType::Copy && legacy_read_only == Some(true))
             || (host_path.is_none() && volume.is_none() && mount_type == MountType::Bind);
 
         mounts.push(ResolvedMountConfig {
@@ -409,7 +408,7 @@ impl MountType {
         match self {
             Self::Bind => "bind",
             Self::Readonly => "readonly",
-            Self::Overlay => "overlay",
+            Self::Copy => "copy",
             Self::Tmpfs => "tmpfs",
         }
     }
@@ -422,6 +421,9 @@ fn parse_tmpfs_size(value: &str) -> Option<u64> {
     }
 
     let amount = value[..digit_count].parse::<u64>().ok()?;
+    if amount == 0 {
+        return None;
+    }
     let multiplier = match value[digit_count..].to_ascii_lowercase().as_str() {
         "" | "b" | "byte" | "bytes" => 1,
         "k" | "kib" => 1024,
@@ -523,14 +525,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_mounts_supports_types_tmpfs_size_and_legacy_read_only() {
+    fn parse_mounts_supports_copy_tmpfs_size_and_legacy_read_only() {
         let temp = create_temp_dir("mount-types");
         let parsed = serde_json::json!({
             "mounts": [
                 { "mount": "/bind", "hostPath": "./workspace" },
                 { "mount": "/reference", "hostPath": "../reference", "type": "readonly" },
-                { "mount": "/overlay", "hostPath": "../workspace", "type": "overlay", "readOnly": false, "targets": ["agent"] },
+                { "mount": "/copy", "hostPath": "../workspace", "type": "copy", "targets": ["agent", "nw-sandbox"] },
                 { "mount": "/tmp", "type": "tmpfs", "size": "1GiB", "targets": ["agent"] },
+                { "mount": "/tmp-default", "type": "tmpfs", "targets": ["agent"] },
                 { "mount": "/legacy-ro", "hostPath": "../config", "readOnly": true },
                 { "mount": "/legacy-rw", "hostPath": "../cache", "readOnly": false }
             ]
@@ -542,14 +545,15 @@ mod tests {
         assert!(!mounts[0].read_only);
         assert_eq!(mounts[1].mount_type, MountType::Readonly);
         assert!(mounts[1].read_only);
-        assert_eq!(mounts[2].mount_type, MountType::Overlay);
+        assert_eq!(mounts[2].mount_type, MountType::Copy);
         assert!(!mounts[2].read_only);
         assert_eq!(mounts[3].mount_type, MountType::Tmpfs);
         assert_eq!(mounts[3].tmpfs_size_bytes, Some(1024 * 1024 * 1024));
-        assert_eq!(mounts[4].mount_type, MountType::Readonly);
-        assert!(mounts[4].read_only);
-        assert_eq!(mounts[5].mount_type, MountType::Bind);
-        assert!(!mounts[5].read_only);
+        assert_eq!(mounts[4].tmpfs_size_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(mounts[5].mount_type, MountType::Readonly);
+        assert!(mounts[5].read_only);
+        assert_eq!(mounts[6].mount_type, MountType::Bind);
+        assert!(!mounts[6].read_only);
     }
 
     #[test]
@@ -560,7 +564,6 @@ mod tests {
             serde_json::json!({ "mount": "/data", "type": "bind" }),
             serde_json::json!({ "mount": "/data", "type": "tmpfs", "hostPath": "../data" }),
             serde_json::json!({ "mount": "/data", "hostPath": "../data", "size": "1GiB" }),
-            serde_json::json!({ "mount": "/data", "hostPath": "../data", "type": "overlay", "readOnly": true }),
             serde_json::json!({ "mount": "/data", "hostPath": "../data", "type": "bind", "readOnly": true }),
             serde_json::json!({ "mount": "/data", "type": "tmpfs", "readOnly": true }),
             serde_json::json!({ "mount": "/data", "hostPath": "../data", "type": "readonly", "readOnly": false }),
@@ -574,19 +577,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_mounts_rejects_overlay_of_private_cladding_files_and_runsc_agent() {
+    fn parse_mounts_rejects_overlay_and_copy_of_private_cladding_files() {
         let temp = create_temp_dir("private-mount");
-        let private_overlay = serde_json::json!({
+        let removed_overlay = serde_json::json!({
             "mounts": [{ "mount": "/private", "hostPath": ".", "type": "overlay" }]
         });
-        assert!(parse_mounts(&temp, &private_overlay, &execution_config(true, false)).is_err());
+        assert!(parse_mounts(&temp, &removed_overlay, &execution_config(true, false)).is_err());
 
-        let mut runsc_config = execution_config(true, false);
-        runsc_config.use_runsc = true;
-        let agent_overlay = serde_json::json!({
-            "mounts": [{ "mount": "/workspace", "hostPath": "../workspace", "type": "overlay", "targets": ["agent"] }]
+        let private_copy = serde_json::json!({
+            "mounts": [{ "mount": "/private", "hostPath": ".", "type": "copy" }]
         });
-        assert!(parse_mounts(&temp, &agent_overlay, &runsc_config).is_err());
+        assert!(parse_mounts(&temp, &private_copy, &execution_config(true, false)).is_err());
     }
 
     #[test]
@@ -642,7 +643,7 @@ mod tests {
         let mounts = parse_mounts(&temp, &parsed, &execution_config(true, false)).unwrap();
 
         assert_eq!(mounts[0].mount_type, MountType::Tmpfs);
-        assert_eq!(mounts[0].tmpfs_size_bytes, None);
+        assert_eq!(mounts[0].tmpfs_size_bytes, Some(64 * 1024 * 1024));
         assert!(!mounts[0].read_only);
     }
 
@@ -651,6 +652,7 @@ mod tests {
         assert_eq!(parse_tmpfs_size("1GiB"), Some(1024_u64.pow(3)));
         assert_eq!(parse_tmpfs_size("2MB"), Some(2_000_000));
         assert_eq!(parse_tmpfs_size("12"), Some(12));
+        assert_eq!(parse_tmpfs_size("0"), None);
         assert_eq!(parse_tmpfs_size("1.5GiB"), None);
         assert_eq!(parse_tmpfs_size("1GB-extra"), None);
         assert_eq!(parse_tmpfs_size("18446744073709551615K"), None);

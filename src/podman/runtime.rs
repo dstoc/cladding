@@ -1,9 +1,10 @@
 use crate::error::{Error, Result};
 use crate::runtime::{
-    RuntimeComponent, RuntimeContainer, RuntimeMountSource, RuntimeSpec, RuntimeUserNamespace,
+    ManagedVolumeKind, RuntimeComponent, RuntimeContainer, RuntimeMountSource, RuntimeSpec,
+    RuntimeUserNamespace,
 };
 use anyhow::Context as _;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -46,6 +47,7 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) ->
     prepare_runtime_socket_dirs(spec)?;
     ensure_runtime_empty_mask_dir(spec)?;
     ensure_proxy_relay_volumes(spec, verbose, quiet_helpers)?;
+    ensure_managed_mount_volumes(spec, verbose, quiet_helpers)?;
 
     for component in runtime_components(spec) {
         for container in &component.containers {
@@ -233,6 +235,14 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
         &mut cleanup_error,
         remove_proxy_relay_volumes(spec, verbose, quiet_helpers),
     );
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_managed_mount_seed_helpers(spec, verbose, quiet_helpers),
+    );
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_managed_mount_volumes(spec, verbose, quiet_helpers),
+    );
     match cleanup_error {
         Some(err) => Err(err),
         None => Ok(()),
@@ -364,6 +374,493 @@ fn proxy_relay_volume_labels_match(
             == Some("baffle-proxy-relay"))
 }
 
+fn managed_mount_volumes(spec: &RuntimeSpec) -> BTreeMap<String, ManagedVolumeKind> {
+    let mut volumes = BTreeMap::new();
+    for component in runtime_components(spec) {
+        for container in &component.containers {
+            for mount in &container.mounts {
+                if let RuntimeMountSource::ManagedVolume { claim_name, kind } = &mount.source {
+                    volumes
+                        .entry(claim_name.clone())
+                        .or_insert_with(|| kind.clone());
+                }
+            }
+        }
+    }
+    volumes
+}
+
+fn ensure_managed_mount_volumes(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    for (name, kind) in managed_mount_volumes(spec) {
+        if matches!(&kind, ManagedVolumeKind::Copy { .. }) {
+            remove_managed_mount_seed_helper(spec, &name, false, verbose, quiet_helpers)?;
+        }
+
+        let existing = inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_some();
+        if existing && !managed_mount_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
+            return Err(Error::message(format!(
+                "refusing to use Podman volume '{name}' because it is not owned by this Cladding runtime"
+            )));
+        }
+
+        match kind {
+            ManagedVolumeKind::Copy { source } => {
+                if existing && managed_copy_seed_is_complete(spec, &name)? {
+                    continue;
+                }
+                if !source.is_dir() {
+                    return Err(Error::message(format!(
+                        "copy mount source is not a directory: {}",
+                        source.display()
+                    )));
+                }
+                remove_managed_copy_seed_marker(spec, &name)?;
+                if existing {
+                    remove_managed_mount_volume(spec, &name, verbose, quiet_helpers)?;
+                }
+                create_managed_mount_volume(spec, &name, None, verbose, quiet_helpers)?;
+                seed_managed_copy_volume(spec, &name, &source, verbose, quiet_helpers)?;
+                mark_managed_copy_seed_complete(spec, &name)?;
+            }
+            ManagedVolumeKind::Tmpfs { size_bytes } => {
+                if !existing {
+                    create_managed_mount_volume(
+                        spec,
+                        &name,
+                        Some(size_bytes),
+                        verbose,
+                        quiet_helpers,
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn managed_mount_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("cladding".to_string(), spec.project_name.clone()),
+        (
+            "project_root".to_string(),
+            spec.project_root.to_string_lossy().into_owned(),
+        ),
+        ("cladding_resource".to_string(), "managed-mount".to_string()),
+        (
+            "cladding_runtime_root".to_string(),
+            spec.runtime_root.to_string_lossy().into_owned(),
+        ),
+        ("cladding_mount_volume".to_string(), name.to_string()),
+    ])
+}
+
+fn managed_mount_seed_helper_name(name: &str) -> String {
+    format!("{name}-seed")
+}
+
+fn managed_mount_seed_helper_labels(
+    spec: &RuntimeSpec,
+    volume_name: &str,
+) -> BTreeMap<String, String> {
+    let mut labels = managed_mount_volume_labels(spec, volume_name);
+    labels.insert(
+        "cladding_resource".to_string(),
+        "managed-mount-seed-helper".to_string(),
+    );
+    labels
+}
+
+fn managed_mount_volume_labels_match(
+    name: &str,
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<bool> {
+    let labels = inspect_value("volume", name, "{{json .Labels}}", verbose, quiet_helpers)?;
+    let labels: serde_json::Value = serde_json::from_str(&labels)
+        .with_context(|| format!("failed to parse labels for managed mount volume {name}"))?;
+    Ok(labels_match_expected(
+        &labels,
+        &managed_mount_volume_labels(spec, name),
+    ))
+}
+
+fn create_managed_mount_volume(
+    spec: &RuntimeSpec,
+    name: &str,
+    tmpfs_size_bytes: Option<u64>,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    let mut cmd = build_managed_mount_volume_create_command(spec, name, tmpfs_size_bytes);
+    trace_command(&cmd, verbose);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to create managed mount volume '{name}'"))?;
+    if output.status.success() {
+        if verbose {
+            forward_output(&output)?;
+        }
+        return Ok(());
+    }
+    if quiet_helpers {
+        return ensure_success_output_with_diagnostics(&output, "podman volume create");
+    }
+    if verbose {
+        forward_output(&output)?;
+    }
+    ensure_success_output(&output, "podman volume create")
+}
+
+fn build_managed_mount_volume_create_command(
+    spec: &RuntimeSpec,
+    name: &str,
+    tmpfs_size_bytes: Option<u64>,
+) -> Command {
+    let mut cmd = Command::new("podman");
+    cmd.args(["volume", "create", "--opt", "nocopy"]);
+    if let Some(size_bytes) = tmpfs_size_bytes {
+        cmd.args(["--opt", "type=tmpfs", "--opt", "device=tmpfs"]);
+        cmd.arg("--opt");
+        cmd.arg(format!("o=size={size_bytes},mode=1777"));
+    }
+    for (key, value) in managed_mount_volume_labels(spec, name) {
+        cmd.arg("--label");
+        cmd.arg(format!("{key}={value}"));
+    }
+    cmd.arg(name);
+    cmd
+}
+
+fn remove_managed_mount_volume(
+    spec: &RuntimeSpec,
+    name: &str,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    if inspect_resource_state("volume", name, verbose, quiet_helpers)?.is_none() {
+        remove_managed_copy_seed_marker(spec, name)?;
+        return Ok(());
+    }
+    if !managed_mount_volume_labels_match(name, spec, verbose, quiet_helpers)? {
+        return Err(Error::message(format!(
+            "refusing to remove Podman volume '{name}' because it is not owned by this Cladding runtime"
+        )));
+    }
+
+    let mut cmd = build_volume_rm_command(name);
+    trace_command(&cmd, verbose);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to remove managed mount volume '{name}'"))?;
+    if output.status.success() || remove_output_is_missing_volume(&output) {
+        if verbose {
+            forward_output(&output)?;
+        }
+        remove_managed_copy_seed_marker(spec, name)?;
+        return Ok(());
+    }
+    if quiet_helpers {
+        return ensure_success_output_with_diagnostics(&output, "podman volume rm");
+    }
+    if verbose {
+        forward_output(&output)?;
+    }
+    ensure_success_output(&output, "podman volume rm")
+}
+
+fn managed_copy_seed_marker_path(spec: &RuntimeSpec, volume_name: &str) -> std::path::PathBuf {
+    spec.runtime_root
+        .join("runtime/managed-mounts")
+        .join(format!("{volume_name}.copy-seeded"))
+}
+
+fn managed_copy_seed_is_complete(spec: &RuntimeSpec, volume_name: &str) -> Result<bool> {
+    let marker = managed_copy_seed_marker_path(spec, volume_name);
+    let contents = match fs::read(&marker) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(anyhow::Error::new(err)
+                .context(format!(
+                    "failed to read copy mount seed marker {}",
+                    marker.display()
+                ))
+                .into());
+        }
+    };
+    Ok(contents == b"cladding-copy-seed-v1\n")
+}
+
+fn remove_managed_copy_seed_marker(spec: &RuntimeSpec, volume_name: &str) -> Result<()> {
+    let marker = managed_copy_seed_marker_path(spec, volume_name);
+    match fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(anyhow::Error::new(err)
+            .context(format!(
+                "failed to remove copy mount seed marker {}",
+                marker.display()
+            ))
+            .into()),
+    }
+}
+
+fn mark_managed_copy_seed_complete(spec: &RuntimeSpec, volume_name: &str) -> Result<()> {
+    let marker = managed_copy_seed_marker_path(spec, volume_name);
+    let parent = marker
+        .parent()
+        .expect("managed copy seed marker path has a parent");
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create managed mount state directory {}",
+            parent.display()
+        )
+    })?;
+    set_restrictive_dir_permissions(parent)?;
+    fs::write(&marker, b"cladding-copy-seed-v1\n").with_context(|| {
+        format!(
+            "failed to write copy mount seed marker {}",
+            marker.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn seed_managed_copy_volume(
+    spec: &RuntimeSpec,
+    volume_name: &str,
+    source: &Path,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    let mut cmd = build_managed_mount_helper_command(
+        spec,
+        volume_name,
+        Some(source),
+        managed_copy_seed_script(),
+    );
+    run_helper_command(
+        &mut cmd,
+        verbose,
+        quiet_helpers,
+        "copy mount volume seeding",
+    )
+}
+
+fn managed_copy_seed_script() -> &'static str {
+    concat!(
+        "set -eu\n",
+        "test -d /source || { echo 'copy mount source must be a directory' >&2; exit 1; }\n",
+        "cp -a --no-preserve=ownership /source/. /volume/\n",
+        "chmod --reference=/source /volume\n"
+    )
+}
+
+fn build_managed_mount_helper_command(
+    spec: &RuntimeSpec,
+    volume_name: &str,
+    source: Option<&Path>,
+    script: &str,
+) -> Command {
+    let helper_name = managed_mount_seed_helper_name(volume_name);
+    let mut cmd = Command::new("podman");
+    cmd.args([
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network",
+        "none",
+        "--userns",
+        "keep-id",
+        "--name",
+        &helper_name,
+    ]);
+    for (key, value) in managed_mount_seed_helper_labels(spec, volume_name) {
+        cmd.arg("--label");
+        cmd.arg(format!("{key}={value}"));
+    }
+    if let Some(source) = source {
+        cmd.arg("--volume");
+        cmd.arg(format!("{}:/source:ro", source.display()));
+    }
+    cmd.arg("--volume");
+    cmd.arg(format!("{volume_name}:/volume:U"));
+    cmd.args(["--entrypoint", "/bin/sh"]);
+    let proxy_image = spec
+        .proxy
+        .containers
+        .first()
+        .map(|container| container.image.as_str())
+        .expect("runtime spec must include a proxy container");
+    cmd.arg(proxy_image);
+    cmd.args(["-ec", script]);
+    cmd
+}
+
+fn remove_managed_mount_seed_helper(
+    spec: &RuntimeSpec,
+    volume_name: &str,
+    allow_running: bool,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    let helper_name = managed_mount_seed_helper_name(volume_name);
+    let Some(state) = inspect_resource_state("container", &helper_name, verbose, quiet_helpers)?
+    else {
+        return Ok(());
+    };
+    let labels = managed_mount_seed_helper_labels(spec, volume_name);
+    if !resource_labels_match_expected("container", &helper_name, &labels, verbose, quiet_helpers)?
+    {
+        return Err(Error::message(format!(
+            "refusing to remove container '{helper_name}' because it is not owned by this Cladding runtime"
+        )));
+    }
+    if !allow_running && state.eq_ignore_ascii_case("running") {
+        return Err(Error::message(format!(
+            "copy mount volume '{volume_name}' already has a running seed helper"
+        )));
+    }
+    container_rm(&helper_name, verbose, quiet_helpers)
+}
+
+fn remove_managed_mount_seed_helpers(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    let mut helper_names = BTreeSet::new();
+    for (name, kind) in managed_mount_volumes(spec) {
+        if matches!(kind, ManagedVolumeKind::Copy { .. }) {
+            helper_names.insert(managed_mount_seed_helper_name(&name));
+        }
+    }
+    helper_names.extend(list_managed_mount_seed_helpers(
+        spec,
+        verbose,
+        quiet_helpers,
+    )?);
+    for helper_name in helper_names {
+        let Some(volume_name) = helper_name.strip_suffix("-seed") else {
+            return Err(Error::message(format!(
+                "refusing to remove unexpected managed mount helper '{helper_name}'"
+            )));
+        };
+        remove_managed_mount_seed_helper(spec, volume_name, true, verbose, quiet_helpers)?;
+    }
+    Ok(())
+}
+
+fn remove_managed_mount_volumes(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    let mut volume_names = managed_mount_volumes(spec)
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    volume_names.extend(list_managed_mount_volumes(spec, verbose, quiet_helpers)?);
+    for name in volume_names {
+        remove_managed_mount_volume(spec, &name, verbose, quiet_helpers)?;
+    }
+    Ok(())
+}
+
+fn list_managed_mount_seed_helpers(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<Vec<String>> {
+    let project_root = spec.project_root.to_string_lossy().into_owned();
+    let runtime_root = spec.runtime_root.to_string_lossy().into_owned();
+    list_labeled_resource_names(
+        "container",
+        &[
+            ("cladding_resource", "managed-mount-seed-helper"),
+            ("cladding", spec.project_name.as_str()),
+            ("project_root", project_root.as_str()),
+            ("cladding_runtime_root", runtime_root.as_str()),
+        ],
+        verbose,
+        quiet_helpers,
+    )
+}
+
+fn list_managed_mount_volumes(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<Vec<String>> {
+    let project_root = spec.project_root.to_string_lossy().into_owned();
+    let runtime_root = spec.runtime_root.to_string_lossy().into_owned();
+    list_labeled_resource_names(
+        "volume",
+        &[
+            ("cladding_resource", "managed-mount"),
+            ("cladding", spec.project_name.as_str()),
+            ("project_root", project_root.as_str()),
+            ("cladding_runtime_root", runtime_root.as_str()),
+        ],
+        verbose,
+        quiet_helpers,
+    )
+}
+
+fn list_labeled_resource_names(
+    kind: &str,
+    labels: &[(&str, &str)],
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<Vec<String>> {
+    let mut cmd = Command::new("podman");
+    match kind {
+        "container" => cmd.args(["ps", "--all"]),
+        "volume" => cmd.args(["volume", "ls"]),
+        _ => {
+            return Err(Error::message(format!(
+                "unsupported resource kind '{kind}'"
+            )));
+        }
+    };
+    for (key, value) in labels {
+        cmd.arg("--filter");
+        cmd.arg(format!("label={key}={value}"));
+    }
+    cmd.args([
+        "--format",
+        if kind == "container" {
+            "{{.Names}}"
+        } else {
+            "{{.Name}}"
+        },
+    ]);
+    trace_command(&cmd, verbose);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to list managed mount {kind}s"))?;
+    if !output.status.success() {
+        if quiet_helpers {
+            ensure_success_output_with_diagnostics(&output, "managed mount resource listing")?;
+        }
+        if verbose {
+            forward_output(&output)?;
+        }
+        ensure_success_output(&output, "managed mount resource listing")?;
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 fn build_volume_create_command(name: &str, spec: &RuntimeSpec) -> Command {
     let mut cmd = Command::new("podman");
     cmd.args([
@@ -415,6 +912,23 @@ fn resource_labels_match_component(
         .with_context(|| format!("failed to parse labels for {kind} {name}"))?;
 
     Ok(labels_match_expected(&labels, &component.labels))
+}
+
+fn resource_labels_match_expected(
+    kind: &str,
+    name: &str,
+    expected: &BTreeMap<String, String>,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<bool> {
+    let format = match kind {
+        "container" => "{{json .Config.Labels}}",
+        _ => "{{json .Labels}}",
+    };
+    let labels = inspect_value(kind, name, format, verbose, quiet_helpers)?;
+    let labels: serde_json::Value = serde_json::from_str(&labels)
+        .with_context(|| format!("failed to parse labels for {kind} {name}"))?;
+    Ok(labels_match_expected(&labels, expected))
 }
 
 fn labels_match_expected(
@@ -835,6 +1349,126 @@ mod tests {
             .collect()
     }
 
+    fn test_runtime_spec() -> RuntimeSpec {
+        RuntimeSpec::build(
+            Path::new("/tmp/project/.cladding"),
+            &ExecutionConfig {
+                name: "demo".to_string(),
+                use_runsc: false,
+                agent: ExecutionComponentConfig {
+                    enabled: true,
+                    image: "agent:image".to_string(),
+                    build: None,
+                },
+                nw_sandbox: None,
+                fs_sandbox: None,
+                proxy: None,
+                mounts: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn managed_mount_seed_helper_is_offline_scoped_and_uses_the_proxy_image() {
+        let spec = test_runtime_spec();
+        let cmd = build_managed_mount_helper_command(
+            &spec,
+            "cladding-mount-0123456789abcdef",
+            Some(Path::new("/tmp/project/source")),
+            "copy script",
+        );
+        let args = command_args(&cmd);
+
+        assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
+        assert!(args.iter().any(|arg| arg == "--pull=never"));
+        assert!(args.windows(2).any(|pair| pair == ["--userns", "keep-id"]));
+        assert!(!args.iter().any(|arg| arg == "--user"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "cladding-mount-0123456789abcdef-seed")
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "/tmp/project/source:/source:ro")
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "cladding-mount-0123456789abcdef:/volume:U")
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "localhost/cladding-proxy:latest")
+        );
+        assert_eq!(args[args.len() - 2..], ["-ec", "copy script"]);
+    }
+
+    #[test]
+    fn managed_copy_seed_runs_as_the_keep_id_user() {
+        let script = managed_copy_seed_script();
+
+        assert!(script.contains("cp -a --no-preserve=ownership /source/. /volume/"));
+        assert!(script.contains("chmod --reference=/source /volume"));
+        assert!(!script.contains("chown"));
+    }
+
+    #[test]
+    fn managed_copy_seed_marker_tracks_only_a_complete_seed() {
+        let marker_root =
+            std::env::temp_dir().join(format!("cladding-copy-seed-marker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&marker_root);
+        let mut spec = test_runtime_spec();
+        spec.runtime_root = marker_root.clone();
+        let volume_name = "cladding-mount-marker-test";
+
+        assert!(!managed_copy_seed_is_complete(&spec, volume_name).unwrap());
+        mark_managed_copy_seed_complete(&spec, volume_name).unwrap();
+        assert!(managed_copy_seed_is_complete(&spec, volume_name).unwrap());
+
+        fs::write(
+            managed_copy_seed_marker_path(&spec, volume_name),
+            b"incomplete\n",
+        )
+        .unwrap();
+        assert!(!managed_copy_seed_is_complete(&spec, volume_name).unwrap());
+        remove_managed_copy_seed_marker(&spec, volume_name).unwrap();
+        assert!(!managed_copy_seed_is_complete(&spec, volume_name).unwrap());
+        fs::remove_dir_all(marker_root).unwrap();
+    }
+
+    #[test]
+    fn managed_mount_volumes_have_runtime_labels_and_bounded_tmpfs_options() {
+        let spec = test_runtime_spec();
+        let args = command_args(&build_managed_mount_volume_create_command(
+            &spec,
+            "cladding-mount-0123456789abcdef",
+            Some(67_108_864),
+        ));
+
+        assert!(args.windows(2).any(|pair| pair == ["--opt", "nocopy"]));
+        assert!(args.windows(2).any(|pair| pair == ["--opt", "type=tmpfs"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--opt", "device=tmpfs"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--opt", "o=size=67108864,mode=1777"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--label", "cladding_resource=managed-mount"] })
+        );
+        assert!(
+            args.windows(2).any(|pair| {
+                pair == ["--label", "cladding_runtime_root=/tmp/project/.cladding"]
+            })
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("cladding-mount-0123456789abcdef")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn runtime_socket_tree_has_existing_private_proxy_and_session_directories() {
@@ -1152,6 +1786,29 @@ mod tests {
             "project_root": "/tmp/other/.cladding",
         });
         assert!(!labels_match_expected(&foreign_root, &expected));
+    }
+
+    #[test]
+    fn managed_volume_cleanup_requires_project_runtime_and_resource_labels() {
+        let spec = test_runtime_spec();
+        let expected = managed_mount_volume_labels(&spec, "cladding-mount-fixture");
+        let owned = serde_json::to_value(&expected).expect("serialize managed volume labels");
+        assert!(labels_match_expected(&owned, &expected));
+
+        let mut foreign_runtime = expected.clone();
+        foreign_runtime.insert(
+            "cladding_runtime_root".to_string(),
+            "/tmp/other-runtime".to_string(),
+        );
+        let foreign_runtime =
+            serde_json::to_value(foreign_runtime).expect("serialize foreign volume labels");
+        assert!(!labels_match_expected(&foreign_runtime, &expected));
+
+        let mut missing_resource = expected.clone();
+        missing_resource.remove("cladding_resource");
+        let missing_resource =
+            serde_json::to_value(missing_resource).expect("serialize incomplete volume labels");
+        assert!(!labels_match_expected(&missing_resource, &expected));
     }
 
     #[test]

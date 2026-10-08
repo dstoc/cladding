@@ -90,11 +90,30 @@ pub struct RuntimeCustomMount {
 
 #[derive(Debug, Clone)]
 pub enum RuntimeMountSource {
-    HostPath { path: PathBuf },
-    OverlayHostPath { path: PathBuf },
-    NamedVolume { claim_name: String },
-    NamedVolumeChown { claim_name: String },
-    GeneratedEmptyMask { path: PathBuf },
-    Tmpfs { size_bytes: Option<u64> },
+    HostPath {
+        path: PathBuf,
+    },
+    NamedVolume {
+        claim_name: String,
+    },
+    NamedVolumeChown {
+        claim_name: String,
+    },
+    ManagedVolume {
+        claim_name: String,
+        kind: ManagedVolumeKind,
+    },
+    GeneratedEmptyMask {
+        path: PathBuf,
+    },
+    Tmpfs {
+        size_bytes: Option<u64>,
+    },
     EmptyDir,
+}
+
+#[derive(Debug, Clone)]
+pub enum ManagedVolumeKind {
+    Copy { source: PathBuf },
+    Tmpfs { size_bytes: u64 },
 }
