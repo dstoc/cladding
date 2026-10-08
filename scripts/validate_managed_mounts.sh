@@ -136,7 +136,17 @@ phase="build project images and initialize CA"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" build)
 
 phase="start persistent runtime and create shared volumes"
-(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up)
+up_log="$temp_root/up.log"
+if (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up -v) \
+  >"$up_log" 2>&1; then
+  cat "$up_log"
+else
+  up_status=$?
+  cat "$up_log" >&2
+  diagnostics=$(tail -n 30 "$up_log" | tr '\n' ' ' | sed 's/%/%25/g')
+  printf '::error title=Managed mount startup diagnostics::%s\n' "$diagnostics"
+  exit "$up_status"
+fi
 require_volume_count 2
 require_copy_seed_marker_count 1
 persistent_names=$(managed_volume_names)
