@@ -50,7 +50,7 @@ pub enum MountTarget {
 pub enum MountType {
     Bind,
     Readonly,
-    Overlay,
+    Copy,
     Tmpfs,
 }
 

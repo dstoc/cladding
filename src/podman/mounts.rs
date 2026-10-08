@@ -1,4 +1,4 @@
-use crate::runtime::{RuntimeMount, RuntimeMountSource, RuntimeSpec};
+use crate::runtime::{ManagedVolumeKind, RuntimeMount, RuntimeMountSource, RuntimeSpec};
 use std::process::Command;
 
 pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts: &[RuntimeMount]) {
@@ -13,11 +13,32 @@ pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts:
             continue;
         }
 
+        if let RuntimeMountSource::ManagedVolume { claim_name, .. } = &mount.source {
+            let mut spec = format!("type=volume,src={claim_name},dst={}", mount.mount_path);
+            if matches!(
+                &mount.source,
+                RuntimeMountSource::ManagedVolume {
+                    kind: ManagedVolumeKind::Copy { .. },
+                    ..
+                }
+            ) {
+                spec.push_str(",subpath=payload");
+            }
+            if mount.read_only {
+                spec.push_str(",ro=true");
+            }
+            cmd.arg("--mount");
+            cmd.arg(spec);
+            continue;
+        }
+
         let source = match &mount.source {
             RuntimeMountSource::HostPath { path } => path.display().to_string(),
-            RuntimeMountSource::OverlayHostPath { path } => path.display().to_string(),
             RuntimeMountSource::NamedVolume { claim_name } => claim_name.clone(),
             RuntimeMountSource::NamedVolumeChown { claim_name } => claim_name.clone(),
+            RuntimeMountSource::ManagedVolume { .. } => {
+                unreachable!("managed volumes handled above")
+            }
             RuntimeMountSource::GeneratedEmptyMask { path } => path.display().to_string(),
             RuntimeMountSource::Tmpfs { .. } => unreachable!("tmpfs mounts handled above"),
             RuntimeMountSource::EmptyDir => {
@@ -26,15 +47,11 @@ pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts:
         };
 
         let mut volume = format!("{source}:{}", mount.mount_path);
-        if matches!(&mount.source, RuntimeMountSource::OverlayHostPath { .. }) {
-            volume.push_str(":O");
-        } else {
-            if mount.read_only {
-                volume.push_str(":ro");
-            }
-            if matches!(&mount.source, RuntimeMountSource::NamedVolumeChown { .. }) {
-                volume.push_str(":U");
-            }
+        if mount.read_only {
+            volume.push_str(":ro");
+        }
+        if matches!(&mount.source, RuntimeMountSource::NamedVolumeChown { .. }) {
+            volume.push_str(":U");
         }
         cmd.arg("--volume");
         cmd.arg(volume);
@@ -165,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn append_mount_args_formats_overlay_and_ephemeral_tmpfs_options() {
+    fn append_mount_args_formats_managed_volumes_and_ephemeral_tmpfs_options() {
         let mut cmd = Command::new("podman");
         append_mount_args(
             &mut cmd,
@@ -174,8 +191,11 @@ mod tests {
                 RuntimeMount {
                     mount_path: "/workspace".to_string(),
                     read_only: false,
-                    source: RuntimeMountSource::OverlayHostPath {
-                        path: "/tmp/project".into(),
+                    source: RuntimeMountSource::ManagedVolume {
+                        claim_name: "cladding-mount-copy".to_string(),
+                        kind: crate::runtime::ManagedVolumeKind::Copy {
+                            source: "/tmp/project".into(),
+                        },
                     },
                 },
                 RuntimeMount {
@@ -183,6 +203,26 @@ mod tests {
                     read_only: false,
                     source: RuntimeMountSource::Tmpfs {
                         size_bytes: Some(1024 * 1024 * 1024),
+                    },
+                },
+                RuntimeMount {
+                    mount_path: "/readonly".to_string(),
+                    read_only: true,
+                    source: RuntimeMountSource::ManagedVolume {
+                        claim_name: "cladding-mount-readonly".to_string(),
+                        kind: crate::runtime::ManagedVolumeKind::Copy {
+                            source: "/tmp/read-only-source".into(),
+                        },
+                    },
+                },
+                RuntimeMount {
+                    mount_path: "/shared".to_string(),
+                    read_only: false,
+                    source: RuntimeMountSource::ManagedVolume {
+                        claim_name: "cladding-mount-tmpfs".to_string(),
+                        kind: ManagedVolumeKind::Tmpfs {
+                            size_bytes: 32 * 1024 * 1024,
+                        },
                     },
                 },
                 RuntimeMount {
@@ -196,10 +236,14 @@ mod tests {
         assert_eq!(
             command_args(&cmd),
             vec![
-                "--volume",
-                "/tmp/project:/workspace:O",
+                "--mount",
+                "type=volume,src=cladding-mount-copy,dst=/workspace,subpath=payload",
                 "--mount",
                 "type=tmpfs,dst=/tmp/cache,tmpfs-mode=1777,U=true,tmpfs-size=1073741824",
+                "--mount",
+                "type=volume,src=cladding-mount-readonly,dst=/readonly,subpath=payload,ro=true",
+                "--mount",
+                "type=volume,src=cladding-mount-tmpfs,dst=/shared",
                 "--mount",
                 "type=tmpfs,dst=/run,tmpfs-mode=1777,U=true",
             ]

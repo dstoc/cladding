@@ -1,7 +1,8 @@
 use super::sockets::is_generated_runtime_mount_path;
 use super::sockets::{RUNTIME_PROXY_MOUNT_PATH, RUNTIME_PROXY_SOCKET_DIR};
 use super::types::{
-    RuntimeComponent, RuntimeCustomMount, RuntimeMount, RuntimeMountSource, RuntimeSpec,
+    ManagedVolumeKind, RuntimeComponent, RuntimeCustomMount, RuntimeMount, RuntimeMountSource,
+    RuntimeSpec,
 };
 use crate::config::{MountTarget, MountType, ResolvedMountConfig};
 use std::collections::BTreeSet;
@@ -241,10 +242,17 @@ pub(super) fn build_custom_mounts(
 ) -> Vec<RuntimeCustomMount> {
     let mut runtime_mounts = mounts
         .iter()
-        .map(|mount| RuntimeCustomMount {
+        .enumerate()
+        .map(|(mount_index, mount)| RuntimeCustomMount {
             mount_path: mount.mount_path.clone(),
             read_only: mount.read_only,
-            source: build_mount_source(project_name, mount),
+            source: build_mount_source(
+                project_root,
+                runtime_root,
+                project_name,
+                mount_index,
+                mount,
+            ),
             targets: mount.targets.clone(),
             ignore: mount.ignore,
         })
@@ -253,7 +261,7 @@ pub(super) fn build_custom_mounts(
     let empty_mask = runtime_root.join("runtime/empty-mask");
     let protected_root = canonical_or_normalized(project_root);
     for mount in mounts.iter().filter(|mount| {
-        !mount.ignore && matches!(mount.mount_type, MountType::Readonly | MountType::Overlay)
+        !mount.ignore && matches!(mount.mount_type, MountType::Readonly | MountType::Copy)
     }) {
         let Some(host_path) = mount.host_path.as_deref() else {
             continue;
@@ -286,10 +294,44 @@ pub(super) fn build_custom_mounts(
     runtime_mounts
 }
 
-fn build_mount_source(project_name: &str, mount: &ResolvedMountConfig) -> RuntimeMountSource {
+fn build_mount_source(
+    project_root: &Path,
+    runtime_root: &Path,
+    project_name: &str,
+    mount_index: usize,
+    mount: &ResolvedMountConfig,
+) -> RuntimeMountSource {
     match (mount.mount_type, &mount.host_path, &mount.volume) {
-        (MountType::Overlay, Some(path), None) => {
-            RuntimeMountSource::OverlayHostPath { path: path.clone() }
+        (MountType::Copy, Some(path), None) => RuntimeMountSource::ManagedVolume {
+            claim_name: managed_mount_volume_name(
+                project_root,
+                runtime_root,
+                project_name,
+                "copy",
+                mount_index,
+                &mount.mount_path,
+            ),
+            kind: ManagedVolumeKind::Copy {
+                source: path.clone(),
+            },
+        },
+        (MountType::Tmpfs, None, None) if mount.targets.len() > 1 => {
+            RuntimeMountSource::ManagedVolume {
+                claim_name: managed_mount_volume_name(
+                    project_root,
+                    runtime_root,
+                    project_name,
+                    &format!(
+                        "tmpfs:{}",
+                        mount.tmpfs_size_bytes.unwrap_or(64 * 1024 * 1024)
+                    ),
+                    mount_index,
+                    &mount.mount_path,
+                ),
+                kind: ManagedVolumeKind::Tmpfs {
+                    size_bytes: mount.tmpfs_size_bytes.unwrap_or(64 * 1024 * 1024),
+                },
+            }
         }
         (MountType::Tmpfs, None, None) => RuntimeMountSource::Tmpfs {
             size_bytes: mount.tmpfs_size_bytes,
@@ -301,6 +343,33 @@ fn build_mount_source(project_name: &str, mount: &ResolvedMountConfig) -> Runtim
         (_, None, None) => RuntimeMountSource::EmptyDir,
         (_, Some(_), Some(_)) => RuntimeMountSource::EmptyDir,
     }
+}
+
+fn managed_mount_volume_name(
+    project_root: &Path,
+    runtime_root: &Path,
+    project_name: &str,
+    mount_kind: &str,
+    mount_index: usize,
+    mount_path: &str,
+) -> String {
+    let identity = format!(
+        "{}\0{}\0{}\0{}\0{}\0{}",
+        project_root.display(),
+        runtime_root.display(),
+        project_name,
+        mount_kind,
+        mount_index,
+        mount_path
+    );
+    let mut first = 0xcbf29ce484222325_u64;
+    let mut second = 0x84222325cbf29ce4_u64;
+    for byte in identity.bytes() {
+        first = (first ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        second = (second ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        second ^= second >> 29;
+    }
+    format!("cladding-mount-{first:016x}{second:016x}")
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -327,11 +396,14 @@ fn collect_required_host_paths(component: &RuntimeComponent, paths: &mut BTreeSe
     for container in &component.containers {
         for mount in &container.mounts {
             match &mount.source {
-                RuntimeMountSource::HostPath { path }
-                | RuntimeMountSource::OverlayHostPath { path }
-                    if !is_generated_runtime_mount_path(path) =>
-                {
+                RuntimeMountSource::HostPath { path } if !is_generated_runtime_mount_path(path) => {
                     paths.insert(path.clone());
+                }
+                RuntimeMountSource::ManagedVolume {
+                    kind: ManagedVolumeKind::Copy { source },
+                    ..
+                } if !is_generated_runtime_mount_path(source) => {
+                    paths.insert(source.clone());
                 }
                 _ => {}
             }
@@ -444,7 +516,30 @@ mod tests {
     }
 
     #[test]
-    fn custom_overlay_keeps_cladding_mask_and_tmpfs_is_a_distinct_source() {
+    fn required_host_paths_include_copy_sources() {
+        let source = PathBuf::from("/tmp/project/source");
+        let config = execution_config(
+            false,
+            false,
+            vec![ResolvedMountConfig {
+                mount_path: "/work".to_string(),
+                host_path: Some(source.clone()),
+                volume: None,
+                mount_type: MountType::Copy,
+                tmpfs_size_bytes: None,
+                read_only: false,
+                targets: vec![MountTarget::Agent],
+                ignore: false,
+            }],
+            false,
+        );
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+
+        assert!(spec.required_host_paths().contains(&source));
+    }
+
+    #[test]
+    fn copy_and_multi_target_tmpfs_mounts_share_managed_volumes_and_keep_the_mask() {
         let project_root = Path::new("/tmp/cladding-mount-mask/.cladding");
         let config = execution_config(
             true,
@@ -454,7 +549,7 @@ mod tests {
                     mount_path: "/home/user/workspace".to_string(),
                     host_path: Some(project_root.join("..")),
                     volume: None,
-                    mount_type: MountType::Overlay,
+                    mount_type: MountType::Copy,
                     tmpfs_size_bytes: None,
                     read_only: false,
                     targets: vec![
@@ -471,7 +566,7 @@ mod tests {
                     mount_type: MountType::Tmpfs,
                     tmpfs_size_bytes: Some(64 * 1024 * 1024),
                     read_only: false,
-                    targets: vec![MountTarget::Agent],
+                    targets: vec![MountTarget::Agent, MountTarget::NwSandbox],
                     ignore: false,
                 },
             ],
@@ -481,12 +576,18 @@ mod tests {
 
         assert!(matches!(
             &custom_mounts[0].source,
-            RuntimeMountSource::OverlayHostPath { .. }
+            RuntimeMountSource::ManagedVolume {
+                kind: ManagedVolumeKind::Copy { .. },
+                ..
+            }
         ));
         assert!(matches!(
             &custom_mounts[1].source,
-            RuntimeMountSource::Tmpfs {
-                size_bytes: Some(67_108_864)
+            RuntimeMountSource::ManagedVolume {
+                kind: ManagedVolumeKind::Tmpfs {
+                    size_bytes: 67_108_864
+                },
+                ..
             }
         ));
         assert_eq!(
@@ -510,13 +611,27 @@ mod tests {
             MountTarget::NwSandbox,
         );
         for mounts in [&agent_mounts, &nw_sandbox_mounts] {
-            let overlay = mounts
+            let copy = mounts
                 .iter()
                 .find(|mount| mount.mount_path == "/home/user/workspace")
-                .expect("workspace overlay mount");
+                .expect("workspace copy mount");
             assert!(matches!(
-                &overlay.source,
-                RuntimeMountSource::OverlayHostPath { .. }
+                &copy.source,
+                RuntimeMountSource::ManagedVolume {
+                    kind: ManagedVolumeKind::Copy { .. },
+                    ..
+                }
+            ));
+            let tmpfs = mounts
+                .iter()
+                .find(|mount| mount.mount_path == "/tmp")
+                .expect("shared tmpfs mount");
+            assert!(matches!(
+                &tmpfs.source,
+                RuntimeMountSource::ManagedVolume {
+                    kind: ManagedVolumeKind::Tmpfs { .. },
+                    ..
+                }
             ));
             let mask = mounts
                 .iter()
@@ -527,6 +642,40 @@ mod tests {
                 RuntimeMountSource::GeneratedEmptyMask { .. }
             ));
         }
+
+        let claim_names = [&agent_mounts, &nw_sandbox_mounts]
+            .into_iter()
+            .map(|mounts| {
+                mounts
+                    .iter()
+                    .find(|mount| mount.mount_path == "/tmp")
+                    .and_then(|mount| match &mount.source {
+                        RuntimeMountSource::ManagedVolume { claim_name, .. } => {
+                            Some(claim_name.clone())
+                        }
+                        _ => None,
+                    })
+                    .expect("shared tmpfs volume name")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(claim_names[0], claim_names[1]);
+
+        let copy_claim_names = [&agent_mounts, &nw_sandbox_mounts]
+            .into_iter()
+            .map(|mounts| {
+                mounts
+                    .iter()
+                    .find(|mount| mount.mount_path == "/home/user/workspace")
+                    .and_then(|mount| match &mount.source {
+                        RuntimeMountSource::ManagedVolume { claim_name, .. } => {
+                            Some(claim_name.clone())
+                        }
+                        _ => None,
+                    })
+                    .expect("shared copy volume name")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(copy_claim_names[0], copy_claim_names[1]);
 
         let fs_mounts = apply_custom_mounts(
             build_fs_sandbox_mounts(project_root, &custom_mounts),
@@ -544,6 +693,89 @@ mod tests {
                 "/home/user/workspace",
                 "/home/user/workspace/.cladding"
             ]
+        );
+    }
+
+    #[test]
+    fn single_target_tmpfs_keeps_the_container_tmpfs_source() {
+        let mount = ResolvedMountConfig {
+            mount_path: "/scratch".to_string(),
+            host_path: None,
+            volume: None,
+            mount_type: MountType::Tmpfs,
+            tmpfs_size_bytes: Some(64 * 1024 * 1024),
+            read_only: false,
+            targets: vec![MountTarget::Agent],
+            ignore: false,
+        };
+
+        assert!(matches!(
+            build_mount_source(
+                Path::new("/project/.cladding"),
+                Path::new("/project/.cladding"),
+                "demo",
+                0,
+                &mount,
+            ),
+            RuntimeMountSource::Tmpfs {
+                size_bytes: Some(67_108_864)
+            }
+        ));
+    }
+
+    #[test]
+    fn managed_volume_names_include_runtime_and_mount_identity() {
+        let base = managed_mount_volume_name(
+            Path::new("/project/.cladding"),
+            Path::new("/project/.cladding"),
+            "demo",
+            "copy",
+            0,
+            "/work",
+        );
+        assert_eq!(
+            base,
+            managed_mount_volume_name(
+                Path::new("/project/.cladding"),
+                Path::new("/project/.cladding"),
+                "demo",
+                "copy",
+                0,
+                "/work",
+            )
+        );
+        assert_ne!(
+            base,
+            managed_mount_volume_name(
+                Path::new("/project/.cladding"),
+                Path::new("/tmp/cladding-run-uuid"),
+                "demo-run-uuid",
+                "copy",
+                0,
+                "/work",
+            )
+        );
+        assert_ne!(
+            base,
+            managed_mount_volume_name(
+                Path::new("/project/.cladding"),
+                Path::new("/project/.cladding"),
+                "demo",
+                "copy",
+                1,
+                "/work",
+            )
+        );
+        assert_ne!(
+            base,
+            managed_mount_volume_name(
+                Path::new("/project/.cladding"),
+                Path::new("/project/.cladding"),
+                "demo",
+                "tmpfs:67108864",
+                0,
+                "/work",
+            )
         );
     }
 }

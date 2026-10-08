@@ -178,7 +178,7 @@ jobs:
         run: cargo build --locked --bin cladding
       - name: Check Baffle validation shell syntax
         run: |
-          for script in scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh scripts/validate_baffle_runtime.sh; do
+          for script in scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh scripts/validate_baffle_runtime.sh scripts/validate_managed_mounts.sh; do
             sh -n "$script"
           done
       - name: Validate Baffle startup and socket access under rootless Podman
@@ -187,6 +187,10 @@ jobs:
         run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_baffle_runtime.sh default
       - name: Validate Baffle policy and client workloads with runsc
         run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_baffle_runtime.sh runsc
+      - name: Validate shared managed mounts with the default runtime
+        run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_managed_mounts.sh default
+      - name: Validate shared managed mounts with runsc
+        run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_managed_mounts.sh runsc
 
   baffle-podman-machine-assets:
     needs: build-baffle
@@ -345,6 +349,8 @@ jobs:
         run: cargo build --locked --bin cladding
       - name: Validate Baffle socket access through macOS Podman machine
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/linux-tools/bin/baffle"
+      - name: Validate shared managed mounts through macOS Podman machine
+        run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" CLADDING_MANAGED_MOUNT_TMP_DIR="$GITHUB_WORKSPACE" scripts/validate_managed_mounts.sh default
 
   # Hosted Apple Silicon runners lack nested virtualization. This verifies the
   # host-to-guest binary selection; run the socket validator on a capable Mac.
