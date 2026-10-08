@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.9](https://github.com/dstoc/cladding/compare/v0.3.8...v0.3.9) (2026-10-08)
+
+
+### Features
+
+* add shared copy and tmpfs mounts ([#71](https://github.com/dstoc/cladding/issues/71)) ([6e9a307](https://github.com/dstoc/cladding/commit/6e9a307d627ad77a1fa43c20183390ac320fa18d))
+
 ## [0.3.8](https://github.com/dstoc/cladding/compare/v0.3.7...v0.3.8) (2026-10-05)
 
 
