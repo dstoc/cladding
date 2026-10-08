@@ -523,7 +523,7 @@ fn build_managed_mount_volume_create_command(
     tmpfs_size_bytes: Option<u64>,
 ) -> Command {
     let mut cmd = Command::new("podman");
-    cmd.args(["volume", "create", "--opt", "no-copy"]);
+    cmd.args(["volume", "create", "--opt", "nocopy"]);
     if let Some(size_bytes) = tmpfs_size_bytes {
         cmd.args(["--opt", "type=tmpfs", "--opt", "device=tmpfs"]);
         cmd.arg("--opt");
@@ -1444,7 +1444,7 @@ mod tests {
             Some(67_108_864),
         ));
 
-        assert!(args.windows(2).any(|pair| pair == ["--opt", "no-copy"]));
+        assert!(args.windows(2).any(|pair| pair == ["--opt", "nocopy"]));
         assert!(args.windows(2).any(|pair| pair == ["--opt", "type=tmpfs"]));
         assert!(
             args.windows(2)
