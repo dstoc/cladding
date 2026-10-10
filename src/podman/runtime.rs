@@ -1149,7 +1149,12 @@ pub fn container_run(
     quiet_helpers: bool,
 ) -> Result<()> {
     let mut cmd = build_container_run_command(use_runsc, component, container);
-    run_helper_command(&mut cmd, verbose, quiet_helpers, "podman run")
+    run_helper_command(&mut cmd, verbose, quiet_helpers, "podman run").inspect_err(|_| {
+        eprintln!(
+            "error: failed to start container '{}' for component '{}'",
+            container.name, component.name
+        );
+    })
 }
 
 fn should_install_baffle_ca(spec: &RuntimeSpec, component: &RuntimeComponent) -> bool {

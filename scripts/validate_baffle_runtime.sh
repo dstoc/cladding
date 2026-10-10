@@ -106,6 +106,20 @@ sys.stdout.buffer.write(output.replace(secret, b"[REDACTED]") if secret else out
 '
 }
 
+redact_startup_log() {
+  CLADDING_REDACT_SECRETS='cladding-test-old-value
+cladding-test-new-value' python3 -c '
+import os
+import sys
+
+output = sys.stdin.buffer.read()
+for secret in os.environb.get(b"CLADDING_REDACT_SECRETS", b"").splitlines():
+    if secret:
+        output = output.replace(secret, b"[REDACTED]")
+sys.stdout.buffer.write(output)
+'
+}
+
 cleanup() {
   status=$?
   trap - EXIT
@@ -307,7 +321,18 @@ jq --arg image "$proxy_image" '.proxy.image = $image' \
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
 phase="start Cladding runtime"
-"$cladding_bin" --cladding-dir "$project_root" up
+if "$cladding_bin" --cladding-dir "$project_root" up --verbose > "$temp_root/startup.log" 2>&1; then
+  :
+else
+  status=$?
+  redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"
+  cat "$temp_root/startup.redacted.log" >&2
+  diagnostic=$(tail -n 20 "$temp_root/startup.redacted.log" \
+    | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-5000)
+  printf '::error title=Cladding runtime startup diagnostics::exit=%s; %s\n' \
+    "$status" "$diagnostic"
+  exit "$status"
+fi
 require_socket_volume_count 4
 test "$(stat_mode "$project_root/credentials/baffle/ca.crt"):$(stat_uid "$project_root/credentials/baffle/ca.crt")" = "644:$(id -u)"
 test "$(stat_mode "$project_root/credentials/baffle/ca-key.pem"):$(stat_uid "$project_root/credentials/baffle/ca-key.pem")" = "600:$(id -u)"
