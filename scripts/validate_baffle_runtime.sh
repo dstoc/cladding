@@ -460,17 +460,33 @@ fi
 
 phase="verify a direct, trusted TLS origin request"
 if podman exec "$origin_name" curl --fail --silent --show-error \
-  --cacert /fixtures/origin-ca.crt --noproxy '*' \
+  --verbose --cacert /fixtures/origin-ca.crt --noproxy '*' \
   https://localhost:8443/diagnostic/direct-origin \
   >"$temp_root/direct-origin.body" 2>"$temp_root/direct-origin.stderr"; then
   jq -e '.path == "/diagnostic/direct-origin"' \
     "$temp_root/direct-origin.body" >/dev/null
 else
   status=$?
-  diagnostic=$(tail -n 30 "$temp_root/direct-origin.stderr" \
-    | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-3000)
-  printf '::error title=Direct TLS origin request::exit=%s; %s\n' \
-    "$status" "$diagnostic"
+  host_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>&1 || true)
+  guest_time=$(podman exec "$origin_name" date -u '+%Y-%m-%dT%H:%M:%SZ' 2>&1 || true)
+  server_certificate=$(openssl x509 -in "$temp_root/origin/server.crt" \
+    -noout -dates -subject -issuer 2>&1 | tr '\r\n' ' ')
+  ca_certificate=$(openssl x509 -in "$temp_root/origin/origin-ca.crt" \
+    -noout -dates -subject -issuer 2>&1 | tr '\r\n' ' ')
+  if podman exec "$origin_name" curl --fail --silent --show-error --insecure \
+    --noproxy '*' https://localhost:8443/diagnostic/insecure-origin \
+    >"$temp_root/insecure-origin.body" 2>"$temp_root/insecure-origin.stderr"; then
+    insecure_result="succeeded: $(cat "$temp_root/insecure-origin.body")"
+  else
+    insecure_status=$?
+    insecure_result="failed exit=$insecure_status: $(tail -n 10 "$temp_root/insecure-origin.stderr" | tr '\r\n' ' ')"
+  fi
+  diagnostic=$(printf 'exit=%s host_time=%s guest_time=%s server_cert=%s ca_cert=%s insecure_request=%s curl_trace=%s' \
+    "$status" "$host_time" "$guest_time" "$server_certificate" \
+    "$ca_certificate" "$insecure_result" \
+    "$(tail -n 30 "$temp_root/direct-origin.stderr" | tr '\r\n' ' ')" \
+    | sed 's/%/%25/g' | cut -c 1-5000)
+  printf '::error title=Direct TLS origin request::%s\n' "$diagnostic"
   cat "$temp_root/direct-origin.stderr" >&2
   exit "$status"
 fi
