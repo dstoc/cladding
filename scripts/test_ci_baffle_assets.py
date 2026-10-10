@@ -220,10 +220,15 @@ class BaffleCiAssetsTests(unittest.TestCase):
         intel_assets = job_block("baffle-podman-machine-assets-x86_64")
         self.assertIn("needs: linux-helper-assets-x86_64", intel_assets)
         self.assertNotIn("linux-helper-assets-aarch64", intel_assets)
+        intel_build = job_block("baffle-macos-x86_64-build")
+        self.assertIn("needs: baffle-podman-machine-assets-x86_64", intel_build)
+        self.assertIn("cladding-baffle-linux-tools-x86_64", intel_build)
+        self.assertIn("cladding-macos-x86_64", intel_build)
+
         intel = job_block("baffle-podman-machine")
-        self.assertIn("needs: baffle-podman-machine-assets-x86_64", intel)
+        self.assertIn("needs: baffle-macos-x86_64-build", intel)
         self.assertNotIn("baffle-config", intel)
-        self.assertIn("cladding-baffle-linux-tools-x86_64", intel)
+        self.assertIn("name: cladding-macos-x86_64", intel)
 
         apple_assets = job_block("baffle-podman-machine-assets-aarch64")
         self.assertIn("needs: linux-helper-assets-aarch64", apple_assets)
