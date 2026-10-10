@@ -221,30 +221,38 @@ allow if {
 }
 EOF
 
+phase="build integration client image"
+podman build --quiet -t "$client_image" \
+  -f "$script_dir/Containerfile.baffle-integration-client" "$script_dir"
+
 phase="create local TLS origin"
-openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
-  -keyout "$temp_root/origin/origin-ca.key" \
-  -out "$temp_root/origin/origin-ca.crt" \
-  -subj "/CN=Cladding Baffle Integration Test CA" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
-openssl req -newkey rsa:2048 -nodes \
-  -keyout "$temp_root/origin/server.key" \
-  -out "$temp_root/origin/server.csr" \
-  -subj "/CN=localhost" >/dev/null 2>&1
-cat > "$temp_root/origin/server.ext" <<'EOF'
+podman run --rm --network none --userns keep-id \
+  --volume "$temp_root/origin:/certs:rw" \
+  --entrypoint /bin/sh "$client_image" -ec '
+    openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+      -keyout /certs/origin-ca.key \
+      -out /certs/origin-ca.crt \
+      -subj "/CN=Cladding Baffle Integration Test CA" \
+      -addext "basicConstraints=critical,CA:TRUE" \
+      -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
+    openssl req -newkey rsa:2048 -nodes \
+      -keyout /certs/server.key \
+      -out /certs/server.csr \
+      -subj "/CN=localhost" >/dev/null 2>&1
+    cat > /certs/server.ext <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 subjectAltName=DNS:localhost
 extendedKeyUsage=serverAuth
 EOF
-openssl x509 -req -days 2 -in "$temp_root/origin/server.csr" \
-  -CA "$temp_root/origin/origin-ca.crt" \
-  -CAkey "$temp_root/origin/origin-ca.key" -CAcreateserial \
-  -extfile "$temp_root/origin/server.ext" \
-  -out "$temp_root/origin/server.crt" >/dev/null 2>&1
-# The origin runs as an unprivileged user. This per-run fixture key has no production secret.
-chmod 0444 "$temp_root/origin/server.key"
+    openssl x509 -req -days 2 -in /certs/server.csr \
+      -CA /certs/origin-ca.crt \
+      -CAkey /certs/origin-ca.key -CAcreateserial \
+      -extfile /certs/server.ext \
+      -out /certs/server.crt >/dev/null 2>&1
+    # The origin runs as an unprivileged user. This per-run key is test-only.
+    chmod 0444 /certs/server.key
+  '
 
 git init --bare --initial-branch=main "$temp_root/origin/www/authorized/repo.git" >/dev/null
 git init --initial-branch=main "$temp_root/repo" >/dev/null
@@ -256,10 +264,6 @@ git -C "$temp_root/repo" commit -m "Add local test fixture" >/dev/null
 git -C "$temp_root/repo" remote add origin "$temp_root/origin/www/authorized/repo.git"
 git -C "$temp_root/repo" push origin main >/dev/null 2>&1
 git --git-dir="$temp_root/origin/www/authorized/repo.git" update-server-info
-
-phase="build integration client image"
-podman build --quiet -t "$client_image" \
-  -f "$script_dir/Containerfile.baffle-integration-client" "$script_dir"
 
 phase="stage local TLS origin build context"
 cp "$script_dir/baffle_test_origin.py" "$temp_root/origin/baffle_test_origin.py"
