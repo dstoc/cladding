@@ -22,14 +22,116 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-  test:
+  linux-helper-assets-x86_64:
     runs-on: ubuntu-latest
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      CLADDING_MCP_RUN_BIN: ${{ github.workspace }}/target/mcp-run/release/mcp-run
-      CLADDING_RUN_REMOTE_BIN: ${{ github.workspace }}/target/mcp-run/release/run-remote
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: true
+      - name: Build Linux execution helpers
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
+      - name: Build Linux Baffle socket operation probe
+        run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
+      - name: Verify and stage x86_64 Linux helpers
+        run: |
+          set -euo pipefail
+          asset_dir="$RUNNER_TEMP/cladding-linux-helpers-x86_64/bin"
+          mkdir -p "$asset_dir"
+          cp target/mcp-run/release/mcp-run "$asset_dir/mcp-run"
+          cp target/mcp-run/release/run-remote "$asset_dir/run-remote"
+          cp "$RUNNER_TEMP/baffle-socket-probe" "$asset_dir/baffle-socket-probe"
+          for tool in "$asset_dir"/*; do
+            test -f "$tool"
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cladding-linux-helpers-x86_64
+          path: ${{ runner.temp }}/cladding-linux-helpers-x86_64
+          if-no-files-found: error
+
+  linux-helper-assets-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: true
+      - name: Build Linux execution helpers
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target aarch64-unknown-linux-gnu --target-dir target/mcp-run
+      - name: Build Linux Baffle socket operation probe
+        run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
+      - name: Verify and stage aarch64 Linux helpers
+        run: |
+          set -euo pipefail
+          asset_dir="$RUNNER_TEMP/cladding-linux-helpers-aarch64/bin"
+          mkdir -p "$asset_dir"
+          cp target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run "$asset_dir/mcp-run"
+          cp target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote "$asset_dir/run-remote"
+          cp "$RUNNER_TEMP/baffle-socket-probe" "$asset_dir/baffle-socket-probe"
+          for tool in "$asset_dir"/*; do
+            test -f "$tool"
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*aarch64*) ;;
+              *) echo "Expected a Linux aarch64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cladding-linux-helpers-aarch64
+          path: ${{ runner.temp }}/cladding-linux-helpers-aarch64
+          if-no-files-found: error
+
+  test:
+    runs-on: ubuntu-latest
+    needs: linux-helper-assets-x86_64
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-linux-helpers-x86_64
+          path: ${{ runner.temp }}/linux-helpers
+      - name: Restore and verify downloaded x86_64 Linux helpers
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/linux-helpers/bin"
+          for name in mcp-run run-remote baffle-socket-probe; do
+            tool="$tool_dir/$name"
+            if [ ! -f "$tool" ]; then
+              echo "Downloaded Linux helper is missing: $tool" >&2
+              exit 1
+            fi
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - name: Set prebuilt x86_64 helper paths
+        run: |
+          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-helpers/bin/mcp-run" >> "$GITHUB_ENV"
+          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-helpers/bin/run-remote" >> "$GITHUB_ENV"
       - name: Download and verify pinned x86_64 Baffle release
         env:
           BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
@@ -70,8 +172,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-workspace-crates: true
-      - name: Build embedded helpers
-        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
       - name: Verify embedded helpers
         run: |
           test -x "$CLADDING_MCP_RUN_BIN"
@@ -90,10 +190,39 @@ jobs:
 
   baffle-config:
     runs-on: ubuntu-latest
+    needs: linux-helper-assets-x86_64
     env:
       CLADDING_TEST_RUNSC: "true"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-linux-helpers-x86_64
+          path: ${{ runner.temp }}/linux-helpers
+      - name: Restore and verify downloaded x86_64 Linux helpers
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/linux-helpers/bin"
+          for name in mcp-run run-remote baffle-socket-probe; do
+            tool="$tool_dir/$name"
+            if [ ! -f "$tool" ]; then
+              echo "Downloaded Linux helper is missing: $tool" >&2
+              exit 1
+            fi
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - name: Set prebuilt x86_64 helper paths
+        run: |
+          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-helpers/bin/mcp-run" >> "$GITHUB_ENV"
+          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-helpers/bin/run-remote" >> "$GITHUB_ENV"
+          echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-helpers/bin/baffle-socket-probe" >> "$GITHUB_ENV"
       - name: Download and verify pinned x86_64 Baffle release
         env:
           BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
@@ -146,16 +275,6 @@ jobs:
           if ! grep -q "^${runner_user}:" /etc/subgid; then
             echo "${runner_user}:100000:65536" | sudo tee -a /etc/subgid
           fi
-      - name: Build Baffle socket operation probe
-        run: |
-          cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
-          echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/baffle-socket-probe" >> "$GITHUB_ENV"
-      - name: Build Linux execution helpers
-        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
-      - name: Set execution helper paths
-        run: |
-          echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/target/mcp-run/release/mcp-run" >> "$GITHUB_ENV"
-          echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/target/mcp-run/release/run-remote" >> "$GITHUB_ENV"
       - name: Build Cladding CLI
         run: cargo build --locked --bin cladding
       - name: Check Baffle validation shell syntax
@@ -176,8 +295,32 @@ jobs:
 
   baffle-podman-machine-assets-x86_64:
     runs-on: ubuntu-24.04
+    needs: linux-helper-assets-x86_64
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-linux-helpers-x86_64
+          path: ${{ runner.temp }}/linux-helpers
+      - name: Restore and verify downloaded x86_64 Linux helpers
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/linux-helpers/bin"
+          for name in mcp-run run-remote baffle-socket-probe; do
+            tool="$tool_dir/$name"
+            if [ ! -f "$tool" ]; then
+              echo "Downloaded Linux helper is missing: $tool" >&2
+              exit 1
+            fi
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
       - name: Download and verify pinned x86_64 Baffle release
         env:
           BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
@@ -212,22 +355,10 @@ jobs:
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@1.96
-      - name: Build Linux execution helpers
-        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target x86_64-unknown-linux-gnu --target-dir target/mcp-run
-      - name: Build Linux Baffle socket operation probe
-        run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Verify embedded helper inputs
         run: |
           test -x "$CLADDING_BAFFLE_BIN"
-          test -x "target/mcp-run/x86_64-unknown-linux-gnu/release/mcp-run"
-          test -x "target/mcp-run/x86_64-unknown-linux-gnu/release/run-remote"
-          test -x "$RUNNER_TEMP/baffle-socket-probe"
-          for tool in \
-            "$CLADDING_BAFFLE_BIN" \
-            "target/mcp-run/x86_64-unknown-linux-gnu/release/mcp-run" \
-            "target/mcp-run/x86_64-unknown-linux-gnu/release/run-remote" \
-            "$RUNNER_TEMP/baffle-socket-probe"; do
+          for tool in "$CLADDING_BAFFLE_BIN" "$RUNNER_TEMP/linux-helpers/bin"/*; do
             description=$(file -b "$tool")
             printf '%s: %s\n' "$tool" "$description"
             case "$description" in
@@ -239,9 +370,9 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin"
           cp "$RUNNER_TEMP/baffle/baffle" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/baffle"
-          cp "target/mcp-run/x86_64-unknown-linux-gnu/release/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/mcp-run"
-          cp "target/mcp-run/x86_64-unknown-linux-gnu/release/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/run-remote"
-          cp "$RUNNER_TEMP/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/baffle-socket-probe"
+          cp "$RUNNER_TEMP/linux-helpers/bin/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/mcp-run"
+          cp "$RUNNER_TEMP/linux-helpers/bin/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/run-remote"
+          cp "$RUNNER_TEMP/linux-helpers/bin/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/baffle-socket-probe"
       - uses: actions/upload-artifact@v4
         with:
           name: cladding-baffle-linux-tools-x86_64
@@ -250,8 +381,32 @@ jobs:
 
   baffle-podman-machine-assets-aarch64:
     runs-on: ubuntu-24.04-arm
+    needs: linux-helper-assets-aarch64
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-linux-helpers-aarch64
+          path: ${{ runner.temp }}/linux-helpers
+      - name: Restore and verify downloaded aarch64 Linux helpers
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/linux-helpers/bin"
+          for name in mcp-run run-remote baffle-socket-probe; do
+            tool="$tool_dir/$name"
+            if [ ! -f "$tool" ]; then
+              echo "Downloaded Linux helper is missing: $tool" >&2
+              exit 1
+            fi
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*aarch64*) ;;
+              *) echo "Expected a Linux aarch64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
       - name: Download and verify pinned aarch64 Baffle release
         env:
           BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-aarch64-unknown-linux-gnu.tar.gz
@@ -286,24 +441,10 @@ jobs:
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@1.96
-        with:
-          targets: aarch64-unknown-linux-gnu
-      - name: Build Linux execution helpers
-        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target aarch64-unknown-linux-gnu --target-dir target/mcp-run
-      - name: Build Linux Baffle socket operation probe
-        run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Verify embedded helper inputs
         run: |
           test -x "$CLADDING_BAFFLE_BIN"
-          test -x "target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run"
-          test -x "target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote"
-          test -x "$RUNNER_TEMP/baffle-socket-probe"
-          for tool in \
-            "$CLADDING_BAFFLE_BIN" \
-            "target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run" \
-            "target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote" \
-            "$RUNNER_TEMP/baffle-socket-probe"; do
+          for tool in "$CLADDING_BAFFLE_BIN" "$RUNNER_TEMP/linux-helpers/bin"/*; do
             description=$(file -b "$tool")
             printf '%s: %s\n' "$tool" "$description"
             case "$description" in
@@ -315,9 +456,9 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin"
           cp "$RUNNER_TEMP/baffle/baffle" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/baffle"
-          cp "target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/mcp-run"
-          cp "target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/run-remote"
-          cp "$RUNNER_TEMP/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/baffle-socket-probe"
+          cp "$RUNNER_TEMP/linux-helpers/bin/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/mcp-run"
+          cp "$RUNNER_TEMP/linux-helpers/bin/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/run-remote"
+          cp "$RUNNER_TEMP/linux-helpers/bin/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/baffle-socket-probe"
       - uses: actions/upload-artifact@v4
         with:
           name: cladding-baffle-linux-tools-aarch64
@@ -441,6 +582,7 @@ jobs:
             tool="$tool_dir/$name"
             test -f "$tool"
             chmod 0755 "$tool"
+            test -x "$tool"
             description=$(file -b "$tool")
             printf '%s: %s\n' "$tool" "$description"
             case "$description" in
