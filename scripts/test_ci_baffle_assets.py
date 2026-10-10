@@ -12,6 +12,13 @@ BAFFLE_CONFIG_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_baffle_c
 BAFFLE_RUNTIME_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_baffle_runtime.sh"
 )
+RUNTIME_TOPOLOGY_VALIDATOR = (
+    Path(__file__).parents[1] / "scripts/validate_runtime_topology.sh"
+)
+MACHINE_FEASIBILITY_WORKFLOW = (
+    Path(__file__).parents[1]
+    / ".github/workflows/podman-machine-linux-feasibility.yml"
+)
 
 
 def job_block(name: str) -> str:
@@ -78,6 +85,34 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
         self.assertIn('initialize_socket_volume "$socket_volume_agent"', validator)
         self.assertIn('initialize_socket_volume "$socket_volume_nw_sandbox"', validator)
+
+    def test_topology_validator_checks_baffle_data_sockets_from_both_consumers(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        self.assertIn("assert_denied_connect() {", validator)
+        self.assertIn("--connect-timeout 5 --max-time 10", validator)
+        self.assertIn("https://example.com", validator)
+        self.assertIn("> CONNECT example.com:443 HTTP/", validator)
+        self.assertIn("< HTTP/[0-9.]+ 403", validator)
+        self.assertIn('assert_denied_connect "$agent" agent', validator)
+        self.assertIn('assert_denied_connect "$nw_sandbox" nw-sandbox', validator)
+
+    def test_local_and_machine_ci_use_the_shared_topology_validator(self):
+        linux = job_block("baffle-config")
+        machine = job_block("baffle-podman-machine")
+        self.assertIn("scripts/validate_runtime_topology.sh default", linux)
+        self.assertIn("scripts/validate_runtime_topology.sh default", machine)
+        self.assertNotIn("scripts/validate_baffle_runtime.sh", machine)
+        self.assertNotIn("scripts/validate_managed_mounts.sh", machine)
+
+    def test_linux_machine_feasibility_selects_rootless_remote_connection(self):
+        workflow = MACHINE_FEASIBILITY_WORKFLOW.read_text()
+        self.assertIn(
+            'podman machine init --cpus 2 --memory 4096 --rootful=false "$machine_name"',
+            workflow,
+        )
+        self.assertIn(
+            'podman --connection "$machine_name" info --format', workflow
+        )
 
     def test_baffle_is_not_built_from_source_in_ci(self):
         self.assertNotIn("  build-baffle:\n", TEXT)
@@ -220,10 +255,15 @@ class BaffleCiAssetsTests(unittest.TestCase):
         intel_assets = job_block("baffle-podman-machine-assets-x86_64")
         self.assertIn("needs: linux-helper-assets-x86_64", intel_assets)
         self.assertNotIn("linux-helper-assets-aarch64", intel_assets)
+        intel_build = job_block("baffle-macos-x86_64-build")
+        self.assertIn("needs: baffle-podman-machine-assets-x86_64", intel_build)
+        self.assertIn("cladding-baffle-linux-tools-x86_64", intel_build)
+        self.assertIn("cladding-macos-x86_64", intel_build)
+
         intel = job_block("baffle-podman-machine")
-        self.assertIn("needs: baffle-podman-machine-assets-x86_64", intel)
+        self.assertIn("needs: baffle-macos-x86_64-build", intel)
         self.assertNotIn("baffle-config", intel)
-        self.assertIn("cladding-baffle-linux-tools-x86_64", intel)
+        self.assertIn("name: cladding-macos-x86_64", intel)
 
         apple_assets = job_block("baffle-podman-machine-assets-aarch64")
         self.assertIn("needs: linux-helper-assets-aarch64", apple_assets)

@@ -21,18 +21,24 @@ if [ "$#" -eq 2 ]; then
   esac
 fi
 
-for tool in podman jq openssl git python3; do
-  command -v "$tool" >/dev/null 2>&1 || {
-    echo "required integration-test tool is missing: $tool" >&2
-    exit 2
-  }
-done
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 repo_root=$(CDPATH= cd "$script_dir/.." && pwd)
 cladding_bin="$repo_root/target/debug/cladding"
 if printenv CLADDING_BIN >/dev/null 2>&1; then
   cladding_bin=$(printenv CLADDING_BIN)
 fi
+
+if [ "$socket_topology_only" = true ]; then
+  CLADDING_BIN="$cladding_bin" "$script_dir/validate_runtime_topology.sh" "$runtime"
+  exit $?
+fi
+
+for tool in podman jq openssl git python3; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "required integration-test tool is missing: $tool" >&2
+    exit 2
+  }
+done
 rootless=$(podman info --format '{{.Host.Security.Rootless}}')
 if [ "$rootless" != true ]; then
   echo "Baffle runtime integration requires rootless Podman" >&2
