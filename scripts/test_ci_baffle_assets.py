@@ -35,6 +35,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
         self.assertIn("podman inspect --format '{{range .Mounts}}", validator)
         self.assertIn('podman logs --tail 25 "$container"', validator)
+        self.assertIn('cat "$diagnostics_file"', validator)
+        self.assertIn('>> "$GITHUB_STEP_SUMMARY"', validator)
+        self.assertIn("### Sandbox UDS endpoint diagnostics", validator)
         self.assertIn('diagnose_run_socket_endpoints\n  exit 1', validator)
 
     def test_baffle_config_validator_prepares_managed_socket_volume_permissions(self):

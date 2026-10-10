@@ -656,7 +656,16 @@ diagnose_run_socket_endpoints() {
     done
   } 2>&1 | redact_fixture_values > "$diagnostics_file" || true
 
-  cat "$diagnostics_file" >&2
+  cat "$diagnostics_file"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      printf '### Sandbox UDS endpoint diagnostics\n\n'
+      printf 'The integration wait did not find both `run.sock` endpoints in the agent.\n\n'
+      printf '```text\n'
+      cat "$diagnostics_file"
+      printf '\n```\n'
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
   diagnostic=$(tr '\r\n' '  ' < "$diagnostics_file" \
     | sed 's/%/%25/g' | cut -c 1-5000)
   printf '::error title=Sandbox UDS endpoint diagnostics::%s\n' "$diagnostic"
