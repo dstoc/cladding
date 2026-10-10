@@ -19,6 +19,8 @@ fn run_reuses_project_config_tools_credentials_and_persistent_ca() {
     let bin_dir = root.join("mock-bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let podman_log = root.join("podman.log");
+    let socket_volume_state = podman_log.with_extension("volumes");
+    fs::write(&socket_volume_state, "").unwrap();
     let certificate_source = root.join("test-ca.crt");
     let private_key_source = root.join("test-ca-key.pem");
     write_test_ca(&certificate_source, &private_key_source);
@@ -58,9 +60,66 @@ if [ "$1" = "rm" ] && [ "$CLADDING_TEST_FAIL_CLEANUP" = "1" ]; then
   exit 43
 fi
 state=$CLADDING_PODMAN_STATE
+volume_state=$CLADDING_PODMAN_VOLUMES
 if [ "$1" = "image" ] && [ "$2" = "exists" ]; then exit 0; fi
 if [ "$1" = "info" ]; then
   printf '{"runsc":{"path":"runsc"}}\n'
+  exit 0
+fi
+if [ "$1" = "volume" ] && [ "$2" = "create" ]; then
+  shift 2
+  volume_name=
+  cladding_name=
+  project_root=
+  resource=
+  socket_volume=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--label" ]; then
+      shift
+      case "$1" in
+        cladding=*) cladding_name=${1#cladding=} ;;
+        project_root=*) project_root=${1#project_root=} ;;
+        cladding_resource=*) resource=${1#cladding_resource=} ;;
+        cladding_socket_volume=*) socket_volume=${1#cladding_socket_volume=} ;;
+      esac
+    else
+      volume_name=$1
+    fi
+    shift
+  done
+  printf '%s|%s|%s|%s|%s\n' \
+    "$volume_name" "$cladding_name" "$project_root" "$resource" "$socket_volume" \
+    >> "$volume_state"
+  printf '%s\n' "$volume_name"
+  exit 0
+fi
+if [ "$1" = "volume" ] && [ "$2" = "exists" ]; then
+  if [ -f "$volume_state" ] \
+    && awk -F '|' -v name="$3" '$1 == name { found = 1 } END { exit !found }' "$volume_state"; then
+    exit 0
+  fi
+  exit 1
+fi
+if [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then
+  row=$(awk -F '|' -v name="$5" '$1 == name { print; exit }' "$volume_state")
+  if [ -z "$row" ]; then exit 1; fi
+  volume_name=$(printf '%s\n' "$row" | cut -d '|' -f 1)
+  cladding_name=$(printf '%s\n' "$row" | cut -d '|' -f 2)
+  project_root=$(printf '%s\n' "$row" | cut -d '|' -f 3)
+  resource=$(printf '%s\n' "$row" | cut -d '|' -f 4)
+  socket_volume=$(printf '%s\n' "$row" | cut -d '|' -f 5)
+  if [ "$4" = "{{json .Labels}}" ]; then
+    printf '{"cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_socket_volume":"%s"}\n' \
+      "$cladding_name" "$project_root" "$resource" "$socket_volume"
+  else
+    printf '%s\n' "$volume_name"
+  fi
+  exit 0
+fi
+if [ "$1" = "volume" ] && [ "$2" = "rm" ]; then
+  name=$3
+  awk -F '|' -v name="$name" '$1 != name' "$volume_state" > "$volume_state.tmp"
+  mv "$volume_state.tmp" "$volume_state"
   exit 0
 fi
 if [ "$1" = "container" ] && [ "$2" = "ps" ]; then
@@ -202,7 +261,7 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
           *:/opt/scripts/proxy_startup.sh:ro)
             runtime_script=${1%:/opt/scripts/proxy_startup.sh:ro}
             ;;
-          *:/run/cladding/proxy*)
+          *:/run/cladding/proxy)
             runtime_sockets=${1%:/run/cladding/proxy*}
             ;;
         esac
@@ -300,7 +359,7 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
         *:/opt/scripts/proxy_startup.sh:ro*)
           runtime_script=${1%:/opt/scripts/proxy_startup.sh:ro*}
           ;;
-        *:/run/cladding/proxy*)
+        *:/run/cladding/proxy)
           runtime_sockets=${1%:/run/cladding/proxy*}
           ;;
       esac
@@ -727,6 +786,11 @@ exit 0
     assert!(failure_stderr.contains("stdout:\nhelper stdout: exec --user"));
     assert!(failure_stderr.contains("stderr:\nhelper stderr: exec --user"));
     assert!(!failure_stderr.contains("user-error"));
+    assert_eq!(
+        fs::read_to_string(&socket_volume_state).unwrap(),
+        "",
+        "failed startup must remove its owned socket volumes"
+    );
 
     if podman_state.exists() {
         fs::remove_file(&podman_state).unwrap();
@@ -792,6 +856,20 @@ exit 0
     assert!(proxy_start.contains("--userns keep-id"), "{proxy_start}");
     assert!(proxy_start.contains("--init"), "{proxy_start}");
     assert!(proxy_start.contains("app=proxy"), "{proxy_start}");
+    let created_socket_volumes = fs::read_to_string(&socket_volume_state).unwrap();
+    assert_eq!(
+        created_socket_volumes.lines().count(),
+        3,
+        "{created_socket_volumes}"
+    );
+    for channel in ["baffle-agent", "baffle-nw-sandbox", "run-nw-sandbox"] {
+        assert!(
+            created_socket_volumes.contains(&format!("cladding-demo-socket-{channel}")),
+            "missing managed socket channel {channel}: {created_socket_volumes}"
+        );
+    }
+    assert!(created_socket_volumes.contains("|demo|"));
+    assert!(created_socket_volumes.contains("|inter-container-socket|"));
 
     let mut down = cli(
         &root,
@@ -812,6 +890,34 @@ exit 0
         !cleanup_log.lines().any(|line| line.starts_with("pod rm ")),
         "down must not remove pods for the standalone topology: {cleanup_log}"
     );
+    assert_eq!(
+        fs::read_to_string(&socket_volume_state).unwrap(),
+        "",
+        "normal shutdown must remove every owned socket volume"
+    );
+
+    let foreign_socket_volume = "cladding-demo-socket-baffle-agent|foreign|/tmp/foreign/.cladding|inter-container-socket|cladding-demo-socket-baffle-agent\n";
+    fs::write(&socket_volume_state, foreign_socket_volume).unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut down_foreign_volume = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    down_foreign_volume.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
+    assert!(!down_foreign_volume.output().unwrap().status.success());
+    assert_eq!(
+        fs::read_to_string(&socket_volume_state).unwrap(),
+        foreign_socket_volume,
+        "shutdown must leave a foreign socket volume untouched"
+    );
+    assert!(
+        !read_log(&podman_log).contains("volume rm cladding-demo-socket-baffle-agent"),
+        "shutdown tried to remove a foreign socket volume"
+    );
+    fs::write(&socket_volume_state, "").unwrap();
 
     let legacy_pods = podman_log.with_extension("legacy-pods");
     let container_state = podman_log.with_extension("state");
@@ -918,6 +1024,10 @@ fn cli(
         .env("PATH", path)
         .env("CLADDING_PODMAN_LOG", podman_log)
         .env("CLADDING_PODMAN_STATE", podman_log.with_extension("state"))
+        .env(
+            "CLADDING_PODMAN_VOLUMES",
+            podman_log.with_extension("volumes"),
+        )
         .env(
             "CLADDING_LEGACY_PODS",
             podman_log.with_extension("legacy-pods"),

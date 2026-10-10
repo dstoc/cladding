@@ -14,7 +14,7 @@ case "$runtime" in
   *) echo "runtime must be default or runsc" >&2; exit 2 ;;
 esac
 
-for tool in podman jq openssl git sha256sum python3; do
+for tool in podman jq openssl git python3; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required integration-test tool is missing: $tool" >&2
     exit 2
@@ -32,7 +32,57 @@ if [ "$rootless" != true ]; then
   exit 2
 fi
 
-temp_root=$(mktemp -d "/tmp/cladding-baffle-runtime.XXXXXX")
+stat_mode() {
+  if [ "$(uname -s)" = Darwin ]; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+
+stat_uid() {
+  if [ "$(uname -s)" = Darwin ]; then
+    stat -f '%u' "$1"
+  else
+    stat -c '%u' "$1"
+  fi
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  fi
+}
+
+monotonic_ns() {
+  python3 -c 'import time; print(time.monotonic_ns())'
+}
+
+managed_socket_volume_names() {
+  podman volume ls \
+    --filter "label=cladding_resource=inter-container-socket" \
+    --filter "label=project_root=$project_root" \
+    --format '{{.Name}}' | sort
+}
+
+require_socket_volume_count() {
+  expected=$1
+  names=$(managed_socket_volume_names)
+  if [ -n "$names" ]; then
+    observed=$(printf '%s\n' "$names" | wc -l | tr -d ' ')
+  else
+    observed=0
+  fi
+  if [ "$observed" -ne "$expected" ]; then
+    echo "managed socket volume count mismatch: expected=$expected observed=$observed names=$names" >&2
+    exit 1
+  fi
+}
+
+temp_parent=${CLADDING_BAFFLE_RUNTIME_TMP_DIR:-${TMPDIR:-/tmp}}
+temp_root=$(mktemp -d "$temp_parent/cladding-baffle-runtime.XXXXXX")
 project_name="baffleintegration$$"
 project_root="$temp_root/workspace/.cladding"
 origin_name="$project_name-origin"
@@ -101,9 +151,9 @@ cmp "$script_dir/../config-template/nw_sandbox/main.rego" \
 cmp "$script_dir/../config-template/nw_sandbox/curl.rego" \
   "$project_root/config/nw_sandbox/curl.rego"
 test -z "$(find "$project_root/config" -iname '*squid*' -print)"
-test "$(stat -c '%a:%u' "$project_root/config/proxy/sessions")" = "755:$(id -u)"
+test "$(stat_mode "$project_root/config/proxy/sessions"):$(stat_uid "$project_root/config/proxy/sessions")" = "755:$(id -u)"
 for session_file in agent.toml nw-sandbox.toml; do
-  test "$(stat -c '%a:%u' "$project_root/config/proxy/sessions/$session_file")" = "644:$(id -u)"
+  test "$(stat_mode "$project_root/config/proxy/sessions/$session_file"):$(stat_uid "$project_root/config/proxy/sessions/$session_file")" = "644:$(id -u)"
 done
 agent_session_config=custom/agent-policy.toml
 nw_sandbox_session_config=restricted/network-policy.toml
@@ -114,18 +164,32 @@ cp "$project_root/config/proxy/sessions/agent.toml" \
   "$project_root/config/proxy/sessions/$agent_session_config"
 cp "$project_root/config/proxy/sessions/nw-sandbox.toml" \
   "$project_root/config/proxy/sessions/$nw_sandbox_session_config"
-test "$(stat -c '%a:%u' "$project_root/credentials/baffle")" = "700:$(id -u)"
-test "$(stat -c '%a:%u' "$project_root/credentials/baffle/secrets")" = "700:$(id -u)"
+test "$(stat_mode "$project_root/credentials/baffle"):$(stat_uid "$project_root/credentials/baffle")" = "700:$(id -u)"
+test "$(stat_mode "$project_root/credentials/baffle/secrets"):$(stat_uid "$project_root/credentials/baffle/secrets")" = "700:$(id -u)"
 jq --arg image "$client_image" --arg runtime "$runtime" \
   --arg agent_session_config "$agent_session_config" \
   --arg nw_sandbox_session_config "$nw_sandbox_session_config" \
   '.agent.image = $image
    | .nw_sandbox.image = $image
+   | .fs_sandbox.enabled = true
+   | .fs_sandbox.image = $image
    | .use_runsc = ($runtime == "runsc")
    | .proxy.agent.session_config = $agent_session_config
    | .proxy.nw_sandbox.session_config = $nw_sandbox_session_config' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
+cat >> "$project_root/config/nw_sandbox/main.rego" <<'EOF'
+
+allow if {
+  input.command == "/bin/echo"
+}
+EOF
+cat >> "$project_root/config/fs_sandbox/main.rego" <<'EOF'
+
+allow if {
+  input.command == "/bin/echo"
+}
+EOF
 
 phase="create local TLS origin"
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
@@ -244,11 +308,12 @@ mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
 phase="start Cladding runtime"
 "$cladding_bin" --cladding-dir "$project_root" up
-test "$(stat -c '%a:%u' "$project_root/credentials/baffle/ca.crt")" = "644:$(id -u)"
-test "$(stat -c '%a:%u' "$project_root/credentials/baffle/ca-key.pem")" = "600:$(id -u)"
-ca_before=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
+require_socket_volume_count 4
+test "$(stat_mode "$project_root/credentials/baffle/ca.crt"):$(stat_uid "$project_root/credentials/baffle/ca.crt")" = "644:$(id -u)"
+test "$(stat_mode "$project_root/credentials/baffle/ca-key.pem"):$(stat_uid "$project_root/credentials/baffle/ca-key.pem")" = "600:$(id -u)"
+ca_before=$(sha256_file "$project_root/credentials/baffle/ca.crt")
 phase="verify injected secret permissions"
-secret_mode=$(stat -c '%a' "$project_root/credentials/baffle/secrets/test-token-old")
+secret_mode=$(stat_mode "$project_root/credentials/baffle/secrets/test-token-old")
 if [ "$secret_mode" != 600 ]; then
   echo "expected test-token-old mode 600 after startup, got $secret_mode" >&2
   exit 1
@@ -257,6 +322,7 @@ phase="start local TLS origin container"
 podman run --detach --name "$origin_name" --network "container:$proxy" "$origin_image" >/dev/null
 agent="$project_name-agent-instance"
 sandbox="$project_name-nw-sandbox-instance"
+filesystem_sandbox="$project_name-fs-sandbox-instance"
 ready=false
 attempt=0
 phase="wait for Baffle daemon readiness"
@@ -390,14 +456,61 @@ for component in agent nw-sandbox; do
     /run/cladding/ca/baffle.crt /usr/local/share/ca-certificates/baffle.crt
 done
 podman exec "$proxy" test -x /run/podman-init
-test "$(stat -c '%a' "$project_root/credentials/baffle")" = 700
-test "$(stat -c '%a' "$project_root/credentials/baffle/ca.crt")" = 644
-test "$(stat -c '%a' "$project_root/credentials/baffle/ca-key.pem")" = 600
-test "$(stat -c '%u' "$project_root/credentials/baffle/ca-key.pem")" = "$(id -u)"
+phase="wait for sandbox UDS endpoints"
+run_sockets_ready=false
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+  if podman exec "$agent" sh -ec \
+    'test -S /run/cladding/run/nw-sandbox/run.sock && test -S /run/cladding/run/fs-sandbox/run.sock'; then
+    run_sockets_ready=true
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+if [ "$run_sockets_ready" != true ]; then
+  echo "agent-to-sandbox UDS endpoints did not become ready" >&2
+  exit 1
+fi
+for component in agent nw-sandbox; do
+  podman exec "$proxy" sh -ec '
+    test "$(stat -c %a "/run/cladding/proxy/$1")" = 700
+    test "$(stat -c %a "/run/cladding/proxy/$1/proxy.sock")" = 600
+    test "$(stat -c %u "/run/cladding/proxy/$1/proxy.sock")" = "$(id -u)"
+  ' sh "$component"
+done
+podman exec "$agent" sh -ec '
+  test "$(stat -c %a /run/cladding/run/nw-sandbox)" = 700
+  test "$(stat -c %a /run/cladding/run/fs-sandbox)" = 700
+  test "$(stat -c %a /run/cladding/run/nw-sandbox/run.sock)" = 700
+  test "$(stat -c %a /run/cladding/run/fs-sandbox/run.sock)" = 700
+  test "$(stat -c %u /run/cladding/run/nw-sandbox/run.sock)" = "$(id -u)"
+  test "$(stat -c %u /run/cladding/run/fs-sandbox/run.sock)" = "$(id -u)"
+'
+podman exec "$sandbox" sh -ec '
+  test "$(stat -c %a /run/cladding/run/nw-sandbox)" = 700
+  test "$(stat -c %a /run/cladding/run/nw-sandbox/run.sock)" = 700
+'
+podman exec "$filesystem_sandbox" sh -ec '
+  test "$(stat -c %a /run/cladding/run/fs-sandbox)" = 700
+  test "$(stat -c %a /run/cladding/run/fs-sandbox/run.sock)" = 700
+'
+test "$(stat_mode "$project_root/credentials/baffle")" = 700
+test "$(stat_mode "$project_root/credentials/baffle/ca.crt")" = 644
+test "$(stat_mode "$project_root/credentials/baffle/ca-key.pem")" = 600
+test "$(stat_uid "$project_root/credentials/baffle/ca-key.pem")" = "$(id -u)"
 
 phase="verify orphaned child processes are reaped"
 verify_orphan_reaping "$agent"
 verify_orphan_reaping "$sandbox"
+
+phase="verify agent-to-sandbox UDS communication"
+nw_socket_output=$(podman exec "$agent" sh -ec \
+  'cd /home/user && run-in-nw-sandbox -- /bin/echo nw-sandbox-uds-ok')
+test "$nw_socket_output" = "nw-sandbox-uds-ok"
+fs_socket_output=$(podman exec "$agent" sh -ec \
+  'cd /home/user && run-in-fs-sandbox -- /bin/echo fs-sandbox-uds-ok')
+test "$fs_socket_output" = "fs-sandbox-uds-ok"
 
 phase="authorize agent HTTPS request through scoped proxy"
 body=$(agent_curl --fail https://localhost:8443/authorized/curl \
@@ -550,18 +663,21 @@ jq -s -e 'any(.[]; .path == "/authorized/curl" and .authorization == "old")
 
 phase="verify persistent CA reuse and normal shutdown"
 podman rm -f "$origin_name" >/dev/null
-shutdown_started_ns=$(date +%s%N)
+shutdown_started_ns=$(monotonic_ns)
 "$cladding_bin" --cladding-dir "$project_root" down
-shutdown_finished_ns=$(date +%s%N)
+require_socket_volume_count 0
+shutdown_finished_ns=$(monotonic_ns)
 shutdown_elapsed_ms=$(((shutdown_finished_ns - shutdown_started_ns) / 1000000))
 if [ "$shutdown_elapsed_ms" -ge 8000 ]; then
   echo "cladding down took ${shutdown_elapsed_ms} ms; expected less than 8000 ms" >&2
   exit 1
 fi
-ca_after=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
+ca_after=$(sha256_file "$project_root/credentials/baffle/ca.crt")
 test "$ca_before" = "$ca_after"
 "$cladding_bin" --cladding-dir "$project_root" up
+require_socket_volume_count 2
 "$cladding_bin" --cladding-dir "$project_root" down
+require_socket_volume_count 0
 test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
 test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 
@@ -596,11 +712,11 @@ if [ "$redacted_log" != 'before:[REDACTED]:after' ]; then
   exit 1
 fi
 phase="verify one-off shared project state and isolated runtime cleanup"
-run_persistent_secret_before=$(sha256sum \
-  "$project_root/credentials/baffle/secrets/$run_persistent_secret_name" | cut -d ' ' -f 1)
+run_persistent_secret_before=$(sha256_file \
+  "$project_root/credentials/baffle/secrets/$run_persistent_secret_name")
 write_agent_policy "$run_secret_name" "/replacement/**"
-run_session_before=$(sha256sum \
-  "$project_root/config/proxy/sessions/$agent_session_config" | cut -d ' ' -f 1)
+run_session_before=$(sha256_file \
+  "$project_root/config/proxy/sessions/$agent_session_config")
 test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
 (
   cd "$temp_root/workspace"
@@ -649,8 +765,8 @@ if [ -z "$run_root" ]; then
 fi
 test -d "$run_root/runtime/empty-mask"
 test -d "$run_root/runtime/sockets/proxy"
-test "$(stat -c '%a' "$run_root/runtime/secrets")" = 700
-test "$(stat -c '%a' "$run_root/runtime/secrets/$run_secret_name")" = 600
+test "$(stat_mode "$run_root/runtime/secrets")" = 700
+test "$(stat_mode "$run_root/runtime/secrets/$run_secret_name")" = 600
 for project_state in config tools credentials home; do
   if [ -e "$run_root/$project_state" ]; then
     echo "one-off runtime copied project state into $run_root/$project_state" >&2
@@ -674,6 +790,7 @@ while ! podman container exists "$run_name-proxy-instance" >/dev/null 2>&1 \
 done
 run_proxy="$run_name-proxy-instance"
 run_agent="$run_name-agent-instance"
+require_socket_volume_count 2
 run_secret_directory="$run_root/runtime/secrets"
 assert_mount() {
   container=$1
@@ -767,7 +884,7 @@ while [ ! -f "$temp_root/workspace/.run-request-done" ]; do
   sleep 1
 done
 jq -e '.authorization == "old"' "$temp_root/workspace/.run-secret-response" >/dev/null
-if [ "$(sha256sum "$project_root/config/proxy/sessions/$agent_session_config" | cut -d ' ' -f 1)" \
+if [ "$(sha256_file "$project_root/config/proxy/sessions/$agent_session_config")" \
   != "$run_session_before" ]; then
   echo "one-off run changed the persistent Baffle session configuration" >&2
   exit 1
@@ -790,6 +907,7 @@ if [ "$run_status" -ne 7 ]; then
   echo "one-off command exited with status $run_status; expected 7" >&2
   exit 1
 fi
+require_socket_volume_count 0
 phase="verify one-off runtime root removal"
 if [ -e "$run_root" ]; then
   echo "one-off runtime root remains after the command exits: $run_root" >&2
@@ -801,13 +919,13 @@ if [ -e "$project_root/credentials/baffle/secrets/$run_secret_name" ]; then
   exit 1
 fi
 phase="verify other persistent Baffle secret is unchanged"
-if [ "$(sha256sum "$project_root/credentials/baffle/secrets/$run_persistent_secret_name" | cut -d ' ' -f 1)" \
+if [ "$(sha256_file "$project_root/credentials/baffle/secrets/$run_persistent_secret_name")" \
   != "$run_persistent_secret_before" ]; then
   echo "one-off run changed a different persistent Baffle secret file" >&2
   exit 1
 fi
 phase="verify persistent project CA is unchanged"
-ca_after_run=$(sha256sum "$project_root/credentials/baffle/ca.crt" | cut -d ' ' -f 1)
+ca_after_run=$(sha256_file "$project_root/credentials/baffle/ca.crt")
 if [ "$ca_after_run" != "$ca_before" ]; then
   echo "one-off run changed the persistent project CA" >&2
   exit 1
