@@ -327,8 +327,32 @@ else
   status=$?
   redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"
   cat "$temp_root/startup.redacted.log" >&2
-  diagnostic=$(grep -E '^\+ podman run |(^|[[:space:]])[Ee]rror:|failed to start container|podman run failed' \
-    "$temp_root/startup.redacted.log" | tail -n 20 \
+  startup_failure=$(python3 - "$temp_root/startup.redacted.log" <<'PY'
+import sys
+
+with open(sys.argv[1], encoding="utf-8", errors="replace") as log:
+    lines = log.read().splitlines()
+markers = [i for i, line in enumerate(lines) if "failed to start container" in line]
+if markers:
+    end = markers[-1]
+    runs = [i for i, line in enumerate(lines[: end + 1]) if line.startswith("+ podman run ")]
+    start = runs[-1] if runs else max(0, end - 12)
+    print("\n".join(lines[start : end + 1]))
+else:
+    runs = [i for i, line in enumerate(lines) if line.startswith("+ podman run ")]
+    if runs:
+        start = runs[-1]
+        errors = [
+            i for i, line in enumerate(lines[start:], start)
+            if "podman run failed" in line or "Error:" in line or "error:" in line
+        ]
+        end = errors[0] if errors else min(len(lines) - 1, start + 12)
+        print("\n".join(lines[start : end + 1]))
+    else:
+        print("\n".join(lines[-12:]))
+PY
+  )
+  diagnostic=$(printf '%s' "$startup_failure" \
     | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-5000)
   printf '::error title=Cladding runtime startup diagnostics::exit=%s; %s\n' \
     "$status" "$diagnostic"
