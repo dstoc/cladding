@@ -79,9 +79,8 @@ Cladding mounts `config/` read-only into the agent and network sandbox. They can
 
 The control socket stays inside the proxy container. The agent and network
 sandbox receive only their own mode-`0600` data socket inside a mode-`0700`
-component directory. On Linux, Baffle binds those sockets in the scoped
-runtime socket directories. With macOS Podman machine, a trusted `socat`
-process relays each enabled socket through a separate Podman-managed volume.
+component directory. Baffle binds each socket directly in its component's
+Podman-managed volume on both Linux rootless Podman and macOS Podman machine.
 The filesystem sandbox receives no proxy socket or proxy environment by
 default.
 
@@ -195,8 +194,7 @@ exceptions. The filesystem sandbox remains without proxy egress by default.
   and the socket at `0600`. Cladding uses ordinary rootless `keep-id` mappings
   so the proxy and its matching execution container can access the same
   socket as the invoking user. Do not widen socket modes to fix a UID mapping
-  problem. On macOS with Podman machine, confirm that the proxy image includes
-  `socat` for the scoped relay path.
+  problem. Confirm that the proxy and consumer mount the same component volume.
 - **File-only validation fails:** Keep the managed TOML paths as real files
   and directories, without symlinks. The generated directories use mode
   `0755`; TOML files use mode `0644`. They must not be group- or world-writable

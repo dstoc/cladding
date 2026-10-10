@@ -237,10 +237,6 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
     );
     record_cleanup_result(
         &mut cleanup_error,
-        remove_legacy_proxy_relay_volumes(spec, verbose, quiet_helpers),
-    );
-    record_cleanup_result(
-        &mut cleanup_error,
         remove_managed_mount_seed_helpers(spec, verbose, quiet_helpers),
     );
     record_cleanup_result(
@@ -390,75 +386,6 @@ fn socket_volume_labels_match(
         &labels,
         &socket_volume_labels(spec, name),
     ))
-}
-
-fn remove_legacy_proxy_relay_volumes(
-    spec: &RuntimeSpec,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<()> {
-    let expected_labels = BTreeMap::from([
-        ("cladding".to_string(), spec.project_name.clone()),
-        (
-            "project_root".to_string(),
-            spec.project_root.to_string_lossy().into_owned(),
-        ),
-        (
-            "cladding_resource".to_string(),
-            "baffle-proxy-relay".to_string(),
-        ),
-    ]);
-    let mut cleanup_error = None;
-
-    for component in ["agent", "nw-sandbox"] {
-        let name = format!("cladding-{}-baffle-relay-{component}", spec.project_name);
-        if inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_none() {
-            continue;
-        }
-        let labels = inspect_value("volume", &name, "{{json .Labels}}", verbose, quiet_helpers)?;
-        let labels: serde_json::Value = serde_json::from_str(&labels)
-            .with_context(|| format!("failed to parse labels for legacy Podman volume {name}"))?;
-        if !labels_match_expected(&labels, &expected_labels) {
-            record_cleanup_result(
-                &mut cleanup_error,
-                Err(Error::message(format!(
-                    "refusing to remove Podman volume '{name}' because it is not owned by this Cladding runtime"
-                ))),
-            );
-            continue;
-        }
-
-        let mut cmd = build_volume_rm_command(&name);
-        trace_command(&cmd, verbose);
-        let output = cmd
-            .output()
-            .with_context(|| format!("failed to remove legacy Cladding socket volume '{name}'"))?;
-        if output.status.success() || remove_output_is_missing_volume(&output) {
-            if verbose {
-                forward_output(&output)?;
-            }
-            continue;
-        }
-        if quiet_helpers {
-            record_cleanup_result(
-                &mut cleanup_error,
-                ensure_success_output_with_diagnostics(&output, "podman volume rm"),
-            );
-            continue;
-        }
-        if verbose {
-            forward_output(&output)?;
-        }
-        record_cleanup_result(
-            &mut cleanup_error,
-            ensure_success_output(&output, "podman volume rm"),
-        );
-    }
-
-    match cleanup_error {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
 }
 
 fn managed_mount_volumes(spec: &RuntimeSpec) -> BTreeMap<String, ManagedVolumeKind> {
@@ -2216,7 +2143,7 @@ mod tests {
                     mount_path: "/run/cladding/proxy/agent".to_string(),
                     read_only: false,
                     source: RuntimeMountSource::NamedVolume {
-                        claim_name: "demo-proxy-agent-relay".to_string(),
+                        claim_name: "demo-socket-baffle-agent".to_string(),
                     },
                 },
                 RuntimeMount {
@@ -2268,7 +2195,7 @@ mod tests {
                 "--volume",
                 "cladding-demo-agent-empty-workspace-tmp:/workspace/tmp",
                 "--volume",
-                "demo-proxy-agent-relay:/run/cladding/proxy/agent",
+                "demo-socket-baffle-agent:/run/cladding/proxy/agent",
                 "--volume",
                 "/tmp/demo/runtime/empty-mask:/home/user/workspace/.cladding:ro",
                 "--expose",

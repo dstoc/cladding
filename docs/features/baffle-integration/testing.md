@@ -7,7 +7,7 @@ from the **baffle-config** GitHub Actions job with rootless Podman.
 | --- | --- |
 | Ubuntu, default Podman runtime | Actual Cladding proxy, agent, and network-sandbox containers. The suite checks version 2 file-backed session startup, exact host, port, and path policy, plaintext HTTP rejection, separate component policies, disabled network-sandbox lifecycle, trust installation, curl, Git, Node.js, token replacement, secret and control-socket isolation, reload snapshots, invalid reloads, persistent CA reuse, shutdown, and run cleanup after a nonzero command. |
 | Ubuntu, runsc execution runtime | The same Cladding policy and client suite, with the agent and network sandbox running under runsc. The startup validator also checks scoped UDS access under runsc. |
-| Intel macOS, Podman machine | Linux amd64 Baffle startup with the named-volume UDS relay. The validator checks enabled and disabled sessions, socket permissions and access, daemon shutdown, and relay cleanup. |
+| Intel macOS, Podman machine | Linux amd64 Baffle startup with direct binds into the managed socket volumes. The validator checks enabled and disabled sessions, socket permissions and access, daemon shutdown, and session-socket cleanup. |
 | Apple Silicon macOS build | Cladding embeds and tests a Linux aarch64 Baffle executable on an ARM64 macOS host. |
 
 The CI packaging matrix builds Baffle on native Linux x86_64 and aarch64
@@ -42,4 +42,6 @@ and run these commands from the repository root:
 Both modes require rootless Podman. The runsc mode also requires the runsc
 runtime. The macOS Podman-machine job currently runs the startup and socket
 checks only; it does not run the curl, Git, Node.js, policy-reload, or one-off
-client suite.
+client suite. Linux and macOS startup validators both create component volumes,
+bind Baffle sockets directly into them, and test access through the same volume
+from a scoped client container.

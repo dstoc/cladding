@@ -22,27 +22,18 @@ test -L /run/baffle/control.sock
 test "$(readlink /run/baffle/control.sock)" = "$private_dir/control.sock"
 grep -q "^trusted_operator_uid = $expected_uid$" "$private_dir/daemon.toml"
 grep -Fqx "control_socket = \"$private_dir/control.sock\"" "$private_dir/daemon.toml"
-if [ "${CLADDING_BAFFLE_SOCKET_RELAY:-false}" = true ]; then
-  data_dir=$(sed -n 's/^socket_dir = "\(.*\)"$/\1/p' "$private_dir/daemon.toml")
-  case "$data_dir" in
-    /tmp/cladding-baffle-data.*) ;;
-    *) echo "Baffle relay data directory is outside its private temporary root" >&2; exit 1 ;;
-  esac
-  test "$(stat -c %a /tmp)" = 1777
-  test "$(stat -c %a "$data_dir")" = 700
-  test "$(stat -c %u "$data_dir")" = "$expected_uid"
-  test "$(stat -c %a "$data_dir/agent")" = 700
-  test "$(stat -c %u "$data_dir/agent")" = "$expected_uid"
-  test -S "$data_dir/agent/proxy.sock"
-  test "$(stat -c %a "$data_dir/agent/proxy.sock")" = 600
-  test "$(stat -c %u "$data_dir/agent/proxy.sock")" = "$expected_uid"
-  if [ "${CLADDING_NW_SANDBOX_ENABLED:-false}" = true ]; then
-    test "$(stat -c %a "$data_dir/nw-sandbox")" = 700
-    test "$(stat -c %u "$data_dir/nw-sandbox")" = "$expected_uid"
-    test -S "$data_dir/nw-sandbox/proxy.sock"
-    test "$(stat -c %a "$data_dir/nw-sandbox/proxy.sock")" = 600
-    test "$(stat -c %u "$data_dir/nw-sandbox/proxy.sock")" = "$expected_uid"
-  else
-    test ! -e "$data_dir/nw-sandbox"
+grep -Fqx 'socket_dir = "/run/cladding/proxy"' "$private_dir/daemon.toml"
+for component in agent nw-sandbox; do
+  if [ "$component" = nw-sandbox ] \
+    && [ "${CLADDING_NW_SANDBOX_ENABLED:-false}" != true ]; then
+    test ! -e "/run/cladding/proxy/$component/proxy.sock"
+    continue
   fi
-fi
+  socket_dir="/run/cladding/proxy/$component"
+  socket_path="$socket_dir/proxy.sock"
+  test "$(stat -c %a "$socket_dir")" = 700
+  test "$(stat -c %u "$socket_dir")" = "$expected_uid"
+  test -S "$socket_path"
+  test "$(stat -c %a "$socket_path")" = 600
+  test "$(stat -c %u "$socket_path")" = "$expected_uid"
+done
