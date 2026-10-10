@@ -114,7 +114,8 @@ sys.stdout.buffer.write(output.replace(secret, b"[REDACTED]") if secret else out
 }
 
 redact_startup_log() {
-  CLADDING_REDACT_SECRETS='cladding-test-old-value
+  CLADDING_REDACT_SECRETS='client-supplied-test-value
+cladding-test-old-value
 cladding-test-new-value' python3 -c '
 import os
 import sys
@@ -349,7 +350,7 @@ mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
 phase="start Cladding runtime"
 if "$cladding_bin" --cladding-dir "$project_root" up --verbose > "$temp_root/startup.log" 2>&1; then
-  :
+  redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"
 else
   status=$?
   redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"
@@ -652,8 +653,15 @@ diagnose_run_socket_endpoints() {
       podman inspect --format '{{range .Mounts}}{{.Type}} name={{.Name}} source={{.Source}} dest={{.Destination}} rw={{.RW}}{{"\n"}}{{end}}' \
         "$container" 2>&1 || true
       echo "Container logs: $container"
-      podman logs --tail 25 "$container" 2>&1 || true
+      podman logs --tail 50 "$container" 2>&1 || true
     done
+
+    echo "Saved cladding up --verbose output (fixture credentials redacted):"
+    if [ -s "$temp_root/startup.redacted.log" ]; then
+      cat "$temp_root/startup.redacted.log"
+    else
+      echo "startup output is unavailable"
+    fi
   } 2>&1 | redact_fixture_values > "$diagnostics_file" || true
 
   cat "$diagnostics_file"

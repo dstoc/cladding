@@ -34,7 +34,16 @@ class BaffleCiAssetsTests(unittest.TestCase):
             validator,
         )
         self.assertIn("podman inspect --format '{{range .Mounts}}", validator)
-        self.assertIn('podman logs --tail 25 "$container"', validator)
+        self.assertIn('podman logs --tail 50 "$container"', validator)
+        self.assertIn(
+            'redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"',
+            validator,
+        )
+        self.assertIn(
+            'Saved cladding up --verbose output (fixture credentials redacted):',
+            validator,
+        )
+        self.assertIn('cat "$temp_root/startup.redacted.log"', validator)
         self.assertIn('cat "$diagnostics_file"', validator)
         self.assertIn('>> "$GITHUB_STEP_SUMMARY"', validator)
         self.assertIn("### Sandbox UDS endpoint diagnostics", validator)
