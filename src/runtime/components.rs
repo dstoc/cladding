@@ -5,16 +5,13 @@ use super::mounts::{
 };
 use super::sockets::{
     RUNTIME_AGENT_INJECT_MOUNT_PATH, RUNTIME_AGENT_INJECT_SOCKET_DIR,
-    RUNTIME_PROXY_AGENT_MOUNT_PATH, RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH,
-    RUNTIME_PROXY_AGENT_SOCKET_DIR, RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
-    RUNTIME_PROXY_NW_SANDBOX_RELAY_MOUNT_PATH, RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
-    RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH, RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR,
-    RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH, RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR,
-    build_proxy_relay_volume_mount, build_scoped_socket_mount, runtime_socket_mount_path,
+    RUNTIME_PROXY_AGENT_MOUNT_PATH, RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
+    RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH, RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH,
+    build_scoped_socket_mount, build_socket_volume_mount, runtime_socket_mount_path,
 };
 use super::types::{
-    RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeMount,
-    RuntimeNames, RuntimeSpec, RuntimeUserNamespace,
+    RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeNames,
+    RuntimeSpec, RuntimeUserNamespace,
 };
 use crate::config::{ExecutionConfig, MountTarget};
 use std::collections::BTreeMap;
@@ -103,21 +100,19 @@ fn build_proxy_component(
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimeComponent {
     let mut mounts = build_proxy_mounts(project_root, runtime_root, custom_mounts);
-    if cfg!(target_os = "macos") {
-        mounts.push(build_proxy_relay_volume_mount(
+    mounts.push(build_socket_volume_mount(
+        &config.name,
+        "baffle-agent",
+        RUNTIME_PROXY_AGENT_MOUNT_PATH,
+        true,
+    ));
+    if config.nw_sandbox_enabled() {
+        mounts.push(build_socket_volume_mount(
             &config.name,
-            "agent",
-            RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH,
+            "baffle-nw-sandbox",
+            RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
             true,
         ));
-        if config.nw_sandbox_enabled() {
-            mounts.push(build_proxy_relay_volume_mount(
-                &config.name,
-                "nw-sandbox",
-                RUNTIME_PROXY_NW_SANDBOX_RELAY_MOUNT_PATH,
-                true,
-            ));
-        }
     }
     let containers = vec![RuntimeContainer {
         name: runtime_container_name(&names.proxy_name),
@@ -142,7 +137,7 @@ fn build_proxy_component(
             },
             RuntimeEnvVar {
                 name: "CLADDING_BAFFLE_SOCKET_RELAY".to_string(),
-                value: cfg!(target_os = "macos").to_string(),
+                value: "true".to_string(),
             },
         ],
         mounts,
@@ -180,25 +175,26 @@ fn build_agent_component(
         RUNTIME_AGENT_INJECT_SOCKET_DIR,
         RUNTIME_AGENT_INJECT_MOUNT_PATH,
     ));
-    mounts.extend(build_proxy_data_socket_mount(
-        runtime_root,
+    mounts.push(build_socket_volume_mount(
         &config.name,
-        "agent",
-        RUNTIME_PROXY_AGENT_SOCKET_DIR,
+        "baffle-agent",
         RUNTIME_PROXY_AGENT_MOUNT_PATH,
+        false,
     ));
     if names.nw_sandbox_name.is_some() {
-        mounts.extend(build_scoped_socket_mount(
-            runtime_root,
-            RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR,
+        mounts.push(build_socket_volume_mount(
+            &config.name,
+            "run-nw-sandbox",
             RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH,
+            false,
         ));
     }
     if names.fs_sandbox_name.is_some() {
-        mounts.extend(build_scoped_socket_mount(
-            runtime_root,
-            RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR,
+        mounts.push(build_socket_volume_mount(
+            &config.name,
+            "run-fs-sandbox",
             RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH,
+            false,
         ));
     }
 
@@ -283,17 +279,17 @@ fn build_nw_sandbox_component(
         custom_mounts,
         MountTarget::NwSandbox,
     );
-    mounts.extend(build_proxy_data_socket_mount(
-        runtime_root,
+    mounts.push(build_socket_volume_mount(
         &config.name,
-        "nw-sandbox",
-        RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR,
+        "baffle-nw-sandbox",
         RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
+        false,
     ));
-    mounts.extend(build_scoped_socket_mount(
-        runtime_root,
-        RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR,
+    mounts.push(build_socket_volume_mount(
+        &config.name,
+        "run-nw-sandbox",
         RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH,
+        true,
     ));
 
     let mut env = vec![
@@ -352,7 +348,7 @@ fn build_nw_sandbox_component(
             image: config.nw_sandbox_image().to_string(),
             command: build_mcp_run_supervisor_command(
                 "socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/cladding/proxy/nw-sandbox/proxy.sock",
-                "mcp-run",
+                "chmod 0700 /run/cladding/run/nw-sandbox && umask 077 && exec mcp-run",
             ),
             workdir: Some("/home/user/workspace".to_string()),
             env,
@@ -365,28 +361,9 @@ fn build_nw_sandbox_component(
     }
 }
 
-fn build_proxy_data_socket_mount(
-    runtime_root: &Path,
-    project_name: &str,
-    component: &str,
-    socket_dir: &str,
-    mount_path: &str,
-) -> Vec<RuntimeMount> {
-    if cfg!(target_os = "macos") {
-        vec![build_proxy_relay_volume_mount(
-            project_name,
-            component,
-            mount_path,
-            false,
-        )]
-    } else {
-        build_scoped_socket_mount(runtime_root, socket_dir, mount_path)
-    }
-}
-
 fn build_fs_sandbox_component(
     project_root: &Path,
-    runtime_root: &Path,
+    _runtime_root: &Path,
     config: &ExecutionConfig,
     _names: &RuntimeNames,
     component_name: &str,
@@ -397,10 +374,11 @@ fn build_fs_sandbox_component(
         custom_mounts,
         MountTarget::FsSandbox,
     );
-    mounts.extend(build_scoped_socket_mount(
-        runtime_root,
-        RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR,
+    mounts.push(build_socket_volume_mount(
+        &config.name,
+        "run-fs-sandbox",
         RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH,
+        true,
     ));
 
     RuntimeComponent {
@@ -416,7 +394,12 @@ fn build_fs_sandbox_component(
         containers: vec![RuntimeContainer {
             name: runtime_container_name(component_name),
             image: config.fs_sandbox_image().to_string(),
-            command: vec!["mcp-run".to_string()],
+            command: vec![
+                "/bin/sh".to_string(),
+                "-ec".to_string(),
+                "chmod 0700 /run/cladding/run/fs-sandbox && umask 077 && exec mcp-run"
+                    .to_string(),
+            ],
             workdir: Some("/home/user/workspace".to_string()),
             env: vec![
                 RuntimeEnvVar {
@@ -538,6 +521,28 @@ mod tests {
             })
     }
 
+    fn assert_socket_volume(
+        container: &RuntimeContainer,
+        mount_path: &str,
+        name: &str,
+        chown: bool,
+    ) {
+        let mount = container
+            .mounts
+            .iter()
+            .find(|mount| mount.mount_path == mount_path)
+            .expect("socket volume mount");
+        match (&mount.source, chown) {
+            (super::super::types::RuntimeMountSource::NamedVolumeChown { claim_name }, true) => {
+                assert_eq!(claim_name, name);
+            }
+            (super::super::types::RuntimeMountSource::NamedVolume { claim_name }, false) => {
+                assert_eq!(claim_name, name);
+            }
+            _ => panic!("unexpected socket mount source at {mount_path}: {mount:?}"),
+        }
+    }
+
     #[test]
     fn build_runtime_spec_fully_enabled_uses_five_containers() {
         let config = execution_config(true, true, Vec::new(), false);
@@ -584,11 +589,7 @@ mod tests {
         );
         assert_eq!(
             env_value(&spec.proxy.containers[0], "CLADDING_BAFFLE_SOCKET_RELAY"),
-            Some(if cfg!(target_os = "macos") {
-                "true"
-            } else {
-                "false"
-            })
+            Some("true")
         );
         assert!(spec.proxy.containers[0].ports.is_empty());
         assert_eq!(
@@ -952,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn baffle_data_sockets_are_mounted_only_into_their_execution_containers() {
+    fn managed_socket_volumes_are_mounted_only_into_their_participants() {
         let config = execution_config(true, true, Vec::new(), false);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let proxy = container(&spec.proxy, "demo-proxy-instance");
@@ -977,51 +978,65 @@ mod tests {
             host_mount_path(proxy, "/run/cladding/proxy"),
             Some(Path::new("/tmp/project/.cladding/runtime/sockets/proxy"))
         );
-        if cfg!(target_os = "macos") {
-            for (component, container, mount_path) in [
-                ("agent", agent, "/run/cladding/proxy/agent"),
-                ("nw-sandbox", nw, "/run/cladding/proxy/nw-sandbox"),
-            ] {
-                let scoped_mount = container
-                    .mounts
-                    .iter()
-                    .find(|mount| mount.mount_path == mount_path)
-                    .expect("scoped relay volume mount");
-                assert!(matches!(
-                    &scoped_mount.source,
-                    super::super::types::RuntimeMountSource::NamedVolume { claim_name }
-                        if claim_name == &format!("cladding-demo-baffle-relay-{component}")
-                ));
-            }
-            for (component, mount_path) in [
-                ("agent", "/run/cladding/proxy/agent"),
-                ("nw-sandbox", "/run/cladding/proxy/nw-sandbox"),
-            ] {
-                let relay_mount = proxy
-                    .mounts
-                    .iter()
-                    .find(|mount| mount.mount_path == mount_path)
-                    .expect("proxy relay volume mount");
-                assert!(matches!(
-                    &relay_mount.source,
-                    super::super::types::RuntimeMountSource::NamedVolumeChown { claim_name }
-                        if claim_name == &format!("cladding-demo-baffle-relay-{component}")
-                ));
-            }
-        } else {
-            assert_eq!(
-                host_mount_path(agent, "/run/cladding/proxy/agent"),
-                Some(Path::new(
-                    "/tmp/project/.cladding/runtime/sockets/proxy/agent"
-                ))
-            );
-            assert_eq!(
-                host_mount_path(nw, "/run/cladding/proxy/nw-sandbox"),
-                Some(Path::new(
-                    "/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"
-                ))
-            );
-        }
+        assert_socket_volume(
+            proxy,
+            "/run/cladding/proxy/agent",
+            "cladding-demo-socket-baffle-agent",
+            true,
+        );
+        assert_socket_volume(
+            proxy,
+            "/run/cladding/proxy/nw-sandbox",
+            "cladding-demo-socket-baffle-nw-sandbox",
+            true,
+        );
+        assert_socket_volume(
+            agent,
+            "/run/cladding/proxy/agent",
+            "cladding-demo-socket-baffle-agent",
+            false,
+        );
+        assert_socket_volume(
+            nw,
+            "/run/cladding/proxy/nw-sandbox",
+            "cladding-demo-socket-baffle-nw-sandbox",
+            false,
+        );
+        assert_socket_volume(
+            agent,
+            "/run/cladding/run/nw-sandbox",
+            "cladding-demo-socket-run-nw-sandbox",
+            false,
+        );
+        assert_socket_volume(
+            nw,
+            "/run/cladding/run/nw-sandbox",
+            "cladding-demo-socket-run-nw-sandbox",
+            true,
+        );
+        assert_socket_volume(
+            agent,
+            "/run/cladding/run/fs-sandbox",
+            "cladding-demo-socket-run-fs-sandbox",
+            false,
+        );
+        assert_socket_volume(
+            fs,
+            "/run/cladding/run/fs-sandbox",
+            "cladding-demo-socket-run-fs-sandbox",
+            true,
+        );
+
+        assert_eq!(
+            host_mount_path(agent, "/run/cladding/agent/inject"),
+            Some(Path::new(
+                "/tmp/project/.cladding/runtime/sockets/agent/inject"
+            ))
+        );
+        assert_eq!(
+            env_value(proxy, "CLADDING_BAFFLE_SOCKET_RELAY"),
+            Some("true")
+        );
 
         for (component, container, own_socket, other_socket) in [
             (
@@ -1070,6 +1085,8 @@ mod tests {
                 .iter()
                 .any(|path| path.starts_with("/run/cladding/proxy"))
         );
+        assert!(!mount_paths(fs).contains("/run/cladding/run/nw-sandbox"));
+        assert!(!mount_paths(nw).contains("/run/cladding/run/fs-sandbox"));
         for execution in [agent, nw, fs] {
             assert!(execution.mounts.iter().all(|mount| {
                 !matches!(

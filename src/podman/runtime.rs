@@ -46,7 +46,7 @@ impl RuntimeInventory {
 pub fn runtime_create(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     prepare_runtime_socket_dirs(spec)?;
     ensure_runtime_empty_mask_dir(spec)?;
-    ensure_proxy_relay_volumes(spec, verbose, quiet_helpers)?;
+    ensure_socket_volumes(spec, verbose, quiet_helpers)?;
     ensure_managed_mount_volumes(spec, verbose, quiet_helpers)?;
 
     for component in runtime_components(spec) {
@@ -233,7 +233,11 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
 
     record_cleanup_result(
         &mut cleanup_error,
-        remove_proxy_relay_volumes(spec, verbose, quiet_helpers),
+        remove_socket_volumes(spec, verbose, quiet_helpers),
+    );
+    record_cleanup_result(
+        &mut cleanup_error,
+        remove_legacy_proxy_relay_volumes(spec, verbose, quiet_helpers),
     );
     record_cleanup_result(
         &mut cleanup_error,
@@ -258,7 +262,7 @@ pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool, quiet_helpers: b
     runtime_cleanup(spec, verbose, quiet_helpers)
 }
 
-fn proxy_relay_volume_names(spec: &RuntimeSpec) -> Vec<String> {
+fn socket_volume_names(spec: &RuntimeSpec) -> Vec<String> {
     let mut names = BTreeSet::new();
     for component in runtime_components(spec) {
         for container in &component.containers {
@@ -272,27 +276,22 @@ fn proxy_relay_volume_names(spec: &RuntimeSpec) -> Vec<String> {
     names.into_iter().collect()
 }
 
-fn ensure_proxy_relay_volumes(
-    spec: &RuntimeSpec,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<()> {
-    for name in proxy_relay_volume_names(spec) {
+fn ensure_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
+    for name in socket_volume_names(spec) {
         if inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_some() {
-            if !proxy_relay_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
+            if !socket_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
                 return Err(Error::message(format!(
-                    "refusing to use Podman volume '{name}' because it is not owned by project '{}'",
-                    spec.project_name
+                    "refusing to use Podman volume '{name}' because it is not owned by this Cladding runtime"
                 )));
             }
             continue;
         }
 
-        let mut cmd = build_volume_create_command(&name, spec);
+        let mut cmd = build_socket_volume_create_command(&name, spec);
         trace_command(&cmd, verbose);
         let output = cmd
             .output()
-            .with_context(|| format!("failed to create Podman relay volume '{name}'"))?;
+            .with_context(|| format!("failed to create Cladding socket volume '{name}'"))?;
         if !output.status.success() {
             if quiet_helpers {
                 ensure_success_output_with_diagnostics(&output, "podman volume create")?;
@@ -310,27 +309,27 @@ fn ensure_proxy_relay_volumes(
     Ok(())
 }
 
-fn remove_proxy_relay_volumes(
-    spec: &RuntimeSpec,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<()> {
-    for name in proxy_relay_volume_names(spec) {
+fn remove_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
+    let mut cleanup_error = None;
+    for name in socket_volume_names(spec) {
         if inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_none() {
             continue;
         }
-        if !proxy_relay_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
-            return Err(Error::message(format!(
-                "refusing to remove Podman volume '{name}' because it is not owned by project '{}'",
-                spec.project_name
-            )));
+        if !socket_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
+            record_cleanup_result(
+                &mut cleanup_error,
+                Err(Error::message(format!(
+                    "refusing to remove Podman volume '{name}' because it is not owned by this Cladding runtime"
+                ))),
+            );
+            continue;
         }
 
         let mut cmd = build_volume_rm_command(&name);
         trace_command(&cmd, verbose);
         let output = cmd
             .output()
-            .with_context(|| format!("failed to remove Podman relay volume '{name}'"))?;
+            .with_context(|| format!("failed to remove Cladding socket volume '{name}'"))?;
         if output.status.success() {
             if verbose {
                 forward_output(&output)?;
@@ -341,18 +340,43 @@ fn remove_proxy_relay_volumes(
             continue;
         }
         if quiet_helpers {
-            ensure_success_output_with_diagnostics(&output, "podman volume rm")?;
+            record_cleanup_result(
+                &mut cleanup_error,
+                ensure_success_output_with_diagnostics(&output, "podman volume rm"),
+            );
+            continue;
         }
         if verbose {
             forward_output(&output)?;
         }
-        ensure_success_output(&output, "podman volume rm")?;
+        record_cleanup_result(
+            &mut cleanup_error,
+            ensure_success_output(&output, "podman volume rm"),
+        );
     }
 
-    Ok(())
+    match cleanup_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
-fn proxy_relay_volume_labels_match(
+fn socket_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("cladding".to_string(), spec.project_name.clone()),
+        (
+            "project_root".to_string(),
+            spec.project_root.to_string_lossy().into_owned(),
+        ),
+        (
+            "cladding_resource".to_string(),
+            "inter-container-socket".to_string(),
+        ),
+        ("cladding_socket_volume".to_string(), name.to_string()),
+    ])
+}
+
+fn socket_volume_labels_match(
     name: &str,
     spec: &RuntimeSpec,
     verbose: bool,
@@ -362,16 +386,79 @@ fn proxy_relay_volume_labels_match(
     let labels: serde_json::Value = serde_json::from_str(&labels)
         .with_context(|| format!("failed to parse labels for Podman volume {name}"))?;
 
-    Ok(labels.get("cladding").and_then(serde_json::Value::as_str)
-        == Some(spec.project_name.as_str())
-        && labels
-            .get("project_root")
-            .and_then(serde_json::Value::as_str)
-            == Some(spec.project_root.to_string_lossy().as_ref())
-        && labels
-            .get("cladding_resource")
-            .and_then(serde_json::Value::as_str)
-            == Some("baffle-proxy-relay"))
+    Ok(labels_match_expected(
+        &labels,
+        &socket_volume_labels(spec, name),
+    ))
+}
+
+fn remove_legacy_proxy_relay_volumes(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    let expected_labels = BTreeMap::from([
+        ("cladding".to_string(), spec.project_name.clone()),
+        (
+            "project_root".to_string(),
+            spec.project_root.to_string_lossy().into_owned(),
+        ),
+        (
+            "cladding_resource".to_string(),
+            "baffle-proxy-relay".to_string(),
+        ),
+    ]);
+    let mut cleanup_error = None;
+
+    for component in ["agent", "nw-sandbox"] {
+        let name = format!("cladding-{}-baffle-relay-{component}", spec.project_name);
+        if inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_none() {
+            continue;
+        }
+        let labels = inspect_value("volume", &name, "{{json .Labels}}", verbose, quiet_helpers)?;
+        let labels: serde_json::Value = serde_json::from_str(&labels)
+            .with_context(|| format!("failed to parse labels for legacy Podman volume {name}"))?;
+        if !labels_match_expected(&labels, &expected_labels) {
+            record_cleanup_result(
+                &mut cleanup_error,
+                Err(Error::message(format!(
+                    "refusing to remove Podman volume '{name}' because it is not owned by this Cladding runtime"
+                ))),
+            );
+            continue;
+        }
+
+        let mut cmd = build_volume_rm_command(&name);
+        trace_command(&cmd, verbose);
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to remove legacy Cladding socket volume '{name}'"))?;
+        if output.status.success() || remove_output_is_missing_volume(&output) {
+            if verbose {
+                forward_output(&output)?;
+            }
+            continue;
+        }
+        if quiet_helpers {
+            record_cleanup_result(
+                &mut cleanup_error,
+                ensure_success_output_with_diagnostics(&output, "podman volume rm"),
+            );
+            continue;
+        }
+        if verbose {
+            forward_output(&output)?;
+        }
+        record_cleanup_result(
+            &mut cleanup_error,
+            ensure_success_output(&output, "podman volume rm"),
+        );
+    }
+
+    match cleanup_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 fn managed_mount_volumes(spec: &RuntimeSpec) -> BTreeMap<String, ManagedVolumeKind> {
@@ -861,19 +948,14 @@ fn list_labeled_resource_names(
         .collect())
 }
 
-fn build_volume_create_command(name: &str, spec: &RuntimeSpec) -> Command {
+fn build_socket_volume_create_command(name: &str, spec: &RuntimeSpec) -> Command {
     let mut cmd = Command::new("podman");
-    cmd.args([
-        "volume",
-        "create",
-        "--label",
-        &format!("cladding={}", spec.project_name),
-        "--label",
-        &format!("project_root={}", spec.project_root.display()),
-        "--label",
-        "cladding_resource=baffle-proxy-relay",
-        name,
-    ]);
+    cmd.args(["volume", "create", "--opt", "nocopy"]);
+    for (key, value) in socket_volume_labels(spec, name) {
+        cmd.arg("--label");
+        cmd.arg(format!("{key}={value}"));
+    }
+    cmd.arg(name);
     cmd
 }
 
@@ -1067,7 +1149,12 @@ pub fn container_run(
     quiet_helpers: bool,
 ) -> Result<()> {
     let mut cmd = build_container_run_command(use_runsc, component, container);
-    run_helper_command(&mut cmd, verbose, quiet_helpers, "podman run")
+    run_helper_command(&mut cmd, verbose, quiet_helpers, "podman run").inspect_err(|_| {
+        eprintln!(
+            "error: failed to start container '{}' for component '{}'",
+            container.name, component.name
+        );
+    })
 }
 
 fn should_install_baffle_ca(spec: &RuntimeSpec, component: &RuntimeComponent) -> bool {
@@ -1527,7 +1614,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn runtime_socket_tree_has_existing_private_proxy_and_session_directories() {
+    fn runtime_socket_tree_prepares_only_host_path_socket_directories() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let project_root =
@@ -1561,6 +1648,7 @@ mod tests {
                 path.display()
             );
         }
+        assert!(project_root.join("runtime/sockets/agent/inject").is_dir());
         assert!(project_root.join("runtime/sockets/proxy/agent").is_dir());
         assert!(
             !project_root
@@ -1742,6 +1830,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn runtime_commands_mount_socket_volumes_only_for_channel_participants() {
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+                build: None,
+                security_opts: Vec::new(),
+            },
+            nw_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: "nw-sandbox:image".to_string(),
+                build: None,
+                security_opts: Vec::new(),
+            }),
+            fs_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: "fs-sandbox:image".to_string(),
+                build: None,
+                security_opts: Vec::new(),
+            }),
+            proxy: None,
+            mounts: Vec::new(),
+        };
+        let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+        let socket_mounts = |component: &RuntimeComponent| {
+            let container = component.containers.first().expect("runtime container");
+            command_args(&build_container_run_command(
+                component.use_runsc,
+                component,
+                container,
+            ))
+            .windows(2)
+            .filter(|pair| pair[0] == "--volume" && pair[1].contains("-socket-"))
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            socket_mounts(&spec.proxy),
+            vec![
+                "cladding-demo-socket-baffle-agent:/run/cladding/proxy/agent:U",
+                "cladding-demo-socket-baffle-nw-sandbox:/run/cladding/proxy/nw-sandbox:U",
+            ]
+        );
+        assert_eq!(
+            socket_mounts(&spec.agent),
+            vec![
+                "cladding-demo-socket-baffle-agent:/run/cladding/proxy/agent",
+                "cladding-demo-socket-run-nw-sandbox:/run/cladding/run/nw-sandbox",
+                "cladding-demo-socket-run-fs-sandbox:/run/cladding/run/fs-sandbox",
+            ]
+        );
+        let nw = spec.nw_sandbox.as_ref().expect("network sandbox");
+        assert_eq!(
+            socket_mounts(nw),
+            vec![
+                "cladding-demo-socket-baffle-nw-sandbox:/run/cladding/proxy/nw-sandbox",
+                "cladding-demo-socket-run-nw-sandbox:/run/cladding/run/nw-sandbox:U",
+            ]
+        );
+        let fs = spec.fs_sandbox.as_ref().expect("filesystem sandbox");
+        assert_eq!(
+            socket_mounts(fs),
+            vec!["cladding-demo-socket-run-fs-sandbox:/run/cladding/run/fs-sandbox:U"]
+        );
+
+        let agent_args = command_args(&build_container_run_command(
+            spec.agent.use_runsc,
+            &spec.agent,
+            &spec.agent.containers[0],
+        ));
+        assert!(agent_args.iter().any(|arg| {
+            arg == "/tmp/project/.cladding/runtime/sockets/agent/inject:/run/cladding/agent/inject"
+        }));
+        for component in [&spec.proxy, nw, fs] {
+            let args = command_args(&build_container_run_command(
+                component.use_runsc,
+                component,
+                &component.containers[0],
+            ));
+            assert!(!args.iter().any(|arg| {
+                arg.ends_with("/runtime/sockets/agent/inject:/run/cladding/agent/inject")
+            }));
+        }
+    }
+
     fn successful_status() -> std::process::ExitStatus {
         std::process::Command::new("true").status().expect("status")
     }
@@ -1872,6 +2049,38 @@ mod tests {
         let missing_resource =
             serde_json::to_value(missing_resource).expect("serialize incomplete volume labels");
         assert!(!labels_match_expected(&missing_resource, &expected));
+    }
+
+    #[test]
+    fn socket_volume_cleanup_requires_project_and_channel_labels() {
+        let spec = test_runtime_spec();
+        let name = "cladding-demo-socket-run-nw-sandbox";
+        let expected = socket_volume_labels(&spec, name);
+        let owned = serde_json::to_value(&expected).expect("serialize socket volume labels");
+        assert!(labels_match_expected(&owned, &expected));
+
+        let args = command_args(&build_socket_volume_create_command(name, &spec));
+        assert!(args.windows(2).any(|pair| pair == ["--opt", "nocopy"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--label", "cladding_resource=inter-container-socket"] })
+        );
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--label",
+                "cladding_socket_volume=cladding-demo-socket-run-nw-sandbox",
+            ]
+        }));
+        assert_eq!(args.last().map(String::as_str), Some(name));
+
+        let mut foreign_channel = expected.clone();
+        foreign_channel.insert(
+            "cladding_socket_volume".to_string(),
+            "cladding-demo-socket-run-fs-sandbox".to_string(),
+        );
+        let foreign_channel =
+            serde_json::to_value(foreign_channel).expect("serialize foreign socket volume labels");
+        assert!(!labels_match_expected(&foreign_channel, &expected));
     }
 
     #[test]

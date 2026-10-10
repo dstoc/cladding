@@ -4,17 +4,13 @@ use std::path::{Path, PathBuf};
 
 pub(super) const RUNTIME_SOCKET_DIR: &str = "runtime/sockets";
 pub(super) const RUNTIME_AGENT_INJECT_SOCKET_DIR: &str = "agent/inject";
+pub(super) const RUNTIME_PROXY_SOCKET_DIR: &str = "proxy";
 pub(super) const RUNTIME_PROXY_AGENT_SOCKET_DIR: &str = "proxy/agent";
 pub(super) const RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR: &str = "proxy/nw-sandbox";
-pub(super) const RUNTIME_PROXY_SOCKET_DIR: &str = "proxy";
-pub(super) const RUNTIME_RUN_NW_SANDBOX_SOCKET_DIR: &str = "run/nw-sandbox";
-pub(super) const RUNTIME_RUN_FS_SANDBOX_SOCKET_DIR: &str = "run/fs-sandbox";
 pub(super) const RUNTIME_AGENT_INJECT_MOUNT_PATH: &str = "/run/cladding/agent/inject";
 pub(super) const RUNTIME_PROXY_AGENT_MOUNT_PATH: &str = "/run/cladding/proxy/agent";
 pub(super) const RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/proxy/nw-sandbox";
 pub(super) const RUNTIME_PROXY_MOUNT_PATH: &str = "/run/cladding/proxy";
-pub(super) const RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH: &str = "/run/cladding/proxy/agent";
-pub(super) const RUNTIME_PROXY_NW_SANDBOX_RELAY_MOUNT_PATH: &str = "/run/cladding/proxy/nw-sandbox";
 pub(super) const RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/nw-sandbox";
 pub(super) const RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/fs-sandbox";
 
@@ -26,6 +22,8 @@ impl RuntimeSpec {
             &self.runtime_root,
             RUNTIME_PROXY_SOCKET_DIR,
         ));
+        // The host bind at proxy/ contains mount points for the nested managed volumes.
+        // These directories stay empty; the shared socket data lives in the named volumes.
         paths.insert(runtime_scoped_socket_dir(
             &self.runtime_root,
             RUNTIME_PROXY_AGENT_SOCKET_DIR,
@@ -76,13 +74,13 @@ pub(super) fn build_scoped_socket_mount(
     }]
 }
 
-pub(super) fn build_proxy_relay_volume_mount(
+pub(super) fn build_socket_volume_mount(
     project_name: &str,
-    component: &str,
+    channel: &str,
     mount_path: &str,
     chown: bool,
 ) -> RuntimeMount {
-    let claim_name = proxy_relay_volume_name(project_name, component);
+    let claim_name = socket_volume_name(project_name, channel);
     RuntimeMount {
         mount_path: mount_path.to_string(),
         read_only: false,
@@ -94,8 +92,8 @@ pub(super) fn build_proxy_relay_volume_mount(
     }
 }
 
-pub(super) fn proxy_relay_volume_name(project_name: &str, component: &str) -> String {
-    format!("cladding-{project_name}-baffle-relay-{component}")
+pub(super) fn socket_volume_name(project_name: &str, channel: &str) -> String {
+    format!("cladding-{project_name}-socket-{channel}")
 }
 
 fn collect_generated_runtime_socket_dirs(
@@ -184,11 +182,9 @@ mod tests {
             [
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy"),
-                PathBuf::from("/tmp/project/.cladding/runtime/sockets/agent/inject"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/agent"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"),
-                PathBuf::from("/tmp/project/.cladding/runtime/sockets/run/nw-sandbox"),
-                PathBuf::from("/tmp/project/.cladding/runtime/sockets/run/fs-sandbox"),
+                PathBuf::from("/tmp/project/.cladding/runtime/sockets/agent/inject"),
             ]
             .into_iter()
             .collect()
@@ -196,31 +192,27 @@ mod tests {
     }
 
     #[test]
-    fn proxy_relay_volumes_are_scoped_to_the_component_and_chowned_in_proxy() {
-        let mount = build_proxy_relay_volume_mount(
-            "demo",
-            "agent",
-            RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH,
-            true,
-        );
+    fn socket_volumes_are_scoped_to_the_channel_and_chowned_by_the_owner() {
+        let mount =
+            build_socket_volume_mount("demo", "baffle-agent", RUNTIME_PROXY_AGENT_MOUNT_PATH, true);
 
-        assert_eq!(mount.mount_path, RUNTIME_PROXY_AGENT_RELAY_MOUNT_PATH);
+        assert_eq!(mount.mount_path, RUNTIME_PROXY_AGENT_MOUNT_PATH);
         assert!(matches!(
             mount.source,
             RuntimeMountSource::NamedVolumeChown { claim_name }
-                if claim_name == "cladding-demo-baffle-relay-agent"
+                if claim_name == "cladding-demo-socket-baffle-agent"
         ));
 
-        let nw_mount = build_proxy_relay_volume_mount(
+        let nw_mount = build_socket_volume_mount(
             "demo",
-            "nw-sandbox",
-            RUNTIME_PROXY_NW_SANDBOX_RELAY_MOUNT_PATH,
+            "baffle-nw-sandbox",
+            RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
             false,
         );
         assert!(matches!(
             nw_mount.source,
             RuntimeMountSource::NamedVolume { claim_name }
-                if claim_name == "cladding-demo-baffle-relay-nw-sandbox"
+                if claim_name == "cladding-demo-socket-baffle-nw-sandbox"
         ));
     }
 }

@@ -4,6 +4,7 @@
 import http.server
 import json
 import os
+import socket
 import ssl
 import threading
 from urllib.parse import urlsplit
@@ -64,8 +65,16 @@ class OriginHandler(http.server.SimpleHTTPRequestHandler):
         return super().do_HEAD()
 
 
+class DualStackThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
 def serve(port, certificate=None, private_key=None):
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), OriginHandler)
+    server = DualStackThreadingHTTPServer(("::", port), OriginHandler)
     if certificate is not None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certificate, private_key)
