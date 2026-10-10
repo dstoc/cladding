@@ -617,6 +617,50 @@ for component in agent nw-sandbox; do
     /run/cladding/ca/baffle.crt /usr/local/share/ca-certificates/baffle.crt
 done
 podman exec "$proxy" test -x /run/podman-init
+diagnose_run_socket_endpoints() {
+  diagnostics_file="$temp_root/run-uds-diagnostics.log"
+  {
+    for component in nw-sandbox fs-sandbox; do
+      socket_path="/run/cladding/run/$component/run.sock"
+      case "$component" in
+        nw-sandbox) server_container=$sandbox ;;
+        fs-sandbox) server_container=$filesystem_sandbox ;;
+      esac
+      for container in "$server_container" "$agent"; do
+        echo "Socket path: container=$container path=$socket_path"
+        podman exec "$container" sh -c '
+          socket_path=$1
+          parent=${socket_path%/*}
+          if [ -S "$socket_path" ]; then
+            stat -c "socket: mode=%a uid=%u gid=%g path=%n" "$socket_path"
+          elif [ -e "$socket_path" ] || [ -L "$socket_path" ]; then
+            stat -c "non-socket path: mode=%a uid=%u gid=%g path=%n" "$socket_path"
+          else
+            echo "socket path is missing: $socket_path"
+          fi
+          stat -c "parent: mode=%a uid=%u gid=%g path=%n" "$parent" || true
+          ls -la "$parent" || true
+        ' sh "$socket_path" 2>&1 || true
+      done
+    done
+
+    for container in "$agent" "$sandbox" "$filesystem_sandbox"; do
+      echo "Container state: $container"
+      podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
+        "$container" 2>&1 || true
+      echo "Container mounts: $container"
+      podman inspect --format '{{range .Mounts}}{{.Type}} name={{.Name}} source={{.Source}} dest={{.Destination}} rw={{.RW}}{{"\n"}}{{end}}' \
+        "$container" 2>&1 || true
+      echo "Container logs: $container"
+      podman logs --tail 25 "$container" 2>&1 || true
+    done
+  } 2>&1 | redact_fixture_values > "$diagnostics_file" || true
+
+  cat "$diagnostics_file" >&2
+  diagnostic=$(tr '\r\n' '  ' < "$diagnostics_file" \
+    | sed 's/%/%25/g' | cut -c 1-5000)
+  printf '::error title=Sandbox UDS endpoint diagnostics::%s\n' "$diagnostic"
+}
 phase="wait for sandbox UDS endpoints"
 run_sockets_ready=false
 attempt=0
@@ -631,6 +675,7 @@ while [ "$attempt" -lt 60 ]; do
 done
 if [ "$run_sockets_ready" != true ]; then
   echo "agent-to-sandbox UDS endpoints did not become ready" >&2
+  diagnose_run_socket_endpoints
   exit 1
 fi
 for component in agent nw-sandbox; do

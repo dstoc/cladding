@@ -9,6 +9,9 @@ from pathlib import Path
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/ci.yml"
 TEXT = WORKFLOW.read_text()
 BAFFLE_CONFIG_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_baffle_config.sh"
+BAFFLE_RUNTIME_VALIDATOR = (
+    Path(__file__).parents[1] / "scripts/validate_baffle_runtime.sh"
+)
 
 
 def job_block(name: str) -> str:
@@ -21,6 +24,19 @@ def job_block(name: str) -> str:
 
 
 class BaffleCiAssetsTests(unittest.TestCase):
+    def test_baffle_runtime_reports_each_sandbox_socket_failure(self):
+        validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
+        self.assertIn("diagnose_run_socket_endpoints() {", validator)
+        self.assertIn("for component in nw-sandbox fs-sandbox; do", validator)
+        self.assertIn('if [ -S "$socket_path" ]; then', validator)
+        self.assertIn(
+            "podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}}",
+            validator,
+        )
+        self.assertIn("podman inspect --format '{{range .Mounts}}", validator)
+        self.assertIn('podman logs --tail 25 "$container"', validator)
+        self.assertIn('diagnose_run_socket_endpoints\n  exit 1', validator)
+
     def test_baffle_config_validator_prepares_managed_socket_volume_permissions(self):
         validator = BAFFLE_CONFIG_VALIDATOR.read_text()
         self.assertIn('initialize_socket_volume() {', validator)
