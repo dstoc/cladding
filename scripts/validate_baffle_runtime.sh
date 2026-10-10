@@ -327,7 +327,8 @@ else
   status=$?
   redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"
   cat "$temp_root/startup.redacted.log" >&2
-  diagnostic=$(tail -n 20 "$temp_root/startup.redacted.log" \
+  diagnostic=$(grep -E '^\+ podman run |(^|[[:space:]])[Ee]rror:|failed to start container|podman run failed' \
+    "$temp_root/startup.redacted.log" | tail -n 20 \
     | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-5000)
   printf '::error title=Cladding runtime startup diagnostics::exit=%s; %s\n' \
     "$status" "$diagnostic"
