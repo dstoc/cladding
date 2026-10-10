@@ -836,23 +836,35 @@ jq -s -e 'any(.[]; .path == "/authorized/curl" and .authorization == "old")
                      and .path != "/authorized/plaintext")' \
   "$temp_root/events.jsonl" >/dev/null
 
-phase="verify persistent CA reuse and normal shutdown"
+phase="remove local TLS origin before persistent shutdown"
 podman rm -f "$origin_name" >/dev/null
 shutdown_started_ns=$(monotonic_ns)
+phase="stop persistent runtime after integration requests"
 "$cladding_bin" --cladding-dir "$project_root" down
+phase="remove managed socket volumes after persistent shutdown"
 require_socket_volume_count 0
 shutdown_finished_ns=$(monotonic_ns)
 shutdown_elapsed_ms=$(((shutdown_finished_ns - shutdown_started_ns) / 1000000))
+phase="verify persistent runtime shutdown time"
 if [ "$shutdown_elapsed_ms" -ge 8000 ]; then
   echo "cladding down took ${shutdown_elapsed_ms} ms; expected less than 8000 ms" >&2
   exit 1
 fi
+phase="verify Baffle CA persisted across shutdown"
 ca_after=$(sha256_file "$project_root/credentials/baffle/ca.crt")
-test "$ca_before" = "$ca_after"
+if [ "$ca_before" != "$ca_after" ]; then
+  echo "Baffle CA changed during normal shutdown: before=$ca_before after=$ca_after" >&2
+  exit 1
+fi
+phase="restart runtime to verify Baffle CA reuse"
 "$cladding_bin" --cladding-dir "$project_root" up
+phase="verify all managed socket volumes returned after restart"
 require_socket_volume_count 4
+phase="stop restarted persistent runtime"
 "$cladding_bin" --cladding-dir "$project_root" down
+phase="verify restart cleanup removed all managed socket volumes"
 require_socket_volume_count 0
+phase="verify restart cleanup cleared Baffle session socket paths"
 test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
 test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 
