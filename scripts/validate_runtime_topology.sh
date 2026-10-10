@@ -38,6 +38,7 @@ temp_root=$(mktemp -d "$temp_parent/cladding-runtime-topology.XXXXXX")
 workspace="$temp_root/workspace"
 project_root="$workspace/.cladding"
 project_name="topology$$"
+topology_image=localhost/cladding-runtime-topology:latest
 proxy="$project_name-proxy-instance"
 agent="$project_name-agent-instance"
 nw_sandbox="$project_name-nw-sandbox-instance"
@@ -119,10 +120,27 @@ phase="initialize Cladding project"
 )
 
 phase="configure sandbox communication and a shared managed mount"
-jq --arg image localhost/cladding-default:latest --arg runtime "$runtime" \
+host_uid=$(id -u)
+host_gid=$(id -g)
+jq --arg image "$topology_image" \
+  --arg containerfile "$script_dir/runtime-topology-image/Containerfile" \
+  --arg context "$script_dir/runtime-topology-image" \
+  --arg uid "$host_uid" \
+  --arg gid "$host_gid" \
+  --arg runtime "$runtime" \
   '.agent.image = $image
+   | .agent.build = {
+       containerfile: $containerfile,
+       context: $context,
+       args: {UID: $uid, GID: $gid}
+     }
    | .nw_sandbox.enabled = true
    | .nw_sandbox.image = $image
+   | .nw_sandbox.build = {
+       containerfile: $containerfile,
+       context: $context,
+       args: {UID: $uid, GID: $gid}
+     }
    | .use_runsc = ($runtime == "runsc")
    | .mounts = [{
        "mount": "/shared",
@@ -139,7 +157,31 @@ allow if {
 }
 EOF
 phase="build Cladding images and initialize the project CA"
-(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" build)
+podman_wrapper_dir="$temp_root/podman-wrapper"
+mkdir -p "$podman_wrapper_dir"
+cp "$script_dir/podman-build-timer" "$podman_wrapper_dir/podman"
+chmod 0755 "$podman_wrapper_dir/podman"
+real_podman=$(command -v podman)
+topology_build_duration_file="$temp_root/topology-image-build-seconds"
+(
+  cd "$workspace"
+  PATH="$podman_wrapper_dir:$PATH" \
+    CLADDING_TOPOLOGY_REAL_PODMAN="$real_podman" \
+    CLADDING_TOPOLOGY_IMAGE="$topology_image" \
+    CLADDING_TOPOLOGY_BUILD_DURATION_FILE="$topology_build_duration_file" \
+    "$cladding_bin" --cladding-dir "$project_root" build
+)
+topology_build_duration=$(cat "$topology_build_duration_file")
+echo "Topology runtime image build duration: ${topology_build_duration}s"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "### Runtime topology image build"
+    echo
+    echo "Image: \`$topology_image\`."
+    echo
+    echo "Podman build duration: ${topology_build_duration}s (excludes the proxy image build and Baffle CA initialization)."
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
 
 phase="start Cladding topology"
 if (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up --verbose) \
