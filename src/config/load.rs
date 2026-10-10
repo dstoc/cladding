@@ -185,6 +185,7 @@ fn parse_component_object(
     validate_component_keys(object, key, config_path)?;
 
     let build = parse_build_config(object.get("build"), key, config_path)?;
+    let security_opts = parse_security_opts(object.get("security_opts"), key, config_path)?;
     let image = match object.get("image") {
         Some(value) => value
             .as_str()
@@ -218,6 +219,7 @@ fn parse_component_object(
             enabled: true,
             image: image.to_string(),
             build,
+            security_opts,
         }));
     }
 
@@ -234,7 +236,42 @@ fn parse_component_object(
         enabled,
         image,
         build,
+        security_opts,
     }))
+}
+
+fn parse_security_opts(
+    raw: Option<&serde_json::Value>,
+    component_key: &str,
+    config_path: &Path,
+) -> Result<Vec<String>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let field = format!("{component_key}.security_opts");
+    let Some(values) = raw.as_array() else {
+        eprintln!("error: cladding.json field '{field}' must be an array of non-empty strings");
+        eprintln!("file: {}", config_path.display());
+        return Err(Error::message("invalid cladding.json"));
+    };
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let option = value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    eprintln!(
+                        "error: cladding.json field '{field}[{index}]' must be a non-empty string"
+                    );
+                    eprintln!("file: {}", config_path.display());
+                    Error::message("invalid cladding.json")
+                })?;
+            Ok(option.to_string())
+        })
+        .collect()
 }
 
 fn validate_component_keys(
@@ -242,7 +279,7 @@ fn validate_component_keys(
     component_key: &str,
     config_path: &Path,
 ) -> Result<()> {
-    let allowed = ["image", "enabled", "build"];
+    let allowed = ["image", "enabled", "build", "security_opts"];
 
     let mut invalid = false;
     for key in object.keys() {
@@ -559,6 +596,49 @@ mod tests {
             DEFAULT_NW_SANDBOX_SESSION_CONFIG
         );
         assert!(config.agent.build.is_none());
+        assert!(config.agent.security_opts.is_empty());
+    }
+
+    #[test]
+    fn load_cladding_config_parses_component_security_options() {
+        let temp = create_temp_dir("component-security-options");
+        fs::write(
+            temp.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "agent": { "security_opts": ["unmask=/proc/*", "label=disable"] },
+  "nw_sandbox": { "security_opts": ["no-new-privileges"] },
+  "fs_sandbox": {}
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cladding_config_v2(&temp).unwrap();
+
+        assert_eq!(
+            config.agent.security_opts,
+            ["unmask=/proc/*", "label=disable"]
+        );
+        assert_eq!(
+            config.nw_sandbox.as_ref().unwrap().security_opts,
+            ["no-new-privileges"]
+        );
+        assert!(config.fs_sandbox.as_ref().unwrap().security_opts.is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn load_cladding_config_rejects_invalid_component_security_options() {
+        let temp = create_temp_dir("invalid-component-security-options");
+        for security_opts in ["null", r#"["valid", 1]"#, r#"[""]"#] {
+            let raw = format!(r#"{{"name":"demo","agent":{{"security_opts":{security_opts}}}}}"#);
+            fs::write(temp.join("cladding.json"), raw).unwrap();
+            assert!(
+                load_cladding_config_v2(&temp).is_err(),
+                "accepted invalid security_opts {security_opts}"
+            );
+        }
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
