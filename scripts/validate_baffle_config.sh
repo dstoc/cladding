@@ -113,6 +113,20 @@ proxy_socket_exists() {
   podman exec "$1" test -S "/run/cladding/proxy/$2/proxy.sock" >/dev/null 2>&1
 }
 
+initialize_socket_volume() {
+  volume_name=$1
+  current_phase="initialize socket volume $volume_name"
+  podman run --rm --network none --userns keep-id \
+    --user "$container_uid:$container_gid" \
+    --volume "$volume_name:/socket:U" \
+    --entrypoint /bin/sh localhost/cladding-proxy:latest -ec '
+      mkdir -p /socket
+      chmod 0700 /socket
+      test "$(stat -c "%a" /socket)" = 700
+      test "$(stat -c "%u:%g" /socket)" = "$(id -u):$(id -g)"
+    '
+}
+
 require_mode() {
   mode_path=$1
   expected_mode=$2
@@ -358,10 +372,12 @@ run_proxy_startup() {
   socket_volume_agent="$container_prefix-$name-agent"
   podman volume create --opt nocopy "$socket_volume_agent" >/dev/null
   socket_volume_names="$socket_volume_names $socket_volume_agent"
+  initialize_socket_volume "$socket_volume_agent"
   if [ "$sandbox_enabled" = true ]; then
     socket_volume_nw_sandbox="$container_prefix-$name-nw-sandbox"
     podman volume create --opt nocopy "$socket_volume_nw_sandbox" >/dev/null
     socket_volume_names="$socket_volume_names $socket_volume_nw_sandbox"
+    initialize_socket_volume "$socket_volume_nw_sandbox"
   else
     socket_volume_nw_sandbox=
   fi

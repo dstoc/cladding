@@ -8,6 +8,7 @@ from pathlib import Path
 
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/ci.yml"
 TEXT = WORKFLOW.read_text()
+BAFFLE_CONFIG_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_baffle_config.sh"
 
 
 def job_block(name: str) -> str:
@@ -20,6 +21,19 @@ def job_block(name: str) -> str:
 
 
 class BaffleCiAssetsTests(unittest.TestCase):
+    def test_baffle_config_validator_prepares_managed_socket_volume_permissions(self):
+        validator = BAFFLE_CONFIG_VALIDATOR.read_text()
+        self.assertIn('initialize_socket_volume() {', validator)
+        self.assertIn('--user "$container_uid:$container_gid"', validator)
+        self.assertIn('--volume "$volume_name:/socket:U"', validator)
+        self.assertIn('chmod 0700 /socket', validator)
+        self.assertIn(
+            'test "$(stat -c "%u:%g" /socket)" = "$(id -u):$(id -g)"',
+            validator,
+        )
+        self.assertIn('initialize_socket_volume "$socket_volume_agent"', validator)
+        self.assertIn('initialize_socket_volume "$socket_volume_nw_sandbox"', validator)
+
     def test_baffle_is_not_built_from_source_in_ci(self):
         self.assertNotIn("  build-baffle:\n", TEXT)
         self.assertNotRegex(TEXT, r"(?m)^\s*run: cargo install .*baffle-proxy")
