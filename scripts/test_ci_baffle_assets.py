@@ -48,6 +48,23 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('>> "$GITHUB_STEP_SUMMARY"', validator)
         self.assertIn("### Sandbox UDS endpoint diagnostics", validator)
         self.assertIn('diagnose_run_socket_endpoints\n  exit 1', validator)
+        self.assertIn("verify_runtime_path_metadata() {", validator)
+        self.assertIn(
+            'stat -c "observed: mode=%a uid=%u gid=%g path=%n" "$path"',
+            validator,
+        )
+        self.assertIn("### Runtime path metadata failure", validator)
+        self.assertIn(
+            "::error title=Runtime path metadata failure::%s", validator
+        )
+        for phase in (
+            "verify Baffle $component socket directory",
+            "verify Baffle $component proxy socket",
+            "verify $component run directory in $container",
+            "verify $component run socket in $container",
+        ):
+            with self.subTest(phase=phase):
+                self.assertIn(phase, validator)
 
     def test_baffle_config_validator_prepares_managed_socket_volume_permissions(self):
         validator = BAFFLE_CONFIG_VALIDATOR.read_text()

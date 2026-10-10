@@ -695,29 +695,92 @@ if [ "$run_sockets_ready" != true ]; then
   diagnose_run_socket_endpoints
   exit 1
 fi
+
+verify_runtime_path_metadata() {
+  phase=$1
+  container=$2
+  path=$3
+  object_type=$4
+  expected_mode=$5
+  check_owner=$6
+
+  if podman exec "$container" sh -ec '
+    path=$1
+    object_type=$2
+    expected_mode=$3
+    check_owner=$4
+    case "$object_type" in
+      directory) test -d "$path" ;;
+      socket) test -S "$path" ;;
+      *) exit 2 ;;
+    esac
+    test "$(stat -c %a "$path")" = "$expected_mode"
+    if [ "$check_owner" = true ]; then
+      test "$(stat -c %u "$path")" = "$(id -u)"
+    fi
+  ' sh "$path" "$object_type" "$expected_mode" "$check_owner"; then
+    return 0
+  else
+    status=$?
+  fi
+
+  echo "Runtime path metadata check failed: $phase; container=$container path=$path expected_type=$object_type expected_mode=$expected_mode owner_matches_container=$check_owner" >&2
+  observed=$(podman exec "$container" sh -c '
+    for path do
+      if [ -e "$path" ] || [ -S "$path" ] || [ -L "$path" ]; then
+        stat -c "observed: mode=%a uid=%u gid=%g path=%n" "$path" 2>&1 || true
+      else
+        echo "observed: path missing: $path"
+      fi
+      ls -ld "$path" 2>&1 || true
+    done
+  ' sh "$path" 2>&1 || true)
+  printf '%s\n' "$observed" >&2
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      printf '### Runtime path metadata failure\n\n'
+      printf 'Check: `%s`\n\n' "$phase"
+      printf 'Container: `%s`\n\n' "$container"
+      printf 'Expected: type `%s`, mode `%s`, owner matches container: `%s`\n\n' \
+        "$object_type" "$expected_mode" "$check_owner"
+      printf '```text\n%s\n```\n' "$observed"
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  diagnostic=$(printf 'check=%s container=%s path=%s expected_type=%s expected_mode=%s owner_matches_container=%s observed=%s' \
+    "$phase" "$container" "$path" "$object_type" "$expected_mode" \
+    "$check_owner" "$observed" \
+    | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-5000)
+  printf '::error title=Runtime path metadata failure::%s\n' "$diagnostic"
+  exit "$status"
+}
+
 for component in agent nw-sandbox; do
-  podman exec "$proxy" sh -ec '
-    test "$(stat -c %a "/run/cladding/proxy/$1")" = 700
-    test "$(stat -c %a "/run/cladding/proxy/$1/proxy.sock")" = 600
-    test "$(stat -c %u "/run/cladding/proxy/$1/proxy.sock")" = "$(id -u)"
-  ' sh "$component"
+  verify_runtime_path_metadata \
+    "verify Baffle $component socket directory" \
+    "$proxy" "/run/cladding/proxy/$component" directory 700 false
+  verify_runtime_path_metadata \
+    "verify Baffle $component proxy socket" \
+    "$proxy" "/run/cladding/proxy/$component/proxy.sock" socket 600 true
 done
-podman exec "$agent" sh -ec '
-  test "$(stat -c %a /run/cladding/run/nw-sandbox)" = 700
-  test "$(stat -c %a /run/cladding/run/fs-sandbox)" = 700
-  test "$(stat -c %a /run/cladding/run/nw-sandbox/run.sock)" = 700
-  test "$(stat -c %a /run/cladding/run/fs-sandbox/run.sock)" = 700
-  test "$(stat -c %u /run/cladding/run/nw-sandbox/run.sock)" = "$(id -u)"
-  test "$(stat -c %u /run/cladding/run/fs-sandbox/run.sock)" = "$(id -u)"
-'
-podman exec "$sandbox" sh -ec '
-  test "$(stat -c %a /run/cladding/run/nw-sandbox)" = 700
-  test "$(stat -c %a /run/cladding/run/nw-sandbox/run.sock)" = 700
-'
-podman exec "$filesystem_sandbox" sh -ec '
-  test "$(stat -c %a /run/cladding/run/fs-sandbox)" = 700
-  test "$(stat -c %a /run/cladding/run/fs-sandbox/run.sock)" = 700
-'
+for component in nw-sandbox fs-sandbox; do
+  case "$component" in
+    nw-sandbox) producer=$sandbox ;;
+    fs-sandbox) producer=$filesystem_sandbox ;;
+  esac
+  for container in "$agent" "$producer"; do
+    verify_runtime_path_metadata \
+      "verify $component run directory in $container" \
+      "$container" "/run/cladding/run/$component" directory 700 false
+    if [ "$container" = "$agent" ]; then
+      check_owner=true
+    else
+      check_owner=false
+    fi
+    verify_runtime_path_metadata \
+      "verify $component run socket in $container" \
+      "$container" "/run/cladding/run/$component/run.sock" socket 700 "$check_owner"
+  done
+done
 test "$(stat_mode "$project_root/credentials/baffle")" = 700
 test "$(stat_mode "$project_root/credentials/baffle/ca.crt")" = 644
 test "$(stat_mode "$project_root/credentials/baffle/ca-key.pem")" = 600
