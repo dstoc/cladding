@@ -8,6 +8,10 @@ from pathlib import Path
 
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/ci.yml"
 TEXT = WORKFLOW.read_text()
+BAFFLE_CONFIG_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_baffle_config.sh"
+BAFFLE_RUNTIME_VALIDATOR = (
+    Path(__file__).parents[1] / "scripts/validate_baffle_runtime.sh"
+)
 
 
 def job_block(name: str) -> str:
@@ -20,6 +24,61 @@ def job_block(name: str) -> str:
 
 
 class BaffleCiAssetsTests(unittest.TestCase):
+    def test_baffle_runtime_reports_each_sandbox_socket_failure(self):
+        validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
+        self.assertIn("diagnose_run_socket_endpoints() {", validator)
+        self.assertIn("for component in nw-sandbox fs-sandbox; do", validator)
+        self.assertIn('if [ -S "$socket_path" ]; then', validator)
+        self.assertIn(
+            "podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}}",
+            validator,
+        )
+        self.assertIn("podman inspect --format '{{range .Mounts}}", validator)
+        self.assertIn('podman logs --tail 50 "$container"', validator)
+        self.assertIn(
+            'redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"',
+            validator,
+        )
+        self.assertIn(
+            'Saved cladding up --verbose output (fixture credentials redacted):',
+            validator,
+        )
+        self.assertIn('cat "$temp_root/startup.redacted.log"', validator)
+        self.assertIn('cat "$diagnostics_file"', validator)
+        self.assertIn('>> "$GITHUB_STEP_SUMMARY"', validator)
+        self.assertIn("### Sandbox UDS endpoint diagnostics", validator)
+        self.assertIn('diagnose_run_socket_endpoints\n  exit 1', validator)
+        self.assertIn("verify_runtime_path_metadata() {", validator)
+        self.assertIn(
+            'stat -c "observed: mode=%a uid=%u gid=%g path=%n" "$path"',
+            validator,
+        )
+        self.assertIn("### Runtime path metadata failure", validator)
+        self.assertIn(
+            "::error title=Runtime path metadata failure::%s", validator
+        )
+        for phase in (
+            "verify Baffle $component socket directory",
+            "verify Baffle $component proxy socket",
+            "verify $component run directory in $container",
+            "verify $component run socket in $container",
+        ):
+            with self.subTest(phase=phase):
+                self.assertIn(phase, validator)
+
+    def test_baffle_config_validator_prepares_managed_socket_volume_permissions(self):
+        validator = BAFFLE_CONFIG_VALIDATOR.read_text()
+        self.assertIn('initialize_socket_volume() {', validator)
+        self.assertIn('--user "$container_uid:$container_gid"', validator)
+        self.assertIn('--volume "$volume_name:/socket:U"', validator)
+        self.assertIn('chmod 0700 /socket', validator)
+        self.assertIn(
+            'test "$(stat -c "%u:%g" /socket)" = "$(id -u):$(id -g)"',
+            validator,
+        )
+        self.assertIn('initialize_socket_volume "$socket_volume_agent"', validator)
+        self.assertIn('initialize_socket_volume "$socket_volume_nw_sandbox"', validator)
+
     def test_baffle_is_not_built_from_source_in_ci(self):
         self.assertNotIn("  build-baffle:\n", TEXT)
         self.assertNotRegex(TEXT, r"(?m)^\s*run: cargo install .*baffle-proxy")

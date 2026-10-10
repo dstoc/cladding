@@ -731,7 +731,9 @@ exit 0
         "cladding run changed the persistent Baffle CA key"
     );
     assert!(
-        !run_log.lines().any(|line| line.starts_with("run --rm ")),
+        !run_log.lines().any(|line| {
+            line.contains("--entrypoint /opt/tools/bin/baffle") && line.contains("ca init")
+        }),
         "cladding run attempted to initialize another Baffle CA"
     );
     let runtime_script = run_log
@@ -856,6 +858,29 @@ exit 0
     assert!(proxy_start.contains("--userns keep-id"), "{proxy_start}");
     assert!(proxy_start.contains("--init"), "{proxy_start}");
     assert!(proxy_start.contains("app=proxy"), "{proxy_start}");
+    let proxy_start_index = startup_log
+        .lines()
+        .position(|line| line.contains("--name demo-proxy-instance"))
+        .expect("proxy start command is logged");
+    for channel in ["baffle-agent", "baffle-nw-sandbox"] {
+        let helper_command = format!(
+            "run --rm --network none --userns keep-id --volume cladding-demo-socket-{channel}:/socket:U --entrypoint /bin/sh localhost/cladding-proxy:latest -ec mkdir -p /socket && chmod 0700 /socket"
+        );
+        let helper_index = startup_log
+            .lines()
+            .position(|line| line == helper_command)
+            .unwrap_or_else(|| {
+                panic!("missing Baffle volume preparation: {helper_command}\n{startup_log}")
+            });
+        assert!(
+            helper_index < proxy_start_index,
+            "Baffle volume permissions must be set before proxy startup: {startup_log}"
+        );
+    }
+    assert!(
+        !startup_log.contains("cladding-demo-socket-run-nw-sandbox:/socket:U"),
+        "Baffle permission preparation must not change sandbox run-volume setup"
+    );
     let created_socket_volumes = fs::read_to_string(&socket_volume_state).unwrap();
     assert_eq!(
         created_socket_volumes.lines().count(),

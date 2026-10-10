@@ -505,7 +505,6 @@ jobs:
           echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
           echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe" >> "$GITHUB_ENV"
-          echo "BAFFLE_VALIDATION_CHECK_HOST_UID=false" >> "$GITHUB_ENV"
           echo "BAFFLE_VALIDATION_TMP_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - name: Install pinned Podman for macOS
         run: |

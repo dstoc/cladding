@@ -138,7 +138,7 @@ mod tests {
                     mount_path: "/run/cladding/proxy/agent".to_string(),
                     read_only: false,
                     source: RuntimeMountSource::NamedVolumeChown {
-                        claim_name: "demo-proxy-relay-agent".to_string(),
+                        claim_name: "demo-socket-baffle-agent".to_string(),
                     },
                 },
                 RuntimeMount {
@@ -164,7 +164,7 @@ mod tests {
                 "--volume",
                 "demo-cache:/workspace/data",
                 "--volume",
-                "demo-proxy-relay-agent:/run/cladding/proxy/agent:U",
+                "demo-socket-baffle-agent:/run/cladding/proxy/agent:U",
                 "--volume",
                 "cladding-demo-agent-empty-workspace-tmp:/workspace/tmp",
                 "--volume",

@@ -114,7 +114,8 @@ sys.stdout.buffer.write(output.replace(secret, b"[REDACTED]") if secret else out
 }
 
 redact_startup_log() {
-  CLADDING_REDACT_SECRETS='cladding-test-old-value
+  CLADDING_REDACT_SECRETS='client-supplied-test-value
+cladding-test-old-value
 cladding-test-new-value' python3 -c '
 import os
 import sys
@@ -349,7 +350,7 @@ mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
 phase="start Cladding runtime"
 if "$cladding_bin" --cladding-dir "$project_root" up --verbose > "$temp_root/startup.log" 2>&1; then
-  :
+  redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"
 else
   status=$?
   redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"
@@ -617,6 +618,66 @@ for component in agent nw-sandbox; do
     /run/cladding/ca/baffle.crt /usr/local/share/ca-certificates/baffle.crt
 done
 podman exec "$proxy" test -x /run/podman-init
+diagnose_run_socket_endpoints() {
+  diagnostics_file="$temp_root/run-uds-diagnostics.log"
+  {
+    for component in nw-sandbox fs-sandbox; do
+      socket_path="/run/cladding/run/$component/run.sock"
+      case "$component" in
+        nw-sandbox) server_container=$sandbox ;;
+        fs-sandbox) server_container=$filesystem_sandbox ;;
+      esac
+      for container in "$server_container" "$agent"; do
+        echo "Socket path: container=$container path=$socket_path"
+        podman exec "$container" sh -c '
+          socket_path=$1
+          parent=${socket_path%/*}
+          if [ -S "$socket_path" ]; then
+            stat -c "socket: mode=%a uid=%u gid=%g path=%n" "$socket_path"
+          elif [ -e "$socket_path" ] || [ -L "$socket_path" ]; then
+            stat -c "non-socket path: mode=%a uid=%u gid=%g path=%n" "$socket_path"
+          else
+            echo "socket path is missing: $socket_path"
+          fi
+          stat -c "parent: mode=%a uid=%u gid=%g path=%n" "$parent" || true
+          ls -la "$parent" || true
+        ' sh "$socket_path" 2>&1 || true
+      done
+    done
+
+    for container in "$agent" "$sandbox" "$filesystem_sandbox"; do
+      echo "Container state: $container"
+      podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
+        "$container" 2>&1 || true
+      echo "Container mounts: $container"
+      podman inspect --format '{{range .Mounts}}{{.Type}} name={{.Name}} source={{.Source}} dest={{.Destination}} rw={{.RW}}{{"\n"}}{{end}}' \
+        "$container" 2>&1 || true
+      echo "Container logs: $container"
+      podman logs --tail 50 "$container" 2>&1 || true
+    done
+
+    echo "Saved cladding up --verbose output (fixture credentials redacted):"
+    if [ -s "$temp_root/startup.redacted.log" ]; then
+      cat "$temp_root/startup.redacted.log"
+    else
+      echo "startup output is unavailable"
+    fi
+  } 2>&1 | redact_fixture_values > "$diagnostics_file" || true
+
+  cat "$diagnostics_file"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      printf '### Sandbox UDS endpoint diagnostics\n\n'
+      printf 'The integration wait did not find both `run.sock` endpoints in the agent.\n\n'
+      printf '```text\n'
+      cat "$diagnostics_file"
+      printf '\n```\n'
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  diagnostic=$(tr '\r\n' '  ' < "$diagnostics_file" \
+    | sed 's/%/%25/g' | cut -c 1-5000)
+  printf '::error title=Sandbox UDS endpoint diagnostics::%s\n' "$diagnostic"
+}
 phase="wait for sandbox UDS endpoints"
 run_sockets_ready=false
 attempt=0
@@ -631,31 +692,95 @@ while [ "$attempt" -lt 60 ]; do
 done
 if [ "$run_sockets_ready" != true ]; then
   echo "agent-to-sandbox UDS endpoints did not become ready" >&2
+  diagnose_run_socket_endpoints
   exit 1
 fi
+
+verify_runtime_path_metadata() {
+  phase=$1
+  container=$2
+  path=$3
+  object_type=$4
+  expected_mode=$5
+  check_owner=$6
+
+  if podman exec "$container" sh -ec '
+    path=$1
+    object_type=$2
+    expected_mode=$3
+    check_owner=$4
+    case "$object_type" in
+      directory) test -d "$path" ;;
+      socket) test -S "$path" ;;
+      *) exit 2 ;;
+    esac
+    test "$(stat -c %a "$path")" = "$expected_mode"
+    if [ "$check_owner" = true ]; then
+      test "$(stat -c %u "$path")" = "$(id -u)"
+    fi
+  ' sh "$path" "$object_type" "$expected_mode" "$check_owner"; then
+    return 0
+  else
+    status=$?
+  fi
+
+  echo "Runtime path metadata check failed: $phase; container=$container path=$path expected_type=$object_type expected_mode=$expected_mode owner_matches_container=$check_owner" >&2
+  observed=$(podman exec "$container" sh -c '
+    for path do
+      if [ -e "$path" ] || [ -S "$path" ] || [ -L "$path" ]; then
+        stat -c "observed: mode=%a uid=%u gid=%g path=%n" "$path" 2>&1 || true
+      else
+        echo "observed: path missing: $path"
+      fi
+      ls -ld "$path" 2>&1 || true
+    done
+  ' sh "$path" 2>&1 || true)
+  printf '%s\n' "$observed" >&2
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      printf '### Runtime path metadata failure\n\n'
+      printf 'Check: `%s`\n\n' "$phase"
+      printf 'Container: `%s`\n\n' "$container"
+      printf 'Expected: type `%s`, mode `%s`, owner matches container: `%s`\n\n' \
+        "$object_type" "$expected_mode" "$check_owner"
+      printf '```text\n%s\n```\n' "$observed"
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  diagnostic=$(printf 'check=%s container=%s path=%s expected_type=%s expected_mode=%s owner_matches_container=%s observed=%s' \
+    "$phase" "$container" "$path" "$object_type" "$expected_mode" \
+    "$check_owner" "$observed" \
+    | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-5000)
+  printf '::error title=Runtime path metadata failure::%s\n' "$diagnostic"
+  exit "$status"
+}
+
 for component in agent nw-sandbox; do
-  podman exec "$proxy" sh -ec '
-    test "$(stat -c %a "/run/cladding/proxy/$1")" = 700
-    test "$(stat -c %a "/run/cladding/proxy/$1/proxy.sock")" = 600
-    test "$(stat -c %u "/run/cladding/proxy/$1/proxy.sock")" = "$(id -u)"
-  ' sh "$component"
+  verify_runtime_path_metadata \
+    "verify Baffle $component socket directory" \
+    "$proxy" "/run/cladding/proxy/$component" directory 700 false
+  verify_runtime_path_metadata \
+    "verify Baffle $component proxy socket" \
+    "$proxy" "/run/cladding/proxy/$component/proxy.sock" socket 600 true
 done
-podman exec "$agent" sh -ec '
-  test "$(stat -c %a /run/cladding/run/nw-sandbox)" = 700
-  test "$(stat -c %a /run/cladding/run/fs-sandbox)" = 700
-  test "$(stat -c %a /run/cladding/run/nw-sandbox/run.sock)" = 700
-  test "$(stat -c %a /run/cladding/run/fs-sandbox/run.sock)" = 700
-  test "$(stat -c %u /run/cladding/run/nw-sandbox/run.sock)" = "$(id -u)"
-  test "$(stat -c %u /run/cladding/run/fs-sandbox/run.sock)" = "$(id -u)"
-'
-podman exec "$sandbox" sh -ec '
-  test "$(stat -c %a /run/cladding/run/nw-sandbox)" = 700
-  test "$(stat -c %a /run/cladding/run/nw-sandbox/run.sock)" = 700
-'
-podman exec "$filesystem_sandbox" sh -ec '
-  test "$(stat -c %a /run/cladding/run/fs-sandbox)" = 700
-  test "$(stat -c %a /run/cladding/run/fs-sandbox/run.sock)" = 700
-'
+for component in nw-sandbox fs-sandbox; do
+  case "$component" in
+    nw-sandbox) producer=$sandbox ;;
+    fs-sandbox) producer=$filesystem_sandbox ;;
+  esac
+  for container in "$agent" "$producer"; do
+    verify_runtime_path_metadata \
+      "verify $component run directory in $container" \
+      "$container" "/run/cladding/run/$component" directory 700 false
+    if [ "$container" = "$agent" ]; then
+      check_owner=true
+    else
+      check_owner=false
+    fi
+    verify_runtime_path_metadata \
+      "verify $component run socket in $container" \
+      "$container" "/run/cladding/run/$component/run.sock" socket 700 "$check_owner"
+  done
+done
 test "$(stat_mode "$project_root/credentials/baffle")" = 700
 test "$(stat_mode "$project_root/credentials/baffle/ca.crt")" = 644
 test "$(stat_mode "$project_root/credentials/baffle/ca-key.pem")" = 600

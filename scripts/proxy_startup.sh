@@ -8,35 +8,16 @@ CONTROL_SOCKET=${BAFFLE_CONTROL_SOCKET:-/run/baffle/control.sock}
 DEFAULT_CONTROL_SOCKET=/run/baffle/control.sock
 SOCKET_DIR=${BAFFLE_SOCKET_DIR:-/run/cladding/proxy}
 NW_SANDBOX_ENABLED=${CLADDING_NW_SANDBOX_ENABLED:-false}
-SOCKET_RELAY=${CLADDING_BAFFLE_SOCKET_RELAY:-false}
 AGENT_SESSION_CONFIG=${CLADDING_AGENT_SESSION_CONFIG:-agent.toml}
 NW_SANDBOX_SESSION_CONFIG=${CLADDING_NW_SANDBOX_SESSION_CONFIG:-nw-sandbox.toml}
 daemon_pid=
-relay_pids=
 control_socket_dir=
 private_control_dir=
-private_data_dir=
 runtime_control_socket=
 runtime_config=
 
 log() {
     printf '[baffle-startup] %s\n' "$*" >&2
-}
-
-ensure_mode() {
-    mode_path=$1
-    expected_mode=$2
-    description=$3
-    observed_mode=$(stat -c '%a' "$mode_path" 2>/dev/null || printf 'unavailable')
-    if [ "$observed_mode" != "$expected_mode" ]; then
-        if ! chmod "$expected_mode" "$mode_path"; then
-            fail "$description: failed to set path=$mode_path expected_mode=0$expected_mode observed_mode=$observed_mode"
-        fi
-        observed_mode=$(stat -c '%a' "$mode_path" 2>/dev/null || printf 'unavailable')
-    fi
-    if [ "$observed_mode" != "$expected_mode" ]; then
-        fail "$description: mode mismatch path=$mode_path expected_mode=0$expected_mode observed_mode=$observed_mode"
-    fi
 }
 
 fail() {
@@ -65,16 +46,6 @@ stop_daemon() {
     fi
 }
 
-stop_socket_relays() {
-    for relay_pid in $relay_pids; do
-        kill -TERM "$relay_pid" 2>/dev/null || true
-    done
-    for relay_pid in $relay_pids; do
-        wait "$relay_pid" 2>/dev/null || true
-    done
-    relay_pids=
-}
-
 remove_control_socket_alias() {
     alias_path=$1
     if [ -n "$runtime_control_socket" ] \
@@ -88,26 +59,11 @@ cleanup() {
     status=$?
     trap - EXIT
     stop_daemon
-    stop_socket_relays
     remove_control_socket_alias "$CONTROL_SOCKET"
     remove_control_socket_alias "$DEFAULT_CONTROL_SOCKET"
-    if [ "$SOCKET_RELAY" = true ]; then
-        for relay_component in agent nw-sandbox; do
-            relay_socket="$SOCKET_DIR/$relay_component/proxy.sock"
-            if [ -S "$relay_socket" ]; then
-                rm -f "$relay_socket" || true
-            fi
-        done
-    fi
     if [ -n "$private_control_dir" ]; then
         rm -f "$private_control_dir/daemon.toml" "$private_control_dir/control.sock" || true
         rmdir "$private_control_dir" 2>/dev/null || true
-    fi
-    if [ -n "$private_data_dir" ]; then
-        rm -f "$private_data_dir/agent/proxy.sock" \
-            "$private_data_dir/nw-sandbox/proxy.sock" || true
-        rmdir "$private_data_dir/agent" "$private_data_dir/nw-sandbox" \
-            "$private_data_dir" 2>/dev/null || true
     fi
     exit "$status"
 }
@@ -129,12 +85,6 @@ case "$NW_SANDBOX_ENABLED" in
     true|false) ;;
     *) fail "CLADDING_NW_SANDBOX_ENABLED must be true or false" ;;
 esac
-case "$SOCKET_RELAY" in
-    true) command -v socat >/dev/null 2>&1 || fail "socat is required for Baffle socket relay mode" ;;
-    false) ;;
-    *) fail "CLADDING_BAFFLE_SOCKET_RELAY must be true or false" ;;
-esac
-
 validate_session_config_name() {
     session_config_name=$1
     case "$session_config_name" in
@@ -188,27 +138,6 @@ runtime_control_socket="$private_control_dir/control.sock"
 rm -f "$private_control_dir/daemon.toml" "$runtime_control_socket"
 
 baffle_socket_dir="$SOCKET_DIR"
-if [ "$SOCKET_RELAY" = true ]; then
-    private_data_dir=$(mktemp -d /tmp/cladding-baffle-data.XXXXXX) \
-        || fail "failed to create private Baffle data-socket directory"
-    if ! chmod 0700 "$private_data_dir"; then
-        fail "failed to secure private Baffle data-socket directory"
-    fi
-    if ! mkdir -p "$private_data_dir/agent"; then
-        fail "failed to create private Baffle agent socket directory"
-    fi
-    if [ "$NW_SANDBOX_ENABLED" = true ] && ! mkdir -p "$private_data_dir/nw-sandbox"; then
-        fail "failed to create private Baffle network-sandbox socket directory"
-    fi
-    if ! chmod 0700 "$private_data_dir" "$private_data_dir/agent"; then
-        fail "failed to secure private Baffle agent socket directory"
-    fi
-    if [ "$NW_SANDBOX_ENABLED" = true ] \
-        && ! chmod 0700 "$private_data_dir/nw-sandbox"; then
-        fail "failed to secure private Baffle network-sandbox socket directory"
-    fi
-    baffle_socket_dir=$private_data_dir
-fi
 
 if [ -e "$CONTROL_SOCKET" ] || [ -L "$CONTROL_SOCKET" ]; then
     if ! rm -f "$CONTROL_SOCKET"; then
@@ -316,64 +245,11 @@ if ! cd "$CONFIG_DIR/sessions"; then
     fail "cannot read Baffle session configuration directory: $CONFIG_DIR/sessions"
 fi
 
-start_socket_relay() {
-    component=$1
-    private_socket="$private_data_dir/$component/proxy.sock"
-    relay_dir="$SOCKET_DIR/$component"
-    public_socket="$relay_dir/proxy.sock"
-    attempt=0
-    while [ "$attempt" -lt 300 ] && [ ! -S "$private_socket" ]; do
-        if [ ! -d "/proc/$daemon_pid" ]; then
-            fail "Baffle daemon exited before creating its $component data socket"
-        fi
-        attempt=$((attempt + 1))
-        sleep 0.1
-    done
-    if [ ! -S "$private_socket" ]; then
-        fail "timed out waiting for Baffle $component data socket: $private_socket"
-    fi
-
-    ensure_mode "$relay_dir" 700 \
-        "Baffle $component relay directory mode"
-    if [ -S "$public_socket" ]; then
-        rm -f "$public_socket" || fail "failed to remove stale proxy relay socket: $public_socket"
-    elif [ -e "$public_socket" ]; then
-        fail "proxy relay socket path exists and is not a socket: $public_socket"
-    fi
-
-    # The umask creates a mode-0600 socket without a post-bind chmod on shared filesystems.
-    (
-        umask 0177
-        exec socat "UNIX-LISTEN:$public_socket,fork,unlink-close" \
-            "UNIX-CONNECT:$private_socket"
-    ) &
-    relay_pid=$!
-    relay_pids="$relay_pids $relay_pid"
-
-    attempt=0
-    while [ "$attempt" -lt 50 ] && [ ! -S "$public_socket" ]; do
-        if ! kill -0 "$relay_pid" 2>/dev/null; then
-            fail "socat relay exited before creating the $component socket"
-        fi
-        attempt=$((attempt + 1))
-        sleep 0.1
-    done
-    if [ ! -S "$public_socket" ]; then
-        fail "timed out waiting for the $component proxy relay socket: $public_socket"
-    fi
-    ensure_mode "$public_socket" 600 "Baffle $component relay socket mode"
-    log "started trusted $component data-socket relay"
-}
-
 create_session() {
     component=$1
     session_file=$2
 
-    if [ "$SOCKET_RELAY" = true ]; then
-        session_socket_dir="$private_data_dir/$component"
-    else
-        session_socket_dir="$SOCKET_DIR/$component"
-    fi
+    session_socket_dir="$SOCKET_DIR/$component"
 
     probe_socket_bind() {
         probe_component=$1
@@ -490,9 +366,6 @@ create_session() {
             fi
         done
         fail "failed to create session from $session_file (exit code $status)"
-    fi
-    if [ "$SOCKET_RELAY" = true ]; then
-        start_socket_relay "$component"
     fi
 }
 

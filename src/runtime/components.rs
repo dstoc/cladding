@@ -135,10 +135,6 @@ fn build_proxy_component(
                 name: "CLADDING_NW_SANDBOX_SESSION_CONFIG".to_string(),
                 value: config.nw_sandbox_session_config().to_string(),
             },
-            RuntimeEnvVar {
-                name: "CLADDING_BAFFLE_SOCKET_RELAY".to_string(),
-                value: "true".to_string(),
-            },
         ],
         mounts,
         ports: Vec::new(),
@@ -588,8 +584,16 @@ mod tests {
             Some("true")
         );
         assert_eq!(
-            env_value(&spec.proxy.containers[0], "CLADDING_BAFFLE_SOCKET_RELAY"),
-            Some("true")
+            spec.proxy.containers[0]
+                .env
+                .iter()
+                .map(|env| env.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "CLADDING_NW_SANDBOX_ENABLED",
+                "CLADDING_AGENT_SESSION_CONFIG",
+                "CLADDING_NW_SANDBOX_SESSION_CONFIG",
+            ]
         );
         assert!(spec.proxy.containers[0].ports.is_empty());
         assert_eq!(
@@ -1033,11 +1037,6 @@ mod tests {
                 "/tmp/project/.cladding/runtime/sockets/agent/inject"
             ))
         );
-        assert_eq!(
-            env_value(proxy, "CLADDING_BAFFLE_SOCKET_RELAY"),
-            Some("true")
-        );
-
         for (component, container, own_socket, other_socket) in [
             (
                 &spec.agent,
