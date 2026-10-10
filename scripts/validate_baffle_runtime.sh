@@ -450,6 +450,43 @@ report_client_failure() {
   printf '::error title=Baffle client workload diagnostics::%s\n' "$diagnostic"
 }
 
+redact_fixture_values() {
+  CLADDING_REDACT_SECRETS='client-supplied-test-value
+cladding-test-old-value
+cladding-test-new-value' python3 -c '
+import os
+import sys
+
+output = sys.stdin.buffer.read()
+for secret in os.environb[b"CLADDING_REDACT_SECRETS"].splitlines():
+    output = output.replace(secret, b"[REDACTED]")
+sys.stdout.buffer.write(output)
+'
+}
+
+report_curl_failure() {
+  container=$1
+  error_file=$2
+  client_state=$(podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
+    "$container" 2>&1 || true)
+  proxy_state=$(podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
+    "$proxy" 2>&1 || true)
+  curl_error=$(tail -n 15 "$error_file" 2>/dev/null || true)
+  baffle_state=$(podman exec "$proxy" /opt/tools/bin/baffle list 2>&1 || true)
+  proxy_logs=$(podman logs "$proxy" 2>&1 | tail -n 20 || true)
+  origin_state=$(podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
+    "$origin_name" 2>&1 || true)
+  origin_events=$(podman exec "$origin_name" tail -n 15 /tmp/baffle-integration/events.jsonl 2>&1 || true)
+  diagnostics=$(printf 'Client state: %s\nCurl error:\n%s\nProxy state: %s\nBaffle sessions:\n%s\nProxy logs:\n%s\nTLS origin state: %s\nRecent origin requests:\n%s\n' \
+    "$client_state" "$curl_error" "$proxy_state" "$baffle_state" "$proxy_logs" \
+    "$origin_state" "$origin_events" \
+    | redact_fixture_values)
+  printf '%s\n' "$diagnostics" >&2
+  diagnostic=$(printf '%s' "$diagnostics" \
+    | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-5000)
+  printf '::error title=Baffle HTTPS request diagnostics::%s\n' "$diagnostic"
+}
+
 verify_orphan_reaping() {
   container=$1
   orphan_pid=$(podman exec "$container" python3 -c '
@@ -563,11 +600,25 @@ fs_socket_output=$(podman exec "$agent" sh -ec \
 test "$fs_socket_output" = "fs-sandbox-uds-ok"
 
 phase="authorize agent HTTPS request through scoped proxy"
-body=$(agent_curl --fail https://localhost:8443/authorized/curl \
-  -H "Authorization: Bearer client-supplied-test-value")
+if body=$(agent_curl --fail https://localhost:8443/authorized/curl \
+  -H "Authorization: Bearer client-supplied-test-value" \
+  2>"$temp_root/agent-curl.stderr"); then
+  :
+else
+  status=$?
+  report_curl_failure "$agent" "$temp_root/agent-curl.stderr"
+  exit "$status"
+fi
 printf '%s' "$body" | jq -e '.authorization == "old"' >/dev/null
 phase="authorize network-sandbox HTTPS request through scoped proxy"
-body=$(sandbox_curl --fail https://localhost:9443/sandbox/ordinary)
+if body=$(sandbox_curl --fail https://localhost:9443/sandbox/ordinary \
+  2>"$temp_root/sandbox-curl.stderr"); then
+  :
+else
+  status=$?
+  report_curl_failure "$sandbox" "$temp_root/sandbox-curl.stderr"
+  exit "$status"
+fi
 printf '%s' "$body" | jq -e '.authorization == "none"' >/dev/null
 phase="deny agent request to an unapproved host"
 expect_curl_denied "$agent" --insecure https://127.0.0.1:8443/authorized/wrong-host
@@ -685,7 +736,14 @@ cp "$temp_root/agent.valid.toml" "$project_root/config/proxy/sessions/$agent_ses
 reload_output=$("$cladding_bin" --cladding-dir "$project_root" reload-proxy 2>&1)
 printf '%s\n' "$reload_output" | grep -E 'agent.*unchanged|unchanged.*agent' >/dev/null
 printf '%s\n' "$reload_output" | grep -E 'nw-sandbox.*unchanged|unchanged.*nw-sandbox' >/dev/null
-body=$(agent_curl --fail https://localhost:8443/replacement/after-invalid-reload)
+if body=$(agent_curl --fail https://localhost:8443/replacement/after-invalid-reload \
+  2>"$temp_root/reload-curl.stderr"); then
+  :
+else
+  status=$?
+  report_curl_failure "$agent" "$temp_root/reload-curl.stderr"
+  exit "$status"
+fi
 printf '%s' "$body" | jq -e '.authorization == "new"' >/dev/null
 
 phase="verify request records do not contain fake secret values"
