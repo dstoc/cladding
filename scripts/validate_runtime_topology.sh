@@ -41,7 +41,6 @@ project_name="topology$$"
 proxy="$project_name-proxy-instance"
 agent="$project_name-agent-instance"
 nw_sandbox="$project_name-nw-sandbox-instance"
-fs_sandbox="$project_name-fs-sandbox-instance"
 phase="initialize fixture"
 
 volume_names() {
@@ -95,7 +94,7 @@ cleanup() {
       echo "Cladding partial-startup output:" >&2
       cat "$temp_root/partial-startup.log" >&2
     fi
-    for container in "$proxy" "$agent" "$nw_sandbox" "$fs_sandbox"; do
+    for container in "$proxy" "$agent" "$nw_sandbox"; do
       if podman inspect "$container" >/dev/null 2>&1; then
         echo "Podman state for $container:" >&2
         podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
@@ -124,7 +123,6 @@ jq --arg image localhost/cladding-default:latest --arg runtime "$runtime" \
   '.agent.image = $image
    | .nw_sandbox.enabled = true
    | .nw_sandbox.image = $image
-   | .fs_sandbox = {"enabled": true, "image": $image}
    | .use_runsc = ($runtime == "runsc")
    | .mounts = [{
        "mount": "/shared",
@@ -140,13 +138,6 @@ allow if {
   input.command == "/bin/echo"
 }
 EOF
-cat >> "$project_root/config/fs_sandbox/main.rego" <<'EOF'
-
-allow if {
-  input.command == "/bin/echo"
-}
-EOF
-
 phase="build Cladding images and initialize the project CA"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" build)
 
@@ -159,7 +150,7 @@ else
   cat "$temp_root/startup.log" >&2
   exit "$status"
 fi
-require_volume_count inter-container-socket 4
+require_volume_count inter-container-socket 3
 require_volume_count managed-mount 1
 
 phase="wait for Baffle control UDS and session sockets"
@@ -188,14 +179,36 @@ podman exec "$proxy" sh -ec '
   done
 '
 
+assert_denied_connect() {
+  container=$1
+  component=$2
+  output="$temp_root/$component-denied-connect.log"
+  if podman exec --env no_proxy= --env NO_PROXY= "$container" curl \
+    --silent --show-error --verbose \
+    --proxy http://127.0.0.1:3128 --noproxy '' \
+    --connect-timeout 5 --max-time 10 \
+    https://example.com > "$output" 2>&1; then
+    echo "$component Baffle data socket unexpectedly allowed CONNECT to example.com" >&2
+    cat "$output" >&2
+    exit 1
+  fi
+  if ! grep -F '> CONNECT example.com:443 HTTP/' "$output" >/dev/null \
+    || ! grep -E '< HTTP/[0-9.]+ 403([[:space:]]|$)' "$output" >/dev/null; then
+    echo "$component Baffle data socket did not return the expected denied CONNECT response" >&2
+    cat "$output" >&2
+    exit 1
+  fi
+}
+
+phase="verify agent Baffle data socket denies an unlisted CONNECT"
+assert_denied_connect "$agent" agent
+phase="verify network-sandbox Baffle data socket denies an unlisted CONNECT"
+assert_denied_connect "$nw_sandbox" nw-sandbox
+
 phase="verify agent-to-sandbox UDS communication"
 nw_output=$(podman exec "$agent" sh -ec \
   'cd /home/user && run-in-nw-sandbox -- /bin/echo nw-sandbox-uds-ok')
 test "$nw_output" = nw-sandbox-uds-ok
-fs_output=$(podman exec "$agent" sh -ec \
-  'cd /home/user && run-in-fs-sandbox -- /bin/echo fs-sandbox-uds-ok')
-test "$fs_output" = fs-sandbox-uds-ok
-
 phase="verify shared managed mount communication"
 podman exec "$agent" sh -ec 'printf "agent-to-sandbox-ok\n" > /shared/topology-marker'
 test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)" = agent-to-sandbox-ok
@@ -207,20 +220,20 @@ test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
 test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 
 phase="fail after partial startup and clean owned resources"
-# The filesystem sandbox starts last, so this runtime option fails after the
-# proxy, agent, network sandbox, and managed volumes have been created.
-jq '.fs_sandbox.security_opts = ["cladding-invalid-security-option"]' \
+# The network sandbox starts after the proxy and agent, so this runtime option
+# fails after Cladding has created several owned resources.
+jq '.nw_sandbox.security_opts = ["cladding-invalid-security-option"]' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 startup_status=0
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up --verbose) \
   > "$temp_root/partial-startup.log" 2>&1 || startup_status=$?
 if [ "$startup_status" -eq 0 ]; then
-  echo "Cladding accepted the deliberate filesystem-sandbox startup failure" >&2
+  echo "Cladding accepted the deliberate network-sandbox startup failure" >&2
   exit 1
 fi
-if ! grep -F "$fs_sandbox" "$temp_root/partial-startup.log" >/dev/null; then
-  echo "Cladding failed before attempting the filesystem-sandbox container" >&2
+if ! grep -F "$nw_sandbox" "$temp_root/partial-startup.log" >/dev/null; then
+  echo "Cladding failed before attempting the network-sandbox container" >&2
   exit 1
 fi
 require_no_project_resources

@@ -28,11 +28,11 @@ jobs:
           }
           trap cleanup EXIT
 
-          podman machine init --cpus 2 --memory 4096
+          podman machine init --cpus 2 --memory 4096 --rootful=false "$machine_name"
           for attempt in 1 2 3; do
             echo "Podman Machine startup cycle $attempt"
             podman machine start "$machine_name"
-            rootless=$(podman info --format '{{.Host.Security.Rootless}}')
+            rootless=$(podman --connection "$machine_name" info --format '{{.Host.Security.Rootless}}')
             test "$rootless" = true
             podman machine ssh "$machine_name" id -u
             podman machine stop "$machine_name"
