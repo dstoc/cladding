@@ -18,6 +18,7 @@ pub struct ExecutionComponentConfig {
     pub enabled: bool,
     pub image: String,
     pub build: Option<ImageBuildConfig>,
+    pub security_opts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

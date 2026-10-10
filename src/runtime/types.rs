@@ -41,6 +41,7 @@ impl RuntimeNames {
 pub struct RuntimeComponent {
     pub name: String,
     pub use_runsc: bool,
+    pub security_opts: Vec<String>,
     pub labels: BTreeMap<String, String>,
     pub network_name: String,
     pub containers: Vec<RuntimeContainer>,

@@ -260,10 +260,13 @@ default.
 
 Each component can use an existing image or build one from a Containerfile. The component `image` value is the build output tag when `build` is also set. If `image` is omitted, `cladding build` generates a local tag such as `localhost/cladding-myproject-agent:latest`.
 
+Execution components can set `security_opts` to an array of Podman security options. Cladding passes each value as a separate `--security-opt` argument when it starts that component. For example, this passes `unmask=/proc/*` as one literal argument to the agent container:
+
 ```json
 {
   "name": "myproject",
   "agent": {
+    "security_opts": ["unmask=/proc/*"],
     "build": {
       "containerfile": "containers/agent.Containerfile",
       "context": ".",

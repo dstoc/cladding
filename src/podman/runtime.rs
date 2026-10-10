@@ -1254,6 +1254,10 @@ fn build_container_run_command(
         PodmanRuntimeOptions::new(use_runsc).with_network_none(component.network_name == "none"),
     );
     cmd.arg("run");
+    for security_opt in &component.security_opts {
+        cmd.arg("--security-opt");
+        cmd.arg(security_opt);
+    }
     cmd.arg("-d");
     cmd.arg("--init");
     append_label_args(&mut cmd, &component.labels);
@@ -1359,6 +1363,7 @@ mod tests {
                     enabled: true,
                     image: "agent:image".to_string(),
                     build: None,
+                    security_opts: Vec::new(),
                 },
                 nw_sandbox: None,
                 fs_sandbox: None,
@@ -1366,6 +1371,57 @@ mod tests {
                 mounts: Vec::new(),
             },
         )
+    }
+
+    #[test]
+    fn build_container_run_command_passes_security_options_as_literal_component_args() {
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                image: "agent:image".to_string(),
+                build: None,
+                security_opts: vec!["unmask=/proc/*".to_string(), "label=disable".to_string()],
+            },
+            nw_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: "nw:image".to_string(),
+                build: None,
+                security_opts: vec!["no-new-privileges".to_string()],
+            }),
+            fs_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                image: "fs:image".to_string(),
+                build: None,
+                security_opts: Vec::new(),
+            }),
+            proxy: None,
+            mounts: Vec::new(),
+        };
+        let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
+        let security_opts = |component: &RuntimeComponent| {
+            let container = component.containers.first().expect("component container");
+            let args = command_args(&build_container_run_command(
+                component.use_runsc,
+                component,
+                container,
+            ));
+            args.windows(2)
+                .filter_map(|pair| (pair[0] == "--security-opt").then_some(pair[1].clone()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            security_opts(&spec.agent),
+            vec!["unmask=/proc/*", "label=disable"]
+        );
+        assert_eq!(
+            security_opts(spec.nw_sandbox.as_ref().expect("network sandbox")),
+            vec!["no-new-privileges"]
+        );
+        assert!(security_opts(spec.fs_sandbox.as_ref().expect("filesystem sandbox")).is_empty());
+        assert!(security_opts(&spec.proxy).is_empty());
     }
 
     #[test]
@@ -1485,6 +1541,7 @@ mod tests {
                 enabled: true,
                 image: "agent:image".to_string(),
                 build: None,
+                security_opts: Vec::new(),
             },
             nw_sandbox: None,
             fs_sandbox: None,
@@ -1550,6 +1607,7 @@ mod tests {
                 tty: false,
             }],
             user_namespace: RuntimeUserNamespace::KeepId,
+            security_opts: Vec::new(),
         };
         let empty_component = |name: &str| RuntimeComponent {
             name: name.to_string(),
@@ -1558,6 +1616,7 @@ mod tests {
             network_name: "none".to_string(),
             containers: Vec::new(),
             user_namespace: RuntimeUserNamespace::KeepId,
+            security_opts: Vec::new(),
         };
         let spec = RuntimeSpec {
             project_name: "demo".to_string(),
@@ -1607,6 +1666,7 @@ mod tests {
             network_name: "none".to_string(),
             containers: Vec::new(),
             user_namespace: RuntimeUserNamespace::KeepId,
+            security_opts: Vec::new(),
         };
         let spec = RuntimeSpec {
             project_name: "demo".to_string(),
@@ -1640,16 +1700,19 @@ mod tests {
                 enabled: true,
                 image: "agent:image".to_string(),
                 build: None,
+                security_opts: Vec::new(),
             },
             nw_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
                 image: "nw-sandbox:image".to_string(),
                 build: None,
+                security_opts: Vec::new(),
             }),
             fs_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
                 image: "fs-sandbox:image".to_string(),
                 build: None,
+                security_opts: Vec::new(),
             }),
             proxy: None,
             mounts: Vec::new(),
@@ -1820,6 +1883,7 @@ mod tests {
                 enabled: true,
                 image: "agent:image".to_string(),
                 build: None,
+                security_opts: Vec::new(),
             },
             nw_sandbox: None,
             fs_sandbox: None,
@@ -1857,6 +1921,7 @@ mod tests {
             network_name: "none".to_string(),
             containers: Vec::new(),
             user_namespace: RuntimeUserNamespace::KeepId,
+            security_opts: Vec::new(),
         };
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),
@@ -1965,6 +2030,7 @@ mod tests {
             network_name: "default".to_string(),
             containers: Vec::new(),
             user_namespace: RuntimeUserNamespace::Default,
+            security_opts: Vec::new(),
         };
 
         let cmd = build_container_run_command(false, &component, &container);
@@ -2034,6 +2100,7 @@ mod tests {
             network_name: "default".to_string(),
             containers: Vec::new(),
             user_namespace: RuntimeUserNamespace::Default,
+            security_opts: Vec::new(),
         };
 
         let cmd = build_container_run_command(true, &component, &container);
@@ -2072,6 +2139,7 @@ mod tests {
             network_name: "none".to_string(),
             containers: Vec::new(),
             user_namespace: RuntimeUserNamespace::KeepId,
+            security_opts: Vec::new(),
         };
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),

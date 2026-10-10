@@ -761,6 +761,7 @@ mod tests {
             enabled,
             image: "image:latest".to_string(),
             build: None,
+            security_opts: Vec::new(),
         }
     }
 
