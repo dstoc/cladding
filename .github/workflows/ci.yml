@@ -22,98 +22,53 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-  build-baffle:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    env:
-      BAFFLE_PROXY_VERSION: 1.0.0
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v1-baffle
-          shared-key: ${{ matrix.arch }}-${{ env.BAFFLE_PROXY_VERSION }}
-          cache-all-crates: true
-      - name: Install Baffle build and verification tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake file libclang-dev
-      - name: Install pinned Baffle
-        run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle" --bin baffle baffle-proxy
-      - name: Verify the Baffle architecture
-        run: |
-          description=$(file -b "$RUNNER_TEMP/baffle/bin/baffle")
-          printf '%s\n' "$description"
-          case "${{ matrix.arch }}:$description" in
-            x86_64:*"ELF 64-bit"*x86-64*) ;;
-            aarch64:*"ELF 64-bit"*aarch64*) ;;
-            *) echo "Baffle is not the expected Linux ${{ matrix.arch }} executable" >&2; exit 1 ;;
-          esac
-      - name: Build the default proxy runtime image
-        run: docker build --file Containerfile.proxy --tag cladding-baffle-proxy-check .
-      - name: Start Baffle in the default proxy runtime image
-        run: |
-          docker run --rm \
-            -v "$RUNNER_TEMP/baffle/bin/baffle:/opt/tools/bin/baffle:ro" \
-            --entrypoint /opt/tools/bin/baffle \
-            cladding-baffle-proxy-check --help
-      - name: Build Cladding with the target Baffle executable
-        run: CLADDING_BAFFLE_BIN="$RUNNER_TEMP/baffle/bin/baffle" cargo build --locked --bin cladding
-      - name: Collect Baffle redistribution notices
-        if: matrix.arch == 'x86_64'
-        run: |
-          manifest=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path "*/baffle-proxy-$BAFFLE_PROXY_VERSION/Cargo.toml" -print -quit)
-          test -n "$manifest"
-          cargo fetch --locked --manifest-path "$manifest"
-          mkdir -p baffle
-          cp "$RUNNER_TEMP/baffle/bin/baffle" baffle/baffle
-          python3 scripts/collect-baffle-notices.py "$manifest" baffle
-      - name: Stage Baffle executable
-        if: matrix.arch == 'aarch64'
-        run: |
-          mkdir -p baffle
-          cp "$RUNNER_TEMP/baffle/bin/baffle" baffle/baffle
-      - uses: actions/upload-artifact@v4
-        with:
-          name: baffle-linux-${{ matrix.arch }}
-          path: baffle/
-          if-no-files-found: error
-
   test:
-    needs: build-baffle
     runs-on: ubuntu-latest
     env:
-      BAFFLE_PROXY_VERSION: 1.0.0
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CLADDING_MCP_RUN_BIN: ${{ github.workspace }}/target/mcp-run/release/mcp-run
       CLADDING_RUN_REMOTE_BIN: ${{ github.workspace }}/target/mcp-run/release/run-remote
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: baffle-linux-x86_64
-          path: ${{ runner.temp }}/baffle
+      - name: Download and verify pinned x86_64 Baffle release
+        env:
+          BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
+        run: |
+          set -euo pipefail
+          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"
+          archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
+          mkdir -p "$RUNNER_TEMP/baffle"
+          curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/SHA256SUMS" "$release_url/SHA256SUMS"
+          expected=$(awk -v archive="$BAFFLE_ARCHIVE" '$2 == archive || $2 == "*" archive { print $1 }' "$RUNNER_TEMP/SHA256SUMS")
+          if [ "${#expected}" -ne 64 ]; then
+            echo "Expected one SHA256SUMS entry for $BAFFLE_ARCHIVE" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$archive_path" | awk '{ print $1 }')
+          elif command -v shasum >/dev/null 2>&1; then
+            actual=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
+          else
+            echo "No SHA-256 utility is available" >&2
+            exit 1
+          fi
+          test "$actual" = "$expected"
+          tar -xzf "$archive_path" -C "$RUNNER_TEMP/baffle"
+          chmod 0755 "$RUNNER_TEMP/baffle/baffle"
+          description=$(file -b "$RUNNER_TEMP/baffle/baffle")
+          printf '%s\n' "$description"
+          case "$description" in
+            "ELF 64-bit"*x86-64*) ;;
+            *) echo "Baffle is not the expected Linux x86_64 executable" >&2; exit 1 ;;
+          esac
+          test -x "$RUNNER_TEMP/baffle/baffle"
+          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.96
         with:
           components: clippy
-      - name: Set the validated Baffle binary path
-        run: |
-          chmod 0755 "$RUNNER_TEMP/baffle/baffle"
-          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-baffle
-          shared-key: x86_64-${{ env.BAFFLE_PROXY_VERSION }}
-          cache-all-crates: true
           cache-workspace-crates: true
       - name: Build embedded helpers
         run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run
@@ -128,25 +83,52 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test Baffle redistribution notices
         run: python3 scripts/test_collect_baffle_notices.py
+      - name: Test pinned Baffle CI asset selection
+        run: python3 scripts/test_ci_baffle_assets.py
       - name: Test
         run: cargo test --locked
 
   baffle-config:
-    needs: build-baffle
     runs-on: ubuntu-latest
     env:
       CLADDING_TEST_RUNSC: "true"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: baffle-linux-x86_64
-          path: ${{ runner.temp }}/baffle
-      - uses: dtolnay/rust-toolchain@1.96
-      - name: Set the validated Baffle binary path
+      - name: Download and verify pinned x86_64 Baffle release
+        env:
+          BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
         run: |
+          set -euo pipefail
+          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"
+          archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
+          mkdir -p "$RUNNER_TEMP/baffle"
+          curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/SHA256SUMS" "$release_url/SHA256SUMS"
+          expected=$(awk -v archive="$BAFFLE_ARCHIVE" '$2 == archive || $2 == "*" archive { print $1 }' "$RUNNER_TEMP/SHA256SUMS")
+          if [ "${#expected}" -ne 64 ]; then
+            echo "Expected one SHA256SUMS entry for $BAFFLE_ARCHIVE" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$archive_path" | awk '{ print $1 }')
+          elif command -v shasum >/dev/null 2>&1; then
+            actual=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
+          else
+            echo "No SHA-256 utility is available" >&2
+            exit 1
+          fi
+          test "$actual" = "$expected"
+          tar -xzf "$archive_path" -C "$RUNNER_TEMP/baffle"
           chmod 0755 "$RUNNER_TEMP/baffle/baffle"
+          description=$(file -b "$RUNNER_TEMP/baffle/baffle")
+          printf '%s\n' "$description"
+          case "$description" in
+            "ELF 64-bit"*x86-64*) ;;
+            *) echo "Baffle is not the expected Linux x86_64 executable" >&2; exit 1 ;;
+          esac
+          test -x "$RUNNER_TEMP/baffle/baffle"
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@1.96
       - name: Install rootless Podman dependencies
         run: |
           sudo apt-get update
@@ -192,71 +174,159 @@ jobs:
       - name: Validate shared managed mounts with runsc
         run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_managed_mounts.sh runsc
 
-  baffle-podman-machine-assets:
-    needs: build-baffle
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-    runs-on: ${{ matrix.runner }}
+  baffle-podman-machine-assets-x86_64:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: baffle-linux-${{ matrix.arch }}
-          path: ${{ runner.temp }}/baffle
-      - uses: dtolnay/rust-toolchain@1.96
-        with:
-          targets: ${{ matrix.target }}
-      - name: Restore the validated Baffle executable mode
+      - name: Download and verify pinned x86_64 Baffle release
+        env:
+          BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
         run: |
+          set -euo pipefail
+          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"
+          archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
+          mkdir -p "$RUNNER_TEMP/baffle"
+          curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/SHA256SUMS" "$release_url/SHA256SUMS"
+          expected=$(awk -v archive="$BAFFLE_ARCHIVE" '$2 == archive || $2 == "*" archive { print $1 }' "$RUNNER_TEMP/SHA256SUMS")
+          if [ "${#expected}" -ne 64 ]; then
+            echo "Expected one SHA256SUMS entry for $BAFFLE_ARCHIVE" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$archive_path" | awk '{ print $1 }')
+          elif command -v shasum >/dev/null 2>&1; then
+            actual=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
+          else
+            echo "No SHA-256 utility is available" >&2
+            exit 1
+          fi
+          test "$actual" = "$expected"
+          tar -xzf "$archive_path" -C "$RUNNER_TEMP/baffle"
           chmod 0755 "$RUNNER_TEMP/baffle/baffle"
+          description=$(file -b "$RUNNER_TEMP/baffle/baffle")
+          printf '%s\n' "$description"
+          case "$description" in
+            "ELF 64-bit"*x86-64*) ;;
+            *) echo "Baffle is not the expected Linux x86_64 executable" >&2; exit 1 ;;
+          esac
+          test -x "$RUNNER_TEMP/baffle/baffle"
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@1.96
       - name: Build Linux execution helpers
-        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target "${{ matrix.target }}" --target-dir target/mcp-run
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target x86_64-unknown-linux-gnu --target-dir target/mcp-run
       - name: Build Linux Baffle socket operation probe
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Verify embedded helper inputs
         run: |
           test -x "$CLADDING_BAFFLE_BIN"
-          test -x "target/mcp-run/${{ matrix.target }}/release/mcp-run"
-          test -x "target/mcp-run/${{ matrix.target }}/release/run-remote"
+          test -x "target/mcp-run/x86_64-unknown-linux-gnu/release/mcp-run"
+          test -x "target/mcp-run/x86_64-unknown-linux-gnu/release/run-remote"
           test -x "$RUNNER_TEMP/baffle-socket-probe"
           for tool in \
             "$CLADDING_BAFFLE_BIN" \
-            "target/mcp-run/${{ matrix.target }}/release/mcp-run" \
-            "target/mcp-run/${{ matrix.target }}/release/run-remote" \
+            "target/mcp-run/x86_64-unknown-linux-gnu/release/mcp-run" \
+            "target/mcp-run/x86_64-unknown-linux-gnu/release/run-remote" \
             "$RUNNER_TEMP/baffle-socket-probe"; do
             description=$(file -b "$tool")
             printf '%s: %s\n' "$tool" "$description"
-            case "${{ matrix.arch }}:$description" in
-              x86_64:*"ELF 64-bit"*x86-64*) ;;
-              aarch64:*"ELF 64-bit"*aarch64*) ;;
-              *) echo "Expected a Linux ${{ matrix.arch }} executable: $tool" >&2; exit 1 ;;
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
             esac
           done
       - name: Stage Linux assets for Podman machine validation
         run: |
-          mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-${{ matrix.arch }}/bin"
-          cp "$RUNNER_TEMP/baffle/baffle" "$RUNNER_TEMP/cladding-baffle-tools-${{ matrix.arch }}/bin/baffle"
-          cp "target/mcp-run/${{ matrix.target }}/release/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-${{ matrix.arch }}/bin/mcp-run"
-          cp "target/mcp-run/${{ matrix.target }}/release/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-${{ matrix.arch }}/bin/run-remote"
-          cp "$RUNNER_TEMP/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-${{ matrix.arch }}/bin/baffle-socket-probe"
+          mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin"
+          cp "$RUNNER_TEMP/baffle/baffle" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/baffle"
+          cp "target/mcp-run/x86_64-unknown-linux-gnu/release/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/mcp-run"
+          cp "target/mcp-run/x86_64-unknown-linux-gnu/release/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/run-remote"
+          cp "$RUNNER_TEMP/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/baffle-socket-probe"
       - uses: actions/upload-artifact@v4
         with:
-          name: cladding-baffle-linux-tools-${{ matrix.arch }}
-          path: ${{ runner.temp }}/cladding-baffle-tools-${{ matrix.arch }}
+          name: cladding-baffle-linux-tools-x86_64
+          path: ${{ runner.temp }}/cladding-baffle-tools-x86_64
+          if-no-files-found: error
+
+  baffle-podman-machine-assets-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify pinned aarch64 Baffle release
+        env:
+          BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-aarch64-unknown-linux-gnu.tar.gz
+        run: |
+          set -euo pipefail
+          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"
+          archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
+          mkdir -p "$RUNNER_TEMP/baffle"
+          curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/SHA256SUMS" "$release_url/SHA256SUMS"
+          expected=$(awk -v archive="$BAFFLE_ARCHIVE" '$2 == archive || $2 == "*" archive { print $1 }' "$RUNNER_TEMP/SHA256SUMS")
+          if [ "${#expected}" -ne 64 ]; then
+            echo "Expected one SHA256SUMS entry for $BAFFLE_ARCHIVE" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$archive_path" | awk '{ print $1 }')
+          elif command -v shasum >/dev/null 2>&1; then
+            actual=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
+          else
+            echo "No SHA-256 utility is available" >&2
+            exit 1
+          fi
+          test "$actual" = "$expected"
+          tar -xzf "$archive_path" -C "$RUNNER_TEMP/baffle"
+          chmod 0755 "$RUNNER_TEMP/baffle/baffle"
+          description=$(file -b "$RUNNER_TEMP/baffle/baffle")
+          printf '%s\n' "$description"
+          case "$description" in
+            "ELF 64-bit"*aarch64*) ;;
+            *) echo "Baffle is not the expected Linux aarch64 executable" >&2; exit 1 ;;
+          esac
+          test -x "$RUNNER_TEMP/baffle/baffle"
+          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@1.96
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Build Linux execution helpers
+        run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target aarch64-unknown-linux-gnu --target-dir target/mcp-run
+      - name: Build Linux Baffle socket operation probe
+        run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
+      - name: Verify embedded helper inputs
+        run: |
+          test -x "$CLADDING_BAFFLE_BIN"
+          test -x "target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run"
+          test -x "target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote"
+          test -x "$RUNNER_TEMP/baffle-socket-probe"
+          for tool in \
+            "$CLADDING_BAFFLE_BIN" \
+            "target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run" \
+            "target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote" \
+            "$RUNNER_TEMP/baffle-socket-probe"; do
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*aarch64*) ;;
+              *) echo "Expected a Linux aarch64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - name: Stage Linux assets for Podman machine validation
+        run: |
+          mkdir -p "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin"
+          cp "$RUNNER_TEMP/baffle/baffle" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/baffle"
+          cp "target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/mcp-run"
+          cp "target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/run-remote"
+          cp "$RUNNER_TEMP/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/baffle-socket-probe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cladding-baffle-linux-tools-aarch64
+          path: ${{ runner.temp }}/cladding-baffle-tools-aarch64
           if-no-files-found: error
 
   baffle-podman-machine:
     runs-on: macos-15-intel
-    needs: [baffle-config, baffle-podman-machine-assets]
+    needs: baffle-podman-machine-assets-x86_64
     env:
       PODMAN_VERSION: 5.8.2
     steps:
@@ -356,7 +426,7 @@ jobs:
   # host-to-guest binary selection; run the socket validator on a capable Mac.
   baffle-apple-silicon-build:
     runs-on: macos-15
-    needs: baffle-podman-machine-assets
+    needs: baffle-podman-machine-assets-aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
