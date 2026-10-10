@@ -120,6 +120,20 @@ sys.stdout.buffer.write(output)
 '
 }
 
+redact_fixture_values() {
+  CLADDING_REDACT_SECRETS='client-supplied-test-value
+cladding-test-old-value
+cladding-test-new-value' python3 -c '
+import os
+import sys
+
+output = sys.stdin.buffer.read()
+for secret in os.environb[b"CLADDING_REDACT_SECRETS"].splitlines():
+    output = output.replace(secret, b"[REDACTED]")
+sys.stdout.buffer.write(output)
+'
+}
+
 cleanup() {
   status=$?
   trap - EXIT
@@ -140,8 +154,10 @@ cleanup() {
         echo "Could not safely redact the saved cladding run output; log omitted." >&2
       fi
     fi
-    podman logs "$project_name-proxy-instance" >&2 2>/dev/null || true
-    podman logs "$origin_name" >&2 2>/dev/null || true
+    podman logs "$project_name-proxy-instance" 2>&1 \
+      | redact_fixture_values >&2 || true
+    podman logs "$origin_name" 2>&1 \
+      | redact_fixture_values >&2 || true
   fi
   podman rm -f "$origin_name" >/dev/null 2>&1 || true
   "$cladding_bin" --cladding-dir "$project_root" down >/dev/null 2>&1 || true
@@ -432,8 +448,35 @@ PY
 phase="verify TLS origin on IPv4 and IPv6 localhost"
 probe_origin_tls
 
+phase="verify proxy and TLS origin share a network namespace"
+proxy_network_namespace=$(podman exec "$proxy" readlink /proc/self/ns/net)
+origin_network_namespace=$(podman exec "$origin_name" readlink /proc/self/ns/net)
+if [ "$proxy_network_namespace" != "$origin_network_namespace" ]; then
+  message="proxy and TLS origin network namespaces differ: proxy=$proxy_network_namespace origin=$origin_network_namespace"
+  echo "$message" >&2
+  printf '::error title=TLS origin network namespace::%s\n' "$message"
+  exit 1
+fi
+
+phase="verify a direct, trusted TLS origin request"
+if podman exec "$origin_name" curl --fail --silent --show-error \
+  --cacert /fixtures/origin-ca.crt --noproxy '*' \
+  https://localhost:8443/diagnostic/direct-origin \
+  >"$temp_root/direct-origin.body" 2>"$temp_root/direct-origin.stderr"; then
+  jq -e '.path == "/diagnostic/direct-origin"' \
+    "$temp_root/direct-origin.body" >/dev/null
+else
+  status=$?
+  diagnostic=$(tail -n 30 "$temp_root/direct-origin.stderr" \
+    | tr '\r\n' '  ' | sed 's/%/%25/g' | cut -c 1-3000)
+  printf '::error title=Direct TLS origin request::exit=%s; %s\n' \
+    "$status" "$diagnostic"
+  cat "$temp_root/direct-origin.stderr" >&2
+  exit "$status"
+fi
+
 agent_curl() {
-  podman exec --env no_proxy= --env NO_PROXY= "$agent" curl --silent --show-error \
+  podman exec --env no_proxy= --env NO_PROXY= "$agent" curl --verbose --silent --show-error \
     --proxy http://127.0.0.1:3128 --noproxy '' --connect-timeout 10 --max-time 30 "$@"
 }
 sandbox_curl() {
@@ -466,20 +509,6 @@ report_client_failure() {
   printf '::error title=Baffle client workload diagnostics::%s\n' "$diagnostic"
 }
 
-redact_fixture_values() {
-  CLADDING_REDACT_SECRETS='client-supplied-test-value
-cladding-test-old-value
-cladding-test-new-value' python3 -c '
-import os
-import sys
-
-output = sys.stdin.buffer.read()
-for secret in os.environb[b"CLADDING_REDACT_SECRETS"].splitlines():
-    output = output.replace(secret, b"[REDACTED]")
-sys.stdout.buffer.write(output)
-'
-}
-
 report_curl_failure() {
   container=$1
   error_file=$2
@@ -487,15 +516,16 @@ report_curl_failure() {
     "$container" 2>&1 || true)
   proxy_state=$(podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
     "$proxy" 2>&1 || true)
-  curl_error=$(tail -n 15 "$error_file" 2>/dev/null || true)
+  curl_error=$(tail -n 60 "$error_file" 2>/dev/null || true)
+  client_logs=$(podman logs "$container" 2>&1 | tail -n 40 || true)
   baffle_state=$(podman exec "$proxy" /opt/tools/bin/baffle list 2>&1 || true)
-  proxy_logs=$(podman logs "$proxy" 2>&1 | tail -n 20 || true)
+  proxy_logs=$(podman logs "$proxy" 2>&1 | tail -n 80 || true)
   origin_state=$(podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
     "$origin_name" 2>&1 || true)
   origin_probe=$(probe_origin_tls 2>&1 || true)
   origin_events=$(podman exec "$origin_name" tail -n 15 /tmp/baffle-integration/events.jsonl 2>&1 || true)
-  diagnostics=$(printf 'Client state: %s\nCurl error:\n%s\nProxy state: %s\nBaffle sessions:\n%s\nProxy logs:\n%s\nTLS origin state: %s\nDirect TLS probes:\n%s\nRecent origin requests:\n%s\n' \
-    "$client_state" "$curl_error" "$proxy_state" "$baffle_state" "$proxy_logs" \
+  diagnostics=$(printf 'Client state: %s\nClient bridge logs:\n%s\nCurl trace:\n%s\nProxy state: %s\nBaffle sessions:\n%s\nProxy logs:\n%s\nTLS origin state: %s\nDirect TLS probes:\n%s\nRecent origin requests:\n%s\n' \
+    "$client_state" "$client_logs" "$curl_error" "$proxy_state" "$baffle_state" "$proxy_logs" \
     "$origin_state" "$origin_probe" "$origin_events" \
     | redact_fixture_values)
   printf '%s\n' "$diagnostics" >&2

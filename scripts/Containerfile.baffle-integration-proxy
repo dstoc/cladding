@@ -1,6 +1,8 @@
 ARG BASE_IMAGE=localhost/cladding-proxy:latest
 FROM ${BASE_IMAGE}
 
+ENV RUST_LOG=debug
+
 COPY origin-ca.crt /usr/local/share/ca-certificates/baffle-integration-origin.crt
 
 RUN update-ca-certificates
