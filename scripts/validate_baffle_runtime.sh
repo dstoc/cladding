@@ -1,18 +1,25 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -gt 1 ]; then
-  echo "usage: $0 [default|runsc]" >&2
+if [ "$#" -gt 2 ]; then
+  echo "usage: $0 [default|runsc] [--socket-topology-only]" >&2
   exit 2
 fi
 runtime=default
-if [ "$#" -eq 1 ]; then
+socket_topology_only=false
+if [ "$#" -ge 1 ]; then
   runtime=$1
 fi
 case "$runtime" in
   default|runsc) ;;
   *) echo "runtime must be default or runsc" >&2; exit 2 ;;
 esac
+if [ "$#" -eq 2 ]; then
+  case "$2" in
+    --socket-topology-only) socket_topology_only=true ;;
+    *) echo "unknown option: $2" >&2; exit 2 ;;
+  esac
+fi
 
 for tool in podman jq openssl git python3; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -654,9 +661,11 @@ test "$(stat_mode "$project_root/credentials/baffle/ca.crt")" = 644
 test "$(stat_mode "$project_root/credentials/baffle/ca-key.pem")" = 600
 test "$(stat_uid "$project_root/credentials/baffle/ca-key.pem")" = "$(id -u)"
 
-phase="verify orphaned child processes are reaped"
-verify_orphan_reaping "$agent"
-verify_orphan_reaping "$sandbox"
+if [ "$socket_topology_only" != true ]; then
+  phase="verify orphaned child processes are reaped"
+  verify_orphan_reaping "$agent"
+  verify_orphan_reaping "$sandbox"
+fi
 
 phase="verify agent-to-sandbox UDS communication"
 nw_socket_output=$(podman exec "$agent" sh -ec \
@@ -687,6 +696,19 @@ else
   exit "$status"
 fi
 printf '%s' "$body" | jq -e '.authorization == "none"' >/dev/null
+if [ "$socket_topology_only" = true ]; then
+  phase="remove local TLS origin before persistent shutdown"
+  podman rm -f "$origin_name" >/dev/null
+  phase="stop persistent runtime after socket communication"
+  "$cladding_bin" --cladding-dir "$project_root" down
+  phase="verify managed socket volumes were removed"
+  require_socket_volume_count 0
+  phase="verify Baffle session socket paths were cleared"
+  test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
+  test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
+  echo "Baffle managed socket channel topology passed ($runtime runtime)"
+  exit 0
+fi
 phase="deny agent request to an unapproved host"
 expect_curl_denied "$agent" --insecure https://127.0.0.1:8443/authorized/wrong-host
 phase="deny agent request to an unapproved destination port"
