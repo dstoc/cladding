@@ -675,7 +675,7 @@ fi
 ca_after=$(sha256_file "$project_root/credentials/baffle/ca.crt")
 test "$ca_before" = "$ca_after"
 "$cladding_bin" --cladding-dir "$project_root" up
-require_socket_volume_count 2
+require_socket_volume_count 4
 "$cladding_bin" --cladding-dir "$project_root" down
 require_socket_volume_count 0
 test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
