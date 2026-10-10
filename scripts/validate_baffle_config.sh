@@ -236,6 +236,12 @@ verify_scoped_socket_access() {
   socket_runtime=${2:-default}
   current_phase="verify $component socket permissions ($socket_runtime runtime)"
 
+  require_container_mode "$proxy_name" /run/cladding/proxy 700 \
+    "Baffle socket root directory mode mismatch"
+  if [ "$(container_stat_uid "$proxy_name" /run/cladding/proxy)" != "$container_uid" ]; then
+    echo "Baffle socket root directory is not owned by the proxy user" >&2
+    exit 1
+  fi
   require_container_mode "$proxy_name" "/run/cladding/proxy/$component" 700 \
     "Baffle $component socket directory mode mismatch"
   require_container_mode "$proxy_name" "/run/cladding/proxy/$component/proxy.sock" 600 \
@@ -360,6 +366,14 @@ run_proxy_startup() {
     socket_volume_nw_sandbox=
   fi
 
+  socket_dir="$temp_root/sockets-$name"
+  mkdir -p "$socket_dir/agent"
+  chmod 700 "$socket_dir" "$socket_dir/agent"
+  if [ "$sandbox_enabled" = true ]; then
+    mkdir -p "$socket_dir/nw-sandbox"
+    chmod 700 "$socket_dir/nw-sandbox"
+  fi
+
   start_output_file="$temp_root/proxy-start-$name.log"
   current_phase="create proxy container ($name)"
   set -- podman run --detach --init --name "$name" \
@@ -372,6 +386,7 @@ run_proxy_startup() {
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
     --volume "$project_root/config:/opt/config:ro" \
     --volume "$project_root/credentials/baffle:/opt/credentials/baffle:ro" \
+    --volume "$socket_dir:/run/cladding/proxy:rw" \
     --volume "$socket_volume_agent:/run/cladding/proxy/agent:U"
   if [ "$sandbox_enabled" = true ]; then
     set -- "$@" \
