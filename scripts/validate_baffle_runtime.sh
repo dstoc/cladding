@@ -416,6 +416,22 @@ if [ "$origin_ready" != true ]; then
   exit 1
 fi
 
+probe_origin_tls() {
+  podman exec -i "$origin_name" python3 - <<'PY'
+import socket
+import ssl
+
+context = ssl._create_unverified_context()
+for address in ("127.0.0.1", "::1"):
+    with socket.create_connection((address, 8443), timeout=3) as raw:
+        with context.wrap_socket(raw, server_hostname="localhost") as connection:
+            print(f"{address}: TLS {connection.version()}")
+PY
+}
+
+phase="verify TLS origin on IPv4 and IPv6 localhost"
+probe_origin_tls
+
 agent_curl() {
   podman exec --env no_proxy= --env NO_PROXY= "$agent" curl --silent --show-error \
     --proxy http://127.0.0.1:3128 --noproxy '' --connect-timeout 10 --max-time 30 "$@"
@@ -476,10 +492,11 @@ report_curl_failure() {
   proxy_logs=$(podman logs "$proxy" 2>&1 | tail -n 20 || true)
   origin_state=$(podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
     "$origin_name" 2>&1 || true)
+  origin_probe=$(probe_origin_tls 2>&1 || true)
   origin_events=$(podman exec "$origin_name" tail -n 15 /tmp/baffle-integration/events.jsonl 2>&1 || true)
-  diagnostics=$(printf 'Client state: %s\nCurl error:\n%s\nProxy state: %s\nBaffle sessions:\n%s\nProxy logs:\n%s\nTLS origin state: %s\nRecent origin requests:\n%s\n' \
+  diagnostics=$(printf 'Client state: %s\nCurl error:\n%s\nProxy state: %s\nBaffle sessions:\n%s\nProxy logs:\n%s\nTLS origin state: %s\nDirect TLS probes:\n%s\nRecent origin requests:\n%s\n' \
     "$client_state" "$curl_error" "$proxy_state" "$baffle_state" "$proxy_logs" \
-    "$origin_state" "$origin_events" \
+    "$origin_state" "$origin_probe" "$origin_events" \
     | redact_fixture_values)
   printf '%s\n' "$diagnostics" >&2
   diagnostic=$(printf '%s' "$diagnostics" \
