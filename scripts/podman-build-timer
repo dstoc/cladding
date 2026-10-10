@@ -1,0 +1,26 @@
+#!/bin/sh
+set -u
+
+real_podman=${CLADDING_TOPOLOGY_REAL_PODMAN:?}
+topology_image=${CLADDING_TOPOLOGY_IMAGE:?}
+duration_file=${CLADDING_TOPOLOGY_BUILD_DURATION_FILE:?}
+
+matches_topology_build=false
+previous_argument=
+for argument do
+  if [ "$previous_argument" = "-t" ] && [ "$argument" = "$topology_image" ]; then
+    matches_topology_build=true
+  fi
+  previous_argument=$argument
+done
+
+if [ "$matches_topology_build" != true ]; then
+  exec "$real_podman" "$@"
+fi
+
+started_at=$(date +%s)
+"$real_podman" "$@"
+status=$?
+finished_at=$(date +%s)
+printf '%s\n' "$((finished_at - started_at))" > "$duration_file"
+exit "$status"

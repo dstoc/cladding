@@ -15,6 +15,10 @@ BAFFLE_RUNTIME_VALIDATOR = (
 RUNTIME_TOPOLOGY_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_runtime_topology.sh"
 )
+RUNTIME_TOPOLOGY_IMAGE = (
+    Path(__file__).parents[1] / "scripts/runtime-topology-image/Containerfile"
+)
+PODMAN_BUILD_TIMER = Path(__file__).parents[1] / "scripts/podman-build-timer"
 MACHINE_FEASIBILITY_WORKFLOW = (
     Path(__file__).parents[1]
     / ".github/workflows/podman-machine-linux-feasibility.yml"
@@ -95,6 +99,60 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("< HTTP/[0-9.]+ 403", validator)
         self.assertIn('assert_denied_connect "$agent" agent', validator)
         self.assertIn('assert_denied_connect "$nw_sandbox" nw-sandbox', validator)
+
+    def test_topology_validator_builds_and_times_one_minimal_shared_image(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        containerfile = RUNTIME_TOPOLOGY_IMAGE.read_text()
+        timer = PODMAN_BUILD_TIMER.read_text()
+
+        self.assertIn(
+            "topology_image=localhost/cladding-runtime-topology:latest", validator
+        )
+        self.assertIn(
+            '--arg containerfile "$script_dir/runtime-topology-image/Containerfile"',
+            validator,
+        )
+        self.assertIn(
+            '--arg context "$script_dir/runtime-topology-image"', validator
+        )
+        self.assertEqual(validator.count("args: {UID: $uid, GID: $gid}"), 2)
+        self.assertIn(".agent.build = {", validator)
+        self.assertIn(
+            ".nw_sandbox.build = {",
+            validator,
+        )
+        self.assertIn('host_uid=$(id -u)', validator)
+        self.assertIn('host_gid=$(id -g)', validator)
+        self.assertIn("Topology runtime image build duration:", validator)
+        self.assertIn('>> "$GITHUB_STEP_SUMMARY"', validator)
+        self.assertIn(r'echo "Image: \`$topology_image\`."', validator)
+        self.assertIn('if [ "$previous_argument" = "-t" ]', timer)
+        self.assertIn('"$real_podman" "$@"', timer)
+        self.assertIn('printf \'%s\\n\' "$((finished_at - started_at))"', timer)
+
+        self.assertIn("FROM debian:trixie-slim", containerfile)
+        self.assertIn(
+            "apt-get install -y --no-install-recommends ca-certificates coreutils curl grep socat",
+            containerfile,
+        )
+        self.assertIn("USER ${UID}:${GID}", containerfile)
+        self.assertIn("ENV HOME=/home/user", containerfile)
+        self.assertIn("WORKDIR /home/user/workspace", containerfile)
+        for excluded in (
+            "node",
+            "codex",
+            "claude-code",
+            "pi-coding-agent",
+            "build-essential",
+            "gcc",
+            "clang",
+            "cargo",
+            "python3",
+            "python3-pip",
+            "python3-venv",
+        ):
+            with self.subTest(excluded=excluded):
+                self.assertNotIn(excluded, containerfile.lower())
 
     def test_local_and_machine_ci_use_the_shared_topology_validator(self):
         linux = job_block("baffle-config")

@@ -279,7 +279,13 @@ jobs:
         run: cargo build --locked --bin cladding
       - name: Check Baffle validation shell syntax
         run: |
-          for script in scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh scripts/validate_baffle_runtime.sh scripts/validate_runtime_topology.sh scripts/validate_managed_mounts.sh; do
+          for script in \
+            scripts/validate_baffle_config.sh \
+            scripts/validate_baffle_control_socket.sh \
+            scripts/validate_baffle_runtime.sh \
+            scripts/validate_runtime_topology.sh \
+            scripts/validate_managed_mounts.sh \
+            scripts/podman-build-timer; do
             sh -n "$script"
           done
       - name: Validate Baffle startup and socket access under rootless Podman
