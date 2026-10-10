@@ -279,11 +279,13 @@ jobs:
         run: cargo build --locked --bin cladding
       - name: Check Baffle validation shell syntax
         run: |
-          for script in scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh scripts/validate_baffle_runtime.sh scripts/validate_managed_mounts.sh; do
+          for script in scripts/validate_baffle_config.sh scripts/validate_baffle_control_socket.sh scripts/validate_baffle_runtime.sh scripts/validate_runtime_topology.sh scripts/validate_managed_mounts.sh; do
             sh -n "$script"
           done
       - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/baffle/baffle"
+      - name: Validate shared runtime topology under rootless Podman
+        run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_runtime_topology.sh default
       - name: Validate Baffle policy and client workloads with the default runtime
         run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" scripts/validate_baffle_runtime.sh default
       - name: Validate Baffle policy and client workloads with runsc
@@ -372,7 +374,6 @@ jobs:
           cp "$RUNNER_TEMP/baffle/baffle" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/baffle"
           cp "$RUNNER_TEMP/linux-helpers/bin/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/mcp-run"
           cp "$RUNNER_TEMP/linux-helpers/bin/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/run-remote"
-          cp "$RUNNER_TEMP/linux-helpers/bin/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-x86_64/bin/baffle-socket-probe"
       - uses: actions/upload-artifact@v4
         with:
           name: cladding-baffle-linux-tools-x86_64
@@ -392,7 +393,7 @@ jobs:
         run: |
           set -euo pipefail
           tool_dir="$RUNNER_TEMP/linux-helpers/bin"
-          for name in mcp-run run-remote baffle-socket-probe; do
+          for name in mcp-run run-remote; do
             tool="$tool_dir/$name"
             if [ ! -f "$tool" ]; then
               echo "Downloaded Linux helper is missing: $tool" >&2
@@ -458,44 +459,36 @@ jobs:
           cp "$RUNNER_TEMP/baffle/baffle" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/baffle"
           cp "$RUNNER_TEMP/linux-helpers/bin/mcp-run" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/mcp-run"
           cp "$RUNNER_TEMP/linux-helpers/bin/run-remote" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/run-remote"
-          cp "$RUNNER_TEMP/linux-helpers/bin/baffle-socket-probe" "$RUNNER_TEMP/cladding-baffle-tools-aarch64/bin/baffle-socket-probe"
       - uses: actions/upload-artifact@v4
         with:
           name: cladding-baffle-linux-tools-aarch64
           path: ${{ runner.temp }}/cladding-baffle-tools-aarch64
           if-no-files-found: error
 
-  baffle-podman-machine:
+  baffle-macos-x86_64-build:
     runs-on: macos-15-intel
     needs: baffle-podman-machine-assets-x86_64
-    env:
-      PODMAN_VERSION: 5.8.2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: cladding-baffle-linux-tools-x86_64
           path: ${{ runner.temp }}/linux-tools
-      # Artifact downloads do not retain executable file modes.
-      - name: Restore and verify downloaded Linux tools
+      - name: Restore and verify embedded Linux tools
         run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote baffle-socket-probe; do
+          for name in baffle mcp-run run-remote; do
             tool="$tool_dir/$name"
-            if [ ! -f "$tool" ]; then
-              echo "Downloaded Linux tool is missing: $tool" >&2
-              exit 1
-            fi
+            test -f "$tool"
             chmod 0755 "$tool"
-            if [ ! -x "$tool" ]; then
-              echo "Downloaded Linux tool is not executable: $tool" >&2
-              exit 1
-            fi
+            test -x "$tool"
             description=$(file -b "$tool")
             printf '%s: %s\n' "$tool" "$description"
             case "$description" in
               "ELF 64-bit"*x86-64*) ;;
-              *) echo "Expected a Linux amd64 executable: $tool" >&2; exit 1 ;;
+              *) echo "Expected an x86_64 Linux executable: $tool" >&2; exit 1 ;;
             esac
           done
       - uses: dtolnay/rust-toolchain@1.96
@@ -504,8 +497,43 @@ jobs:
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
           echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
-          echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe" >> "$GITHUB_ENV"
-          echo "BAFFLE_VALIDATION_TMP_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Cladding for Intel macOS with Linux embedded binaries
+        run: cargo build --locked --bin cladding
+      - name: Verify the embedded Baffle architecture
+        run: cargo test --locked --lib baffle_is_embedded_as_a_linux_binary
+      - name: Stage native macOS Cladding CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/cladding-macos-x86_64"
+          cp target/debug/cladding "$RUNNER_TEMP/cladding-macos-x86_64/cladding"
+          chmod 0755 "$RUNNER_TEMP/cladding-macos-x86_64/cladding"
+          file "$RUNNER_TEMP/cladding-macos-x86_64/cladding"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cladding-macos-x86_64
+          path: ${{ runner.temp }}/cladding-macos-x86_64/cladding
+          if-no-files-found: error
+
+  baffle-podman-machine:
+    # Keep the macOS fallback until hosted Linux Machine startup is repeatable.
+    runs-on: macos-15-intel
+    needs: baffle-macos-x86_64-build
+    env:
+      PODMAN_VERSION: 5.8.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-macos-x86_64
+          path: ${{ runner.temp }}/cladding-macos-x86_64
+      # Artifact downloads do not retain executable file modes.
+      - name: Restore the native macOS Cladding CLI
+        run: |
+          cladding_bin="$RUNNER_TEMP/cladding-macos-x86_64/cladding"
+          test -f "$cladding_bin"
+          chmod 0755 "$cladding_bin"
+          test -x "$cladding_bin"
+          file "$cladding_bin"
       - name: Install pinned Podman for macOS
         run: |
           podman_pkg="$RUNNER_TEMP/podman-installer-macos-amd64.pkg"
@@ -550,22 +578,10 @@ jobs:
       - name: Verify rootless Podman machine
         run: |
           podman info --format '{{.Host.Security.Rootless}}'
-          machine_uid="$(podman machine ssh podman-machine-default id -u | tail -n 1)"
-          machine_gid="$(podman machine ssh podman-machine-default id -g | tail -n 1)"
-          echo "BAFFLE_VALIDATION_CONTAINER_UID=$machine_uid" >> "$GITHUB_ENV"
-          echo "BAFFLE_VALIDATION_CONTAINER_GID=$machine_gid" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-      - name: Build Cladding for macOS with Linux embedded binaries
-        run: cargo build --locked --bin cladding
-      - name: Validate Baffle socket access through macOS Podman machine
-        run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/linux-tools/bin/baffle"
-      - name: Validate shared managed mounts through macOS Podman machine
-        run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" CLADDING_MANAGED_MOUNT_TMP_DIR="$GITHUB_WORKSPACE" scripts/validate_managed_mounts.sh default
-      - name: Validate managed socket channel topology through macOS Podman machine
-        run: CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" CLADDING_BAFFLE_RUNTIME_TMP_DIR="$GITHUB_WORKSPACE" scripts/validate_baffle_runtime.sh default --socket-topology-only
+      - name: Validate shared runtime topology through macOS Podman machine
+        run: CLADDING_BIN="$RUNNER_TEMP/cladding-macos-x86_64/cladding" CLADDING_TOPOLOGY_TMP_DIR="$GITHUB_WORKSPACE" scripts/validate_runtime_topology.sh default
 
-  # Hosted Apple Silicon runners lack nested virtualization. This verifies the
-  # host-to-guest binary selection; run the socket validator on a capable Mac.
+  # Keep the native Apple Silicon build check independent of Machine coverage.
   baffle-apple-silicon-build:
     runs-on: macos-15
     needs: baffle-podman-machine-assets-aarch64

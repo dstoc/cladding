@@ -1,0 +1,39 @@
+name: Podman Machine Linux feasibility
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qemu-repeatability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Install Podman Machine and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman qemu-system-x86 qemu-utils uidmap slirp4netns fuse-overlayfs
+          podman --version
+          qemu-system-x86_64 --version
+      - name: Repeat Podman Machine startup and remote-engine checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          machine_name=podman-machine-default
+          cleanup() {
+            podman machine stop "$machine_name" >/dev/null 2>&1 || true
+            podman machine rm --force "$machine_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          podman machine init --cpus 2 --memory 4096
+          for attempt in 1 2 3; do
+            echo "Podman Machine startup cycle $attempt"
+            podman machine start "$machine_name"
+            rootless=$(podman info --format '{{.Host.Security.Rootless}}')
+            test "$rootless" = true
+            podman machine ssh "$machine_name" id -u
+            podman machine stop "$machine_name"
+          done
