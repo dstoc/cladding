@@ -197,8 +197,8 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
             return report;
         }
     };
-    let private_roots = match discover_private_run_roots(allowed_bases) {
-        Ok(roots) => roots,
+    let (mut private_roots, skipped_roots) = match discover_private_run_roots(allowed_bases) {
+        Ok(discovery) => discovery,
         Err(error) => {
             report
                 .failures
@@ -206,7 +206,6 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
             return report;
         }
     };
-
     let mut groups = BTreeMap::<String, Vec<ResourceSnapshot>>::new();
     for resource in discovered {
         let Some(owner) = resource.labels.get("cladding") else {
@@ -217,8 +216,17 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
         }
     }
     let resource_owners = groups.keys().cloned().collect::<BTreeSet<_>>();
+    let mut skipped_roots = skipped_roots
+        .into_iter()
+        .map(|skipped| (skipped.owner.clone(), skipped))
+        .collect::<BTreeMap<_, _>>();
+    private_roots.retain(|root| !skipped_roots.contains_key(&root.owner));
 
     'runs: for (owner, listed_resources) in groups {
+        if let Some(skipped) = skipped_roots.remove(&owner) {
+            report.skipped_unverifiable.push(skipped);
+            continue;
+        }
         let mut group = match validate_group(&owner, &listed_resources, allowed_bases) {
             Ok(group) => group,
             Err(reason) => {
@@ -759,6 +767,10 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
         });
     }
 
+    report
+        .skipped_unverifiable
+        .extend(skipped_roots.into_values());
+
     // A process can be killed after creating its private runtime root but
     // before Podman creates any labeled resources. Its private marker is the
     // durable ownership record for this otherwise resource-free retry.
@@ -1199,8 +1211,9 @@ struct PrivateRunRoot {
 
 fn discover_private_run_roots(
     allowed_bases: &[PathBuf],
-) -> std::result::Result<Vec<PrivateRunRoot>, Error> {
+) -> std::result::Result<(Vec<PrivateRunRoot>, Vec<SkippedRun>), Error> {
     let mut roots = BTreeMap::<String, PrivateRunRoot>::new();
+    let mut skipped = Vec::new();
     for base in allowed_bases {
         let entries = fs::read_dir(base).map_err(|error| {
             Error::message(format!(
@@ -1260,24 +1273,83 @@ fn discover_private_run_roots(
             let path = base.join(&owner);
             let identity = match read_sidecar_identity(&path) {
                 Ok(Some(identity)) if identity.owner == owner && is_uuid(&identity.id) => identity,
-                _ => continue,
+                Ok(Some(_)) => {
+                    roots.remove(&owner);
+                    skipped.push(SkippedRun {
+                        owner,
+                        reason: "private runtime retry marker has a mismatched owner or identity"
+                            .to_string(),
+                    });
+                    continue;
+                }
+                Ok(None) => continue,
+                Err(error) => {
+                    roots.remove(&owner);
+                    skipped.push(SkippedRun {
+                        owner,
+                        reason: format!("could not read private runtime retry marker: {error:#}"),
+                    });
+                    continue;
+                }
             };
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    roots.remove(&owner);
+                    skipped.push(SkippedRun {
+                        owner,
+                        reason: "private runtime root is not a regular directory".to_string(),
+                    });
                     continue;
                 }
                 Ok(_) => match read_run_identity(&path) {
                     Ok(Some(root_identity))
                         if root_identity.owner == identity.owner
                             && root_identity.id == identity.id => {}
-                    _ => continue,
+                    Ok(Some(_)) => {
+                        roots.remove(&owner);
+                        skipped.push(SkippedRun {
+                            owner,
+                            reason: "private runtime root does not match its retry marker"
+                                .to_string(),
+                        });
+                        continue;
+                    }
+                    Ok(None) => {
+                        roots.remove(&owner);
+                        skipped.push(SkippedRun {
+                            owner,
+                            reason: "private runtime root has no verifiable run identity"
+                                .to_string(),
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        roots.remove(&owner);
+                        skipped.push(SkippedRun {
+                            owner,
+                            reason: format!("private runtime root is unverifiable: {error:#}"),
+                        });
+                        continue;
+                    }
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => continue,
+                Err(error) => {
+                    roots.remove(&owner);
+                    skipped.push(SkippedRun {
+                        owner,
+                        reason: format!("could not inspect private runtime root: {error}"),
+                    });
+                    continue;
+                }
             }
-            if verify_allowed_run_root(&path, &owner, allowed_bases).is_err()
-                || verify_runtime_root_path(&path).is_err()
+            if let Err(error) = verify_allowed_run_root(&path, &owner, allowed_bases)
+                .and_then(|()| verify_runtime_root_path(&path))
             {
+                roots.remove(&owner);
+                skipped.push(SkippedRun {
+                    owner,
+                    reason: error.to_string(),
+                });
                 continue;
             }
             roots.insert(
@@ -1290,7 +1362,7 @@ fn discover_private_run_roots(
             );
         }
     }
-    Ok(roots.into_values().collect())
+    Ok((roots.into_values().collect(), skipped))
 }
 
 fn verify_allowed_run_root(
@@ -1608,7 +1680,7 @@ fn trace_command(command: &Command, verbose: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{create_run_identity_guard, write_run_identity};
+    use crate::runtime::{create_run_identity_guard, preserve_run_identity, write_run_identity};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const OWNER: &str = "cladding-run-12345678-1234-4234-8234-123456789abc";
@@ -2089,6 +2161,50 @@ mod tests {
         assert!(report.cleaned[0].resources.is_empty());
         assert_eq!(report.cleaned[0].runtime_root, RootDisposition::Removed);
         assert!(!root.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn cleanup_preserves_a_replacement_directory_with_a_stale_sidecar() {
+        let base = temp_base("replacement-root");
+        let root = make_private_root(&base);
+        let sidecar = preserve_run_identity(&root, OWNER, IDENTITY).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        fs::create_dir(&root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let unrelated = root.join("unrelated-secret");
+        fs::write(&unrelated, "keep this replacement directory").unwrap();
+        let mut backend = backend_with(Vec::new());
+
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.skipped_unverifiable.len(), 1);
+        assert!(report.needs_failure_status());
+        assert!(report.cleaned.is_empty());
+        assert_eq!(
+            fs::read_to_string(&unrelated).unwrap(),
+            "keep this replacement directory"
+        );
+        assert!(sidecar.exists());
+
+        let mut backend = backend_with(vec![
+            container(&format!("{OWNER}-agent-instance"), "agent", "exited", &base),
+            socket_volume("run-socket", &base),
+        ]);
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.skipped_unverifiable.len(), 1);
+        assert!(backend.removed.is_empty());
+        assert_eq!(backend.resources.len(), 2);
+        assert_eq!(
+            fs::read_to_string(&unrelated).unwrap(),
+            "keep this replacement directory"
+        );
         let _ = fs::remove_dir_all(base);
     }
 

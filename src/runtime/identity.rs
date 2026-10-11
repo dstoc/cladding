@@ -10,6 +10,13 @@ const RUN_IDENTITY_SIDECAR_SUFFIX: &str = ".cladding-run-identity";
 pub(crate) struct RunIdentity {
     pub owner: String,
     pub id: String,
+    root_file_id: Option<RootFileId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootFileId {
+    device: u64,
+    inode: u64,
 }
 
 /// Holds the exclusive identity-file lock while a one-off run is active, or
@@ -46,8 +53,30 @@ pub fn create_run_identity_guard(
 
     file.try_lock()
         .with_context(|| format!("failed to lock run identity marker {}", marker.display()))?;
+    let root_metadata = fs::symlink_metadata(root)
+        .with_context(|| format!("failed to inspect private runtime root {}", root.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        anyhow::bail!(
+            "private runtime root {} is not a regular directory",
+            root.display()
+        );
+    }
+    let root_file_id = root_file_id(&root_metadata);
     writeln!(file, "{owner}").context("failed to write run owner to identity marker")?;
     writeln!(file, "{id}").context("failed to write run identity to identity marker")?;
+    match &root_file_id {
+        Some(root_file_id) => {
+            writeln!(file, "{}", root_file_id.device)
+                .context("failed to write runtime root device to identity marker")?;
+            writeln!(file, "{}", root_file_id.inode)
+                .context("failed to write runtime root inode to identity marker")?;
+        }
+        None => {
+            writeln!(file, "-")
+                .context("failed to write runtime root device to identity marker")?;
+            writeln!(file, "-").context("failed to write runtime root inode to identity marker")?;
+        }
+    }
     file.sync_all()
         .context("failed to sync run identity marker")?;
     File::open(root)
@@ -115,14 +144,20 @@ pub(crate) fn read_run_identity(root: &Path) -> anyhow::Result<Option<RunIdentit
             validate_private_root(&metadata, root)?;
             let marker = root.join(RUN_IDENTITY_FILE);
             match read_identity_file(&marker) {
-                Ok(identity) => Ok(Some(identity)),
+                Ok(identity) => {
+                    verify_root_file_id(&identity, &metadata, root, true)?;
+                    Ok(Some(identity))
+                }
                 Err(error)
                     if error
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
                 {
                     match read_sidecar_identity(root)? {
-                        Some(identity) => Ok(Some(identity)),
+                        Some(identity) => {
+                            verify_root_file_id(&identity, &metadata, root, false)?;
+                            Ok(Some(identity))
+                        }
                         None => Err(error),
                     }
                 }
@@ -168,6 +203,7 @@ pub(crate) fn run_identity_sidecar_path(root: &Path) -> anyhow::Result<PathBuf> 
 pub(crate) fn preserve_run_identity(root: &Path, owner: &str, id: &str) -> anyhow::Result<PathBuf> {
     let source = root.join(RUN_IDENTITY_FILE);
     let sidecar = run_identity_sidecar_path(root)?;
+    verify_run_identity(root, owner, id)?;
     match fs::symlink_metadata(&sidecar) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -223,6 +259,15 @@ pub(crate) fn remove_run_identity_sidecar(
     id: &str,
 ) -> anyhow::Result<()> {
     let sidecar = run_identity_sidecar_path(root)?;
+    match fs::symlink_metadata(root) {
+        Ok(_) => verify_run_identity(root, owner, id)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect private runtime root {}", root.display())
+            });
+        }
+    }
     let Some(identity) = read_sidecar_identity(root)? else {
         return Ok(());
     };
@@ -242,6 +287,20 @@ pub(crate) fn remove_run_identity_sidecar(
         .and_then(|directory| directory.sync_all())
         .with_context(|| format!("failed to sync temporary base {}", sidecar.display()))?;
     Ok(())
+}
+
+fn verify_run_identity(root: &Path, owner: &str, id: &str) -> anyhow::Result<()> {
+    match read_run_identity(root)? {
+        Some(identity) if identity.owner == owner && identity.id == id => Ok(()),
+        Some(_) => anyhow::bail!(
+            "private runtime root {} does not match the expected run identity",
+            root.display()
+        ),
+        None => anyhow::bail!(
+            "private runtime root {} has no run identity marker",
+            root.display()
+        ),
+    }
 }
 
 fn identity_marker_to_lock(root: &Path) -> anyhow::Result<PathBuf> {
@@ -344,14 +403,81 @@ fn parse_identity(file: &mut impl Read, marker: &Path) -> anyhow::Result<RunIden
     let mut lines = contents.lines();
     let owner = lines.next().unwrap_or_default();
     let id = lines.next().unwrap_or_default();
+    let root_device = lines.next();
+    let root_inode = lines.next();
     if owner.is_empty() || id.is_empty() || lines.next().is_some() {
         anyhow::bail!(
             "run identity marker {} has invalid contents",
             marker.display()
         );
     }
+    let root_file_id = match (root_device, root_inode) {
+        (None, None) => None,
+        (Some("-"), Some("-")) => None,
+        (Some(device), Some(inode)) => Some(RootFileId {
+            device: device.parse().with_context(|| {
+                format!(
+                    "run identity marker {} has an invalid root device",
+                    marker.display()
+                )
+            })?,
+            inode: inode.parse().with_context(|| {
+                format!(
+                    "run identity marker {} has an invalid root inode",
+                    marker.display()
+                )
+            })?,
+        }),
+        _ => {
+            anyhow::bail!(
+                "run identity marker {} has invalid contents",
+                marker.display()
+            );
+        }
+    };
     Ok(RunIdentity {
         owner: owner.to_string(),
         id: id.to_string(),
+        root_file_id,
     })
+}
+
+fn verify_root_file_id(
+    identity: &RunIdentity,
+    metadata: &fs::Metadata,
+    root: &Path,
+    marker_in_root: bool,
+) -> anyhow::Result<()> {
+    match (&identity.root_file_id, root_file_id(metadata)) {
+        (Some(expected), Some(actual)) if expected == &actual => Ok(()),
+        (Some(_), Some(_)) => anyhow::bail!(
+            "private runtime root {} does not match its durable run identity",
+            root.display()
+        ),
+        (None, _) if marker_in_root => Ok(()),
+        (None, _) => anyhow::bail!(
+            "private runtime root {} has no verifiable directory identity in its retry marker",
+            root.display()
+        ),
+        (Some(_), None) => anyhow::bail!(
+            "private runtime root {} cannot be verified on this platform",
+            root.display()
+        ),
+    }
+}
+
+fn root_file_id(metadata: &fs::Metadata) -> Option<RootFileId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(RootFileId {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
 }
