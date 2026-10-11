@@ -103,6 +103,40 @@ cleanup() {
         podman logs "$container" 2>&1 | tail -n 30 >&2 || true
       fi
     done
+    if [ -s "$temp_root/startup.log" ]; then
+      startup_details=$(
+        {
+          grep -Ei 'error|failed|permission|denied|no such|not found|exit code|exec format|operation not permitted' \
+            "$temp_root/startup.log" || true
+          tail -n 10 "$temp_root/startup.log"
+        } | awk '!seen[$0]++' | tail -n 30 | tr '\r\n' '  ' | sed 's/%/%25/g'
+      )
+      startup_details=$(printf '%s' "$startup_details" | cut -c1-4000)
+      printf '::error title=Runtime topology startup details::%s\n' "$startup_details"
+    fi
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      {
+        echo "### Runtime topology failure diagnostics"
+        echo
+        printf 'Phase: `%s` (exit code %s).\n' "$phase" "$status"
+        if [ -s "$temp_root/startup.log" ]; then
+          echo
+          echo "Cladding startup output (last 200 lines):"
+          echo
+          echo '```text'
+          tail -n 200 "$temp_root/startup.log"
+          echo '```'
+        fi
+        if [ -s "$temp_root/partial-startup.log" ]; then
+          echo
+          echo "Cladding partial-startup output (last 200 lines):"
+          echo
+          echo '```text'
+          tail -n 200 "$temp_root/partial-startup.log"
+          echo '```'
+        fi
+      } >> "$GITHUB_STEP_SUMMARY"
+    fi
   fi
   "$cladding_bin" --cladding-dir "$project_root" down >/dev/null 2>&1 || true
   rm -rf "$temp_root"

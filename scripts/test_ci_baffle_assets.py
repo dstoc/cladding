@@ -23,6 +23,9 @@ MACHINE_FEASIBILITY_WORKFLOW = (
     Path(__file__).parents[1]
     / ".github/workflows/podman-machine-linux-feasibility.yml"
 )
+PODMAN_MACHINE_BIND_VALIDATOR = (
+    Path(__file__).parents[1] / "scripts/validate_podman_machine_binds.sh"
+)
 
 
 def job_block(name: str) -> str:
@@ -100,6 +103,17 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('assert_denied_connect "$agent" agent', validator)
         self.assertIn('assert_denied_connect "$nw_sandbox" nw-sandbox', validator)
 
+    def test_topology_validator_saves_startup_diagnostics_to_actions_summary(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        self.assertIn('if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then', validator)
+        self.assertIn("Runtime topology failure diagnostics", validator)
+        self.assertIn('tail -n 200 "$temp_root/startup.log"', validator)
+        self.assertIn('tail -n 200 "$temp_root/partial-startup.log"', validator)
+        self.assertIn("Runtime topology startup details", validator)
+        self.assertIn('tail -n 10 "$temp_root/startup.log"', validator)
+        self.assertIn("grep -Ei 'error|failed|permission|denied", validator)
+        self.assertIn('cut -c1-4000', validator)
+
     def test_topology_validator_builds_and_times_one_minimal_shared_image(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
         containerfile = RUNTIME_TOPOLOGY_IMAGE.read_text()
@@ -161,6 +175,61 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("scripts/validate_runtime_topology.sh default", machine)
         self.assertNotIn("scripts/validate_baffle_runtime.sh", machine)
         self.assertNotIn("scripts/validate_managed_mounts.sh", machine)
+
+    def test_linux_machine_job_uses_the_pinned_rootless_remote_engine(self):
+        machine = job_block("baffle-podman-machine")
+        self.assertIn("runs-on: ubuntu-24.04", machine)
+        self.assertIn("needs: baffle-podman-machine-assets-x86_64", machine)
+        self.assertIn("PODMAN_VERSION: 5.8.2", machine)
+        self.assertIn("cargo build --locked --bin cladding", machine)
+        self.assertIn("podman-machine-default", machine)
+        self.assertIn(
+            "machine init --cpus 2 --memory 4096 --rootful=false", machine
+        )
+        self.assertIn(
+            'info --format \'{{.Host.Security.Rootless}}\'', machine
+        )
+        self.assertIn('machine ssh "$machine_name" id -u', machine)
+        self.assertIn(
+            'exec /usr/local/bin/podman --connection "${PODMAN_MACHINE_CONNECTION:?}" "$@"',
+            machine,
+        )
+        self.assertIn('export PATH="$podman_wrapper_dir:$PATH"', machine)
+        self.assertIn('trap cleanup EXIT', machine)
+        self.assertIn('machine rm --force "$machine_name"', machine)
+        self.assertIn(
+            'CLADDING_TOPOLOGY_TMP_DIR="$GITHUB_WORKSPACE"', machine
+        )
+        self.assertNotIn("baffle-macos-x86_64-build", machine)
+        self.assertNotIn("macos", machine)
+
+        self.assertNotIn("baffle-podman-machine-linux", TEXT)
+        self.assertIn("needs: baffle-podman-machine-assets-x86_64", machine)
+
+    def test_linux_machine_job_runs_the_four_case_bind_mount_reproduction(self):
+        machine = job_block("baffle-podman-machine")
+        validator = PODMAN_MACHINE_BIND_VALIDATOR.read_text()
+        repro = "scripts/validate_podman_machine_binds.sh"
+        topology = "scripts/validate_runtime_topology.sh default"
+        self.assertIn(repro, machine)
+        self.assertLess(machine.index(repro), machine.index(topology))
+        self.assertIn("PODMAN_MACHINE_CONNECTION", machine)
+        self.assertIn("id", validator)
+        self.assertIn("stat -c '%u:%g %a %n'", validator)
+        self.assertIn('"$machine_ssh" sh -lc', validator)
+        for probe in (
+            'run_probe A keep-id "$host_workspace"',
+            'run_probe B default "$host_workspace"',
+            'run_probe C keep-id "$vm_workspace"',
+            'run_probe D default "$vm_workspace"',
+        ):
+            with self.subTest(probe=probe):
+                self.assertIn(probe, validator)
+        self.assertIn("--userns keep-id", validator)
+        self.assertIn(
+            "::notice title=Podman Machine bind diagnostics::%s", validator
+        )
+        self.assertIn('>> "$GITHUB_STEP_SUMMARY"', validator)
 
     def test_linux_machine_feasibility_selects_rootless_remote_connection(self):
         workflow = MACHINE_FEASIBILITY_WORKFLOW.read_text()
@@ -365,10 +434,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("cladding-baffle-linux-tools-x86_64", intel_build)
         self.assertIn("cladding-macos-x86_64", intel_build)
 
-        intel = job_block("baffle-podman-machine")
-        self.assertIn("needs: baffle-macos-x86_64-build", intel)
-        self.assertNotIn("baffle-config", intel)
-        self.assertIn("name: cladding-macos-x86_64", intel)
+        linux_machine = job_block("baffle-podman-machine")
+        self.assertIn("needs: baffle-podman-machine-assets-x86_64", linux_machine)
+        self.assertNotIn("baffle-macos-x86_64-build", linux_machine)
+        self.assertNotIn("baffle-config", linux_machine)
+        self.assertNotIn(
+            "needs: baffle-podman-machine\n",
+            job_block("baffle-macos-x86_64-build"),
+        )
 
         apple_assets = job_block("baffle-podman-machine-assets-aarch64")
         self.assertIn("needs: linux-helper-assets-aarch64", apple_assets)

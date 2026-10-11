@@ -223,6 +223,10 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
     esac
   done
   if [ -n "$detached" ] && [ -n "$name" ]; then
+    if [ ! -d "$project_root/home/workspace" ]; then
+      echo "nested workspace mount point is missing: $project_root/home/workspace" >&2
+      exit 1
+    fi
     credentials_dir=
     config_dir=
     secret_source_dir=
@@ -836,6 +840,9 @@ exit 0
         private_key
     );
 
+    let nested_workspace_mountpoint = project_root.join("home/workspace");
+    fs::remove_dir_all(&nested_workspace_mountpoint).unwrap();
+    assert!(!nested_workspace_mountpoint.exists());
     let mut up = cli(
         &root,
         &bin_dir,
@@ -845,6 +852,7 @@ exit 0
     );
     up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
     assert_success(up.output().unwrap());
+    assert!(nested_workspace_mountpoint.is_dir());
     let startup_log = read_log(&podman_log);
     assert!(
         !startup_log.contains("pod create"),
