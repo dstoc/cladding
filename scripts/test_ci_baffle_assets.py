@@ -227,6 +227,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
             with self.subTest(probe=probe):
                 self.assertIn(probe, validator)
         self.assertIn("--userns keep-id", validator)
+        self.assertIn(
+            "::notice title=Podman Machine bind diagnostics::%s", validator
+        )
         self.assertIn('>> "$GITHUB_STEP_SUMMARY"', validator)
 
     def test_linux_machine_feasibility_selects_rootless_remote_connection(self):

@@ -79,6 +79,10 @@ run_probe() {
 } > "$report" 2>&1
 
 cat "$report"
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  annotation_report=$(tr '\r\n' '  ' < "$report" | sed 's/%/%25/g')
+  printf '::notice title=Podman Machine bind diagnostics::%s\n' "$annotation_report"
+fi
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
     echo "### Podman Machine bind mount reproduction"
