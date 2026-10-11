@@ -14,7 +14,15 @@ jobs:
       - name: Install Podman Machine and QEMU
         run: |
           sudo apt-get update
-          sudo apt-get install -y podman qemu-system-x86 qemu-utils uidmap slirp4netns fuse-overlayfs
+          sudo apt-get install -y \
+            podman \
+            qemu-system-x86 \
+            qemu-utils \
+            gvproxy \
+            virtiofsd \
+            uidmap \
+            slirp4netns \
+            fuse-overlayfs
           podman --version
           qemu-system-x86_64 --version
       - name: Repeat Podman Machine startup and remote-engine checks
