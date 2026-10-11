@@ -185,7 +185,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
     def test_linux_machine_job_uses_the_pinned_rootless_remote_engine(self):
         machine = job_block("baffle-podman-machine")
         self.assertIn("runs-on: ubuntu-24.04", machine)
-        self.assertIn("needs: baffle-podman-machine-assets-x86_64", machine)
+        self.assertIn("needs: embedded-linux-tools-x86_64", machine)
         self.assertIn("PODMAN_VERSION: 5.8.2", machine)
         self.assertIn("cargo build --locked --bin cladding", machine)
         self.assertIn("podman-machine-default", machine)
@@ -210,7 +210,6 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("macos", machine)
 
         self.assertNotIn("baffle-podman-machine-linux", TEXT)
-        self.assertIn("needs: baffle-podman-machine-assets-x86_64", machine)
 
     def test_linux_machine_job_runs_the_four_case_bind_mount_reproduction(self):
         machine = job_block("baffle-podman-machine")
@@ -298,20 +297,22 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("  build-baffle:\n", TEXT)
         self.assertNotRegex(TEXT, r"(?m)^\s*run: cargo install .*baffle-proxy")
 
-    def test_linux_helpers_are_built_once_per_architecture(self):
+    def test_complete_embedded_linux_tools_are_built_once_per_architecture(self):
         cases = {
-            "linux-helper-assets-x86_64": (
+            "embedded-linux-tools-x86_64": (
                 "x86_64",
                 "cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run",
-                "cladding-linux-helpers-x86_64",
+                "baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz",
+                "x86-64",
             ),
-            "linux-helper-assets-aarch64": (
+            "embedded-linux-tools-aarch64": (
                 "aarch64",
                 "cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target aarch64-unknown-linux-gnu --target-dir target/mcp-run",
-                "cladding-linux-helpers-aarch64",
+                "baffle-proxy-v1.1.0-aarch64-unknown-linux-gnu.tar.gz",
+                "aarch64",
             ),
         }
-        for job, (arch, build, artifact) in cases.items():
+        for job, (arch, build, archive, machine) in cases.items():
             with self.subTest(job=job):
                 block = job_block(job)
                 self.assertIn(build, block)
@@ -319,104 +320,94 @@ class BaffleCiAssetsTests(unittest.TestCase):
                     "cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c",
                     block,
                 )
-                machine = "x86-64" if arch == "x86_64" else "aarch64"
-                self.assertIn(f'"ELF 64-bit"*{machine}*) ;;', block)
-                self.assertIn("test -x \"$tool\"", block)
-                self.assertIn("actions/upload-artifact@v4", block)
-                self.assertIn(f"name: {artifact}", block)
-
-        self.assertEqual(
-            len(
-                re.findall(
-                    r"(?m)^\s*run: cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote",
-                    TEXT,
-                )
-            ),
-            2,
-        )
-
-    def test_linux_jobs_consume_matching_helper_artifacts(self):
-        for job in ("test", "baffle-config"):
-            with self.subTest(job=job):
-                block = job_block(job)
-                self.assertIn("needs: linux-helper-assets-x86_64", block)
-                self.assertIn("name: cladding-linux-helpers-x86_64", block)
-                self.assertIn("Restore and verify downloaded x86_64 Linux helpers", block)
-                self.assertIn("chmod 0755 \"$tool\"", block)
-                self.assertIn("file -b \"$tool\"", block)
-                self.assertIn('"ELF 64-bit"*x86-64*) ;;', block)
-                self.assertNotIn("cargo build --locked --release -p mcp-run", block)
-                self.assertNotIn("cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c", block)
-
-        test = job_block("test")
-        self.assertIn("CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-helpers/bin/mcp-run", test)
-        self.assertIn("CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-helpers/bin/run-remote", test)
-
-        config = job_block("baffle-config")
-        self.assertIn(
-            "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-helpers/bin/baffle-socket-probe",
-            config,
-        )
-
-        for job, arch, artifact in (
-            (
-                "baffle-podman-machine-assets-x86_64",
-                "x86_64",
-                "cladding-linux-helpers-x86_64",
-            ),
-            (
-                "baffle-podman-machine-assets-aarch64",
-                "aarch64",
-                "cladding-linux-helpers-aarch64",
-            ),
-        ):
-            with self.subTest(job=job):
-                block = job_block(job)
-                self.assertIn(f"needs: linux-helper-assets-{arch}", block)
-                self.assertIn(f"name: {artifact}", block)
-                self.assertIn(f"Restore and verify downloaded {arch} Linux helpers", block)
-                self.assertIn("chmod 0755 \"$tool\"", block)
-                self.assertIn("test -x \"$tool\"", block)
-                self.assertIn("file -b \"$tool\"", block)
-                machine = "x86-64" if arch == "x86_64" else "aarch64"
-                self.assertIn(f'"ELF 64-bit"*{machine}*) ;;', block)
-                self.assertNotIn("cargo build --locked --release -p mcp-run", block)
-                self.assertNotIn("cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c", block)
-
-    def test_each_ci_download_is_pinned_verified_and_arch_checked(self):
-        cases = {
-            "test": ("x86_64", "baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz"),
-            "baffle-config": (
-                "x86_64",
-                "baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz",
-            ),
-            "baffle-podman-machine-assets-x86_64": (
-                "x86_64",
-                "baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz",
-            ),
-            "baffle-podman-machine-assets-aarch64": (
-                "aarch64",
-                "baffle-proxy-v1.1.0-aarch64-unknown-linux-gnu.tar.gz",
-            ),
-        }
-        for job, (arch, archive) in cases.items():
-            with self.subTest(job=job):
-                block = job_block(job)
                 self.assertIn(f"BAFFLE_ARCHIVE: {archive}", block)
                 self.assertIn(
                     'release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"',
                     block,
                 )
-                self.assertIn('"$release_url/$BAFFLE_ARCHIVE"', block)
                 self.assertIn('"$release_url/SHA256SUMS"', block)
-                self.assertIn("awk -v archive=", block)
                 self.assertIn('test "$actual" = "$expected"', block)
-                self.assertIn("sha256sum", block)
-                self.assertIn("shasum -a 256", block)
-                self.assertIn('chmod 0755 "$RUNNER_TEMP/baffle/baffle"', block)
-                self.assertIn('description=$(file -b "$RUNNER_TEMP/baffle/baffle")', block)
-                machine = "x86-64" if arch == "x86_64" else "aarch64"
+                self.assertIn('tar -xzf "$archive_path"', block)
+                self.assertIn('cp "$RUNNER_TEMP/baffle/baffle"', block)
+                for name in (
+                    "baffle",
+                    "mcp-run",
+                    "run-remote",
+                    "baffle-socket-probe",
+                ):
+                    self.assertIn(f'"$asset_dir/{name}"', block)
                 self.assertIn(f'"ELF 64-bit"*{machine}*) ;;', block)
+                self.assertIn('test -x "$tool"', block)
+                self.assertIn("actions/upload-artifact@v4", block)
+                self.assertIn(f"name: embedded-linux-tools-{arch}", block)
+
+        self.assertEqual(
+            len(re.findall(r"(?m)^  embedded-linux-tools-[a-z0-9_]+:$", TEXT)),
+            2,
+        )
+        self.assertEqual(
+            TEXT.count("Download and verify pinned x86_64 Baffle release"), 1
+        )
+        self.assertEqual(
+            TEXT.count("Download and verify pinned aarch64 Baffle release"), 1
+        )
+
+    def test_ci_consumers_download_matching_complete_artifacts_directly(self):
+        cases = (
+            ("test", "x86_64", "x86-64"),
+            ("baffle-config", "x86_64", "x86-64"),
+            ("baffle-podman-machine", "x86_64", "x86-64"),
+            ("baffle-apple-silicon-build", "aarch64", "aarch64"),
+        )
+        for job, arch, machine in cases:
+            with self.subTest(job=job):
+                block = job_block(job)
+                artifact = f"embedded-linux-tools-{arch}"
+                self.assertIn(f"needs: {artifact}", block)
+                self.assertIn(f"name: {artifact}", block)
+                self.assertIn("actions/download-artifact@v4", block)
+                if job == "baffle-apple-silicon-build":
+                    self.assertIn("Restore and verify Linux aarch64 tools", block)
+                else:
+                    self.assertIn("Restore and verify embedded", block)
+                self.assertIn('chmod 0755 "$tool"', block)
+                self.assertIn('test -x "$tool"', block)
+                self.assertIn('file -b "$tool"', block)
+                self.assertIn(f'"ELF 64-bit"*{machine}*) ;;', block)
+                self.assertIn("baffle-socket-probe", block)
+                self.assertNotIn("Download and verify pinned", block)
+                self.assertNotIn("linux-helper-assets", block)
+                self.assertNotIn("baffle-podman-machine-assets", block)
+
+        test = job_block("test")
+        self.assertIn(
+            "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle", test
+        )
+        self.assertIn(
+            "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run", test
+        )
+        self.assertIn(
+            "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote",
+            test,
+        )
+        config = job_block("baffle-config")
+        self.assertIn(
+            "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe",
+            config,
+        )
+        self.assertIn('"$RUNNER_TEMP/linux-tools/bin/baffle"', config)
+
+    def test_linux_asset_graph_has_no_intermediate_staging_jobs(self):
+        for old_job in (
+            "linux-helper-assets-x86_64",
+            "linux-helper-assets-aarch64",
+            "baffle-podman-machine-assets-x86_64",
+            "baffle-podman-machine-assets-aarch64",
+        ):
+            with self.subTest(job=old_job):
+                self.assertNotRegex(TEXT, rf"(?m)^  {re.escape(old_job)}:$")
+        self.assertNotIn("cladding-linux-helpers-", TEXT)
+        self.assertNotIn("cladding-baffle-linux-tools-", TEXT)
 
     def test_release_jobs_use_pinned_verified_baffle_release_archives(self):
         self.assertNotIn("  build-baffle:\n", RELEASE_TEXT)
@@ -427,6 +418,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
         upload = job_block("upload-binaries", RELEASE_TEXT)
         self.assertIn("needs: [release-please, build-helpers]", upload)
+        self.assertNotIn("embedded-linux-tools-", upload)
         release_platforms = re.findall(
             r"(?m)^          - os: ([^\s]+)\n            target: ([^\s]+)\n"
             r"            baffle_arch: ([^\s]+)\n            helper_arch: ([^\s]+)$",
@@ -525,34 +517,28 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "The workflows use the explicit v1.1.0 release archives", prd
         )
 
-    def test_required_test_path_waits_only_for_x86_64_helper_prep(self):
+    def test_required_test_path_waits_only_for_x86_64_asset_prep(self):
         test = job_block("test")
-        self.assertIn("needs: linux-helper-assets-x86_64", test)
+        self.assertIn("needs: embedded-linux-tools-x86_64", test)
         self.assertNotIn("aarch64", test)
         self.assertNotIn("baffle-podman-machine", test)
 
         config = job_block("baffle-config")
-        self.assertIn("needs: linux-helper-assets-x86_64", config)
+        self.assertIn("needs: embedded-linux-tools-x86_64", config)
         self.assertNotIn("aarch64", config)
 
-        for job in ("linux-helper-assets-x86_64", "linux-helper-assets-aarch64"):
-            with self.subTest(job=job):
-                self.assertNotRegex(job_block(job), r"(?m)^    needs:")
-
-        linux_x86_64_assets = job_block("baffle-podman-machine-assets-x86_64")
-        self.assertIn("needs: linux-helper-assets-x86_64", linux_x86_64_assets)
-        self.assertNotIn("linux-helper-assets-aarch64", linux_x86_64_assets)
+        for arch in ("x86_64", "aarch64"):
+            with self.subTest(arch=arch):
+                producer = job_block(f"embedded-linux-tools-{arch}")
+                self.assertNotRegex(producer, r"(?m)^    needs:")
 
         linux_machine = job_block("baffle-podman-machine")
-        self.assertIn("needs: baffle-podman-machine-assets-x86_64", linux_machine)
+        self.assertIn("needs: embedded-linux-tools-x86_64", linux_machine)
         self.assertNotIn("baffle-config", linux_machine)
 
-        apple_assets = job_block("baffle-podman-machine-assets-aarch64")
-        self.assertIn("needs: linux-helper-assets-aarch64", apple_assets)
-        self.assertNotIn("linux-helper-assets-x86_64", apple_assets)
         apple_silicon = job_block("baffle-apple-silicon-build")
-        self.assertIn("needs: baffle-podman-machine-assets-aarch64", apple_silicon)
-        self.assertIn("cladding-baffle-linux-tools-aarch64", apple_silicon)
+        self.assertIn("needs: embedded-linux-tools-aarch64", apple_silicon)
+        self.assertIn("embedded-linux-tools-aarch64", apple_silicon)
         self.assertIn('test -f "$tool"', apple_silicon)
         self.assertIn('test -x "$tool"', apple_silicon)
         self.assertIn('"ELF 64-bit"*aarch64*) ;;', apple_silicon)
@@ -568,9 +554,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertNotIn(reference, TEXT)
                 self.assertNotIn(reference, RELEASE_TEXT)
 
-        self.assertIn("baffle-podman-machine-assets-x86_64", TEXT)
-        self.assertIn("linux-helper-assets-x86_64", TEXT)
-        self.assertIn("linux-helper-assets-aarch64", TEXT)
+        self.assertIn("embedded-linux-tools-x86_64", TEXT)
+        self.assertIn("embedded-linux-tools-x86_64", TEXT)
+        self.assertIn("embedded-linux-tools-aarch64", TEXT)
         self.assertIn("baffle-podman-machine:", TEXT)
         self.assertIn("scripts/validate_runtime_topology.sh default", TEXT)
         self.assertIn("baffle-apple-silicon-build:", TEXT)
