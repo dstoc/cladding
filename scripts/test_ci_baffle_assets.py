@@ -172,6 +172,53 @@ class BaffleCiAssetsTests(unittest.TestCase):
             'podman --connection "$machine_name" info --format', workflow
         )
 
+    def test_linux_machine_feasibility_pins_upstream_remote_client(self):
+        workflow = MACHINE_FEASIBILITY_WORKFLOW.read_text()
+        self.assertIn("on:\n  workflow_dispatch:", workflow)
+        self.assertIn("runs-on: ubuntu-24.04", workflow)
+        install_packages = workflow.split(
+            "sudo apt-get install -y \\\n", 1
+        )[1].split("          podman --version", 1)[0]
+        self.assertEqual(
+            [
+                line.strip().rstrip("\\").strip()
+                for line in install_packages.splitlines()
+            ],
+            [
+                "podman",
+                "qemu-system-x86",
+                "qemu-utils",
+                "gvproxy",
+                "virtiofsd",
+                "uidmap",
+                "slirp4netns",
+                "fuse-overlayfs",
+            ],
+        )
+        self.assertIn("PODMAN_VERSION: 5.8.2", workflow)
+        self.assertIn("--repo podman-container-tools/podman", workflow)
+        self.assertIn(
+            "--pattern podman-remote-static-linux_amd64.tar.gz", workflow
+        )
+        self.assertIn(
+            '"$release_dir/bin/podman-remote-static-linux_amd64"', workflow
+        )
+        self.assertIn(
+            'test "$(podman --version)" = "podman version ${PODMAN_VERSION}"',
+            workflow,
+        )
+        self.assertIn(
+            'sudo ln -sf /usr/bin/gvproxy "$helper_dir/gvproxy"', workflow
+        )
+        self.assertIn(
+            'sudo ln -sf /usr/libexec/virtiofsd "$helper_dir/virtiofsd"',
+            workflow,
+        )
+        self.assertIn("sudo chmod 666 /dev/kvm", workflow)
+        self.assertIn("for attempt in 1 2 3; do", workflow)
+        self.assertIn('podman machine ssh "$machine_name" id -u', workflow)
+        self.assertIn("trap cleanup EXIT", workflow)
+
     def test_baffle_is_not_built_from_source_in_ci(self):
         self.assertNotIn("  build-baffle:\n", TEXT)
         self.assertNotRegex(TEXT, r"(?m)^\s*run: cargo install .*baffle-proxy")

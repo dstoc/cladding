@@ -14,9 +14,54 @@ jobs:
       - name: Install Podman Machine and QEMU
         run: |
           sudo apt-get update
-          sudo apt-get install -y podman qemu-system-x86 qemu-utils uidmap slirp4netns fuse-overlayfs
+          sudo apt-get install -y \
+            podman \
+            qemu-system-x86 \
+            qemu-utils \
+            gvproxy \
+            virtiofsd \
+            uidmap \
+            slirp4netns \
+            fuse-overlayfs
           podman --version
           qemu-system-x86_64 --version
+      - name: Install upstream Podman remote client
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PODMAN_VERSION: 5.8.2
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/podman-${PODMAN_VERSION}"
+          mkdir -p "$release_dir"
+          gh release download "v${PODMAN_VERSION}" \
+            --repo podman-container-tools/podman \
+            --pattern podman-remote-static-linux_amd64.tar.gz \
+            --dir "$release_dir"
+          archive="$release_dir/podman-remote-static-linux_amd64.tar.gz"
+          tar -tzf "$archive" | grep -Fx bin/podman-remote-static-linux_amd64
+          tar -xzf "$archive" -C "$release_dir"
+          sudo install -m 0755 \
+            "$release_dir/bin/podman-remote-static-linux_amd64" \
+            /usr/local/bin/podman
+          test "$(command -v podman)" = /usr/local/bin/podman
+          test "$(podman --version)" = "podman version ${PODMAN_VERSION}"
+          podman --version
+      - name: Configure Podman Machine helpers and KVM
+        run: |
+          set -euo pipefail
+          helper_dir=/usr/local/libexec/podman
+          sudo install -d "$helper_dir"
+          sudo ln -sf /usr/bin/gvproxy "$helper_dir/gvproxy"
+          sudo ln -sf /usr/libexec/virtiofsd "$helper_dir/virtiofsd"
+          test -x "$helper_dir/gvproxy"
+          test -x "$helper_dir/virtiofsd"
+          echo "gvproxy: $(readlink -f "$helper_dir/gvproxy")"
+          echo "virtiofsd: $(readlink -f "$helper_dir/virtiofsd")"
+          ls -l "$helper_dir"
+
+          sudo chmod 666 /dev/kvm
+          stat --format='KVM permissions: %a %n' /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
       - name: Repeat Podman Machine startup and remote-engine checks
         shell: bash
         run: |
