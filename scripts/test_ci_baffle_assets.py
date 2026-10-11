@@ -106,6 +106,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("Runtime topology failure diagnostics", validator)
         self.assertIn('tail -n 200 "$temp_root/startup.log"', validator)
         self.assertIn('tail -n 200 "$temp_root/partial-startup.log"', validator)
+        self.assertIn("Runtime topology startup details", validator)
+        self.assertIn('tail -n 25 "$temp_root/startup.log"', validator)
+        self.assertIn('cut -c1-4000', validator)
 
     def test_topology_validator_builds_and_times_one_minimal_shared_image(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()

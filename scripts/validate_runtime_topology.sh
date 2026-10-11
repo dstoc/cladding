@@ -103,6 +103,11 @@ cleanup() {
         podman logs "$container" 2>&1 | tail -n 30 >&2 || true
       fi
     done
+    if [ -s "$temp_root/startup.log" ]; then
+      startup_details=$(tail -n 25 "$temp_root/startup.log" | tr '\n' ' ' | sed -e 's/%/%25/g' -e 's/\r/%0D/g')
+      startup_details=$(printf '%s' "$startup_details" | cut -c1-4000)
+      printf '::error title=Runtime topology startup details::%s\n' "$startup_details"
+    fi
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
       {
         echo "### Runtime topology failure diagnostics"
