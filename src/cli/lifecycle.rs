@@ -354,6 +354,7 @@ fn cmd_up_inner(
     }
 
     check_project_readiness(context, &config, &spec, verbose, quiet_helpers)?;
+    ensure_workspace_mountpoint(&context.project_root)?;
     if !fail_if_already_running {
         prepare_runtime_files(&context.runtime_root)?;
         fs::create_dir_all(context.runtime_root.join("runtime/empty-mask"))
@@ -369,6 +370,17 @@ fn cmd_up_inner(
         return Err(startup_error);
     }
 
+    Ok(())
+}
+
+fn ensure_workspace_mountpoint(project_root: &std::path::Path) -> Result<()> {
+    let workspace_mountpoint = project_root.join("home/workspace");
+    fs::create_dir_all(&workspace_mountpoint).with_context(|| {
+        format!(
+            "failed to create nested workspace mount point {}",
+            workspace_mountpoint.display()
+        )
+    })?;
     Ok(())
 }
 
