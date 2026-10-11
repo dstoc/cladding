@@ -4,6 +4,7 @@
 import http.server
 import json
 import os
+import signal
 import socket
 import ssl
 import threading
@@ -73,23 +74,51 @@ class DualStackThreadingHTTPServer(http.server.ThreadingHTTPServer):
         super().server_bind()
 
 
-def serve(port, certificate=None, private_key=None):
+def create_server(port, certificate=None, private_key=None):
     server = DualStackThreadingHTTPServer(("::", port), OriginHandler)
     if certificate is not None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certificate, private_key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def serve(server):
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.1},
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def main():
     os.makedirs(os.path.dirname(EVENTS), exist_ok=True)
     certificate = "/fixtures/server.crt"
     private_key = "/fixtures/server.key"
-    serve(8080)
-    serve(8443, certificate, private_key)
-    serve(9443, certificate, private_key)
-    threading.Event().wait()
+    servers = [
+        create_server(8080),
+        create_server(8443, certificate, private_key),
+        create_server(9443, certificate, private_key),
+    ]
+    shutdown_requested = threading.Event()
+
+    def request_shutdown(_signum, _frame):
+        shutdown_requested.set()
+
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
+    threads = [serve(server) for server in servers]
+    try:
+        shutdown_requested.wait()
+    finally:
+        for server in servers:
+            server.shutdown()
+        for thread in threads:
+            thread.join()
+        for server in servers:
+            server.server_close()
 
 
 if __name__ == "__main__":

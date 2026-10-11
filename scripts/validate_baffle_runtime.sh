@@ -73,6 +73,36 @@ monotonic_ns() {
   python3 -c 'import time; print(time.monotonic_ns())'
 }
 
+stop_origin_container() {
+  container_name=$1
+  started_ns=$(monotonic_ns)
+  podman stop "$container_name" >/dev/null
+  finished_ns=$(monotonic_ns)
+  elapsed_ms=$(((finished_ns - started_ns) / 1000000))
+  exit_code=$(podman inspect --format '{{.State.ExitCode}}' "$container_name")
+  printf 'TLS origin %s stopped in %s ms (exit code %s)\n' \
+    "$container_name" "$elapsed_ms" "$exit_code"
+  if [ "$exit_code" != 0 ]; then
+    echo "TLS origin $container_name did not exit cleanly (exit code $exit_code)" >&2
+    return 1
+  fi
+  if [ "$elapsed_ms" -ge 5000 ]; then
+    echo "TLS origin $container_name took ${elapsed_ms} ms to stop; expected less than 5000 ms" >&2
+    return 1
+  fi
+}
+
+cleanup_origin_container() {
+  container_name=$1
+  if ! podman container exists "$container_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! stop_origin_container "$container_name"; then
+    echo "could not stop TLS origin $container_name gracefully during cleanup" >&2
+    return 1
+  fi
+}
+
 managed_socket_volume_names() {
   podman volume ls \
     --filter "label=cladding_resource=inter-container-socket" \
@@ -151,8 +181,11 @@ sys.stdout.buffer.write(output)
 cleanup() {
   status=$?
   trap - EXIT
-  if [ -n "$run_origin_name" ]; then
-    podman rm -f "$run_origin_name" >/dev/null 2>&1 || true
+  if [ -n "$run_origin_name" ] && ! cleanup_origin_container "$run_origin_name"; then
+    status=1
+  fi
+  if ! cleanup_origin_container "$origin_name"; then
+    status=1
   fi
   if [ -n "$run_pid" ]; then
     kill "$run_pid" 2>/dev/null || true
@@ -172,8 +205,15 @@ cleanup() {
       | redact_fixture_values >&2 || true
     podman logs "$origin_name" 2>&1 \
       | redact_fixture_values >&2 || true
+    if [ -n "$run_origin_name" ]; then
+      podman logs "$run_origin_name" 2>&1 \
+        | redact_fixture_values >&2 || true
+    fi
   fi
-  podman rm -f "$origin_name" >/dev/null 2>&1 || true
+  if [ -n "$run_origin_name" ]; then
+    podman rm "$run_origin_name" >/dev/null 2>&1 || true
+  fi
+  podman rm "$origin_name" >/dev/null 2>&1 || true
   "$cladding_bin" --cladding-dir "$project_root" down >/dev/null 2>&1 || true
   podman image rm "$proxy_image" "$client_image" "$origin_image" >/dev/null 2>&1 || true
   rm -rf "$temp_root"
@@ -829,7 +869,8 @@ fi
 printf '%s' "$body" | jq -e '.authorization == "none"' >/dev/null
 if [ "$socket_topology_only" = true ]; then
   phase="remove local TLS origin before persistent shutdown"
-  podman rm -f "$origin_name" >/dev/null
+  stop_origin_container "$origin_name"
+  podman rm "$origin_name" >/dev/null
   phase="stop persistent runtime after socket communication"
   "$cladding_bin" --cladding-dir "$project_root" down
   phase="verify managed socket volumes were removed"
@@ -990,7 +1031,8 @@ jq -s -e 'any(.[]; .path == "/authorized/curl" and .authorization == "old")
   "$temp_root/events.jsonl" >/dev/null
 
 phase="remove local TLS origin before persistent shutdown"
-podman rm -f "$origin_name" >/dev/null
+stop_origin_container "$origin_name"
+podman rm "$origin_name" >/dev/null
 shutdown_started_ns=$(monotonic_ns)
 phase="stop persistent runtime after integration requests"
 "$cladding_bin" --cladding-dir "$project_root" down
@@ -1234,7 +1276,8 @@ if grep -F "$run_secret_value" "$temp_root/run.log" >/dev/null; then
   exit 1
 fi
 phase="stop one-off TLS origin before runtime cleanup"
-podman rm -f "$run_origin_name" >/dev/null
+stop_origin_container "$run_origin_name"
+podman rm "$run_origin_name" >/dev/null
 run_origin_name=
 phase="verify one-off command preserves its nonzero exit status"
 touch "$temp_root/workspace/.run-finish"

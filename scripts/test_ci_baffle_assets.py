@@ -86,6 +86,27 @@ class BaffleCiAssetsTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 self.assertIn(phase, validator)
 
+    def test_baffle_runtime_stops_tls_origins_gracefully(self):
+        validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
+        origin = (Path(__file__).parent / "baffle_test_origin.py").read_text()
+
+        self.assertIn("signal.signal(signal.SIGTERM, request_shutdown)", origin)
+        self.assertIn("shutdown_requested.wait()", origin)
+        self.assertIn("server.shutdown()", origin)
+        self.assertIn("server.server_close()", origin)
+        self.assertIn("stop_origin_container() {", validator)
+        self.assertIn('podman stop "$container_name"', validator)
+        self.assertIn("[ \"$exit_code\" != 0 ]", validator)
+        self.assertIn('[ "$elapsed_ms" -ge 5000 ]', validator)
+        self.assertIn('podman rm "$origin_name"', validator)
+        self.assertIn('podman rm "$run_origin_name"', validator)
+        self.assertEqual(validator.count('stop_origin_container "$origin_name"'), 2)
+        self.assertEqual(validator.count('stop_origin_container "$run_origin_name"'), 1)
+        self.assertIn('cleanup_origin_container "$origin_name"', validator)
+        self.assertIn('cleanup_origin_container "$run_origin_name"', validator)
+        self.assertNotIn('podman rm -f "$origin_name"', validator)
+        self.assertNotIn('podman rm -f "$run_origin_name"', validator)
+
     def test_baffle_config_validator_prepares_managed_socket_volume_permissions(self):
         validator = BAFFLE_CONFIG_VALIDATOR.read_text()
         self.assertIn('initialize_socket_volume() {', validator)
