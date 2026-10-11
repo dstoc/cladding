@@ -2,6 +2,7 @@ use anyhow::Context as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 const RUN_IDENTITY_FILE: &str = ".cladding-run-identity";
 const RUN_IDENTITY_SIDECAR_SUFFIX: &str = ".cladding-run-identity";
@@ -17,6 +18,7 @@ pub(crate) struct RunIdentity {
 struct RootFileId {
     device: u64,
     inode: u64,
+    created_at: Option<(u64, u32)>,
 }
 
 /// Holds the exclusive identity-file lock while a one-off run is active, or
@@ -70,11 +72,26 @@ pub fn create_run_identity_guard(
                 .context("failed to write runtime root device to identity marker")?;
             writeln!(file, "{}", root_file_id.inode)
                 .context("failed to write runtime root inode to identity marker")?;
+            if let Some((seconds, nanoseconds)) = root_file_id.created_at {
+                writeln!(file, "{seconds}")
+                    .context("failed to write runtime root creation time to identity marker")?;
+                writeln!(file, "{nanoseconds}")
+                    .context("failed to write runtime root creation time to identity marker")?;
+            } else {
+                writeln!(file, "-")
+                    .context("failed to write runtime root creation time to identity marker")?;
+                writeln!(file, "-")
+                    .context("failed to write runtime root creation time to identity marker")?;
+            }
         }
         None => {
             writeln!(file, "-")
                 .context("failed to write runtime root device to identity marker")?;
             writeln!(file, "-").context("failed to write runtime root inode to identity marker")?;
+            writeln!(file, "-")
+                .context("failed to write runtime root creation time to identity marker")?;
+            writeln!(file, "-")
+                .context("failed to write runtime root creation time to identity marker")?;
         }
     }
     file.sync_all()
@@ -403,30 +420,72 @@ fn parse_identity(file: &mut impl Read, marker: &Path) -> anyhow::Result<RunIden
     let mut lines = contents.lines();
     let owner = lines.next().unwrap_or_default();
     let id = lines.next().unwrap_or_default();
-    let root_device = lines.next();
-    let root_inode = lines.next();
-    if owner.is_empty() || id.is_empty() || lines.next().is_some() {
+    let root_fields = lines.collect::<Vec<_>>();
+    if owner.is_empty() || id.is_empty() {
         anyhow::bail!(
             "run identity marker {} has invalid contents",
             marker.display()
         );
     }
-    let root_file_id = match (root_device, root_inode) {
-        (None, None) => None,
-        (Some("-"), Some("-")) => None,
-        (Some(device), Some(inode)) => Some(RootFileId {
-            device: device.parse().with_context(|| {
-                format!(
-                    "run identity marker {} has an invalid root device",
-                    marker.display()
-                )
-            })?,
-            inode: inode.parse().with_context(|| {
-                format!(
-                    "run identity marker {} has an invalid root inode",
-                    marker.display()
-                )
-            })?,
+    let parse_root_device = |value: &str| {
+        value.parse().with_context(|| {
+            format!(
+                "run identity marker {} has an invalid root device",
+                marker.display()
+            )
+        })
+    };
+    let parse_root_inode = |value: &str| {
+        value.parse().with_context(|| {
+            format!(
+                "run identity marker {} has an invalid root inode",
+                marker.display()
+            )
+        })
+    };
+    let parse_created_seconds = |value: &str| {
+        value.parse().with_context(|| {
+            format!(
+                "run identity marker {} has an invalid root creation time",
+                marker.display()
+            )
+        })
+    };
+    let parse_created_nanoseconds = |value: &str| {
+        let nanoseconds: u32 = value.parse().with_context(|| {
+            format!(
+                "run identity marker {} has an invalid root creation time",
+                marker.display()
+            )
+        })?;
+        if nanoseconds >= 1_000_000_000 {
+            anyhow::bail!(
+                "run identity marker {} has an invalid root creation time",
+                marker.display()
+            );
+        }
+        Ok(nanoseconds)
+    };
+    let root_file_id = match root_fields.as_slice() {
+        [] | ["-", "-"] => None,
+        [device, inode] => Some(RootFileId {
+            device: parse_root_device(device)?,
+            inode: parse_root_inode(inode)?,
+            created_at: None,
+        }),
+        ["-", "-", "-", "-"] => None,
+        [device, inode, "-", "-"] => Some(RootFileId {
+            device: parse_root_device(device)?,
+            inode: parse_root_inode(inode)?,
+            created_at: None,
+        }),
+        [device, inode, seconds, nanoseconds] => Some(RootFileId {
+            device: parse_root_device(device)?,
+            inode: parse_root_inode(inode)?,
+            created_at: Some((
+                parse_created_seconds(seconds)?,
+                parse_created_nanoseconds(nanoseconds)?,
+            )),
         }),
         _ => {
             anyhow::bail!(
@@ -449,7 +508,22 @@ fn verify_root_file_id(
     marker_in_root: bool,
 ) -> anyhow::Result<()> {
     match (&identity.root_file_id, root_file_id(metadata)) {
-        (Some(expected), Some(actual)) if expected == &actual => Ok(()),
+        (Some(expected), Some(actual))
+            if expected.device == actual.device && expected.inode == actual.inode =>
+        {
+            match (expected.created_at, actual.created_at) {
+                (Some(expected_created_at), Some(actual_created_at))
+                    if expected_created_at == actual_created_at =>
+                {
+                    Ok(())
+                }
+                (None, _) if marker_in_root => Ok(()),
+                _ => anyhow::bail!(
+                    "private runtime root {} does not match its durable run identity",
+                    root.display()
+                ),
+            }
+        }
         (Some(_), Some(_)) => anyhow::bail!(
             "private runtime root {} does not match its durable run identity",
             root.display()
@@ -473,11 +547,44 @@ fn root_file_id(metadata: &fs::Metadata) -> Option<RootFileId> {
         Some(RootFileId {
             device: metadata.dev(),
             inode: metadata.ino(),
+            created_at: metadata
+                .created()
+                .ok()
+                .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+                .map(|created| (created.as_secs(), created.subsec_nanos())),
         })
     }
     #[cfg(not(unix))]
     {
         let _ = metadata;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn reused_directory_inode_with_a_different_creation_time_is_rejected() {
+        let metadata = fs::metadata("/").unwrap();
+        let actual = root_file_id(&metadata).unwrap();
+        let different_created_at = match actual.created_at {
+            Some((seconds, nanoseconds)) if nanoseconds < 999_999_999 => (seconds, nanoseconds + 1),
+            Some((seconds, _)) => (seconds.wrapping_add(1), 0),
+            None => (u64::MAX, 0),
+        };
+        let recorded = RootFileId {
+            created_at: Some(different_created_at),
+            ..actual
+        };
+        let identity = RunIdentity {
+            owner: "cladding-run-12345678-1234-4234-8234-123456789abc".to_string(),
+            id: "12345678-1234-4234-8234-123456789abc".to_string(),
+            root_file_id: Some(recorded),
+        };
+
+        assert!(verify_root_file_id(&identity, &metadata, Path::new("/"), false).is_err());
     }
 }
