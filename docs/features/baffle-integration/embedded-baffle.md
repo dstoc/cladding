@@ -19,11 +19,13 @@ CI runs Baffle in Cladding's default proxy image to check its loader and shared
 libraries. The integration suite also starts the executable that Cladding
 extracts during `cladding build`.
 
-Release archives are built for Linux x86_64, Linux aarch64, Intel macOS, and
+Published release archives are built for Linux x86_64, Linux aarch64, and
 Apple Silicon macOS. Each archive embeds the Linux GNU Baffle executable for
 the matching Podman guest architecture. CI builds Baffle on a native Linux
 runner for each architecture, checks it in the default proxy image, and reuses
-the validated files in the release jobs.
+the validated files in the release jobs. The Linux-hosted Podman Machine job
+checks the x86_64 guest topology. The Apple Silicon build job checks the
+embedded aarch64 executable.
 
 Cladding writes the embedded executable to `.cladding/tools/bin/baffle` and
 sets its mode to executable. `cladding check` reports a missing or outdated

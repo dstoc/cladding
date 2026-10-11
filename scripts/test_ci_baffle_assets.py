@@ -8,6 +8,8 @@ from pathlib import Path
 
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/ci.yml"
 TEXT = WORKFLOW.read_text()
+RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github/workflows/release-please.yml"
+RELEASE_TEXT = RELEASE_WORKFLOW.read_text()
 BAFFLE_CONFIG_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_baffle_config.sh"
 BAFFLE_RUNTIME_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_baffle_runtime.sh"
@@ -28,9 +30,9 @@ PODMAN_MACHINE_BIND_VALIDATOR = (
 )
 
 
-def job_block(name: str) -> str:
+def job_block(name: str, workflow: str = TEXT) -> str:
     match = re.search(
-        rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)", TEXT
+        rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)", workflow
     )
     if match is None:
         raise AssertionError(f"workflow job is missing: {name}")
@@ -426,22 +428,13 @@ class BaffleCiAssetsTests(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertNotRegex(job_block(job), r"(?m)^    needs:")
 
-        intel_assets = job_block("baffle-podman-machine-assets-x86_64")
-        self.assertIn("needs: linux-helper-assets-x86_64", intel_assets)
-        self.assertNotIn("linux-helper-assets-aarch64", intel_assets)
-        intel_build = job_block("baffle-macos-x86_64-build")
-        self.assertIn("needs: baffle-podman-machine-assets-x86_64", intel_build)
-        self.assertIn("cladding-baffle-linux-tools-x86_64", intel_build)
-        self.assertIn("cladding-macos-x86_64", intel_build)
+        linux_x86_64_assets = job_block("baffle-podman-machine-assets-x86_64")
+        self.assertIn("needs: linux-helper-assets-x86_64", linux_x86_64_assets)
+        self.assertNotIn("linux-helper-assets-aarch64", linux_x86_64_assets)
 
         linux_machine = job_block("baffle-podman-machine")
         self.assertIn("needs: baffle-podman-machine-assets-x86_64", linux_machine)
-        self.assertNotIn("baffle-macos-x86_64-build", linux_machine)
         self.assertNotIn("baffle-config", linux_machine)
-        self.assertNotIn(
-            "needs: baffle-podman-machine\n",
-            job_block("baffle-macos-x86_64-build"),
-        )
 
         apple_assets = job_block("baffle-podman-machine-assets-aarch64")
         self.assertIn("needs: linux-helper-assets-aarch64", apple_assets)
@@ -452,6 +445,45 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('test -f "$tool"', apple_silicon)
         self.assertIn('test -x "$tool"', apple_silicon)
         self.assertIn('"ELF 64-bit"*aarch64*) ;;', apple_silicon)
+
+    def test_ci_and_release_platforms_exclude_intel_macos(self):
+        for reference in (
+            "baffle-macos-x86_64-build",
+            "macos-15-intel",
+            "cladding-macos-x86_64",
+            "x86_64-apple-darwin",
+        ):
+            with self.subTest(reference=reference):
+                self.assertNotIn(reference, TEXT)
+                self.assertNotIn(reference, RELEASE_TEXT)
+
+        self.assertIn("baffle-podman-machine-assets-x86_64", TEXT)
+        self.assertIn("linux-helper-assets-x86_64", TEXT)
+        self.assertIn("linux-helper-assets-aarch64", TEXT)
+        self.assertIn("baffle-podman-machine:", TEXT)
+        self.assertIn("scripts/validate_runtime_topology.sh default", TEXT)
+        self.assertIn("baffle-apple-silicon-build:", TEXT)
+        self.assertEqual(
+            re.findall(r"(?m)^    runs-on: (macos-[^\s]+)$", TEXT),
+            ["macos-15"],
+        )
+        self.assertIn(
+            "runs-on: macos-15", job_block("baffle-apple-silicon-build")
+        )
+
+        release_upload = job_block("upload-binaries", RELEASE_TEXT)
+        release_platforms = re.findall(
+            r"(?m)^          - os: ([^\s]+)\n            target: ([^\s]+)$",
+            release_upload,
+        )
+        self.assertEqual(
+            release_platforms,
+            [
+                ("ubuntu-latest", "x86_64-unknown-linux-gnu"),
+                ("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu"),
+                ("macos-latest", "aarch64-apple-darwin"),
+            ],
+        )
 
     def test_behavior_and_notice_coverage_remain_in_ci(self):
         test = job_block("test")

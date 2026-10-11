@@ -627,55 +627,6 @@ jobs:
             CLADDING_TOPOLOGY_TMP_DIR="$GITHUB_WORKSPACE" \
             scripts/validate_runtime_topology.sh default
 
-  baffle-macos-x86_64-build:
-    runs-on: macos-15-intel
-    needs: baffle-podman-machine-assets-x86_64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: cladding-baffle-linux-tools-x86_64
-          path: ${{ runner.temp }}/linux-tools
-      - name: Restore and verify embedded Linux tools
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = x86_64
-          tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote; do
-            tool="$tool_dir/$name"
-            test -f "$tool"
-            chmod 0755 "$tool"
-            test -x "$tool"
-            description=$(file -b "$tool")
-            printf '%s: %s\n' "$tool" "$description"
-            case "$description" in
-              "ELF 64-bit"*x86-64*) ;;
-              *) echo "Expected an x86_64 Linux executable: $tool" >&2; exit 1 ;;
-            esac
-          done
-      - uses: dtolnay/rust-toolchain@1.96
-      - name: Set prebuilt Linux binary paths
-        run: |
-          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
-          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
-          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-      - name: Build Cladding for Intel macOS with Linux embedded binaries
-        run: cargo build --locked --bin cladding
-      - name: Verify the embedded Baffle architecture
-        run: cargo test --locked --lib baffle_is_embedded_as_a_linux_binary
-      - name: Stage native macOS Cladding CLI
-        run: |
-          mkdir -p "$RUNNER_TEMP/cladding-macos-x86_64"
-          cp target/debug/cladding "$RUNNER_TEMP/cladding-macos-x86_64/cladding"
-          chmod 0755 "$RUNNER_TEMP/cladding-macos-x86_64/cladding"
-          file "$RUNNER_TEMP/cladding-macos-x86_64/cladding"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cladding-macos-x86_64
-          path: ${{ runner.temp }}/cladding-macos-x86_64/cladding
-          if-no-files-found: error
-
   # Keep the native Apple Silicon build check independent of Machine coverage.
   baffle-apple-silicon-build:
     runs-on: macos-15
