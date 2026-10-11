@@ -92,6 +92,32 @@ stop_origin_container() {
   fi
 }
 
+wait_for_process_exit() {
+  process_id=$1
+  attempts=$2
+  attempt=0
+  while kill -0 "$process_id" 2>/dev/null; do
+    if [ "$attempt" -ge "$attempts" ]; then
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+}
+
+reap_finished_run() {
+  if [ -z "$run_pid" ] || kill -0 "$run_pid" 2>/dev/null; then
+    return 1
+  fi
+  if wait "$run_pid"; then
+    run_status=0
+  else
+    run_status=$?
+  fi
+  run_pid=
+  return 0
+}
+
 cleanup_origin_container() {
   container_name=$1
   if ! podman container exists "$container_name" >/dev/null 2>&1; then
@@ -216,9 +242,25 @@ cleanup() {
     cleanup_failed=true
   fi
   if [ -n "$run_pid" ]; then
-    kill "$run_pid" 2>/dev/null || true
-    wait "$run_pid" 2>/dev/null || true
-    run_pid=
+    # Stop any fixture first, then let the one-off command exit through its gates.
+    touch "$temp_root/workspace/.run-origin-ready" \
+      "$temp_root/workspace/.run-finish" \
+      "$temp_root/workspace/.failure-run-finish" 2>/dev/null || true
+    if ! wait_for_process_exit "$run_pid" 50; then
+      echo "one-off run did not exit after its workload gates were released; sending SIGKILL" >&2
+      kill -KILL "$run_pid" 2>/dev/null || true
+      if ! wait_for_process_exit "$run_pid" 20; then
+        echo "one-off run is still active after the forced-kill fallback" >&2
+        cleanup_failed=true
+      fi
+    fi
+    if ! reap_finished_run; then
+      echo "one-off run could not be reaped after bounded cleanup" >&2
+      cleanup_failed=true
+    elif [ "$expected_failure_probe" = true ] && [ "$run_status" -ne 0 ]; then
+      echo "failure-trap workload exited with status $run_status; expected 0" >&2
+      cleanup_failed=true
+    fi
   fi
   if ! cleanup_origin_container "$origin_name"; then
     cleanup_failed=true
@@ -1170,7 +1212,8 @@ test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
 (
   cd "$temp_root/workspace"
   export CLADDING_RUN_SECRET_OVERRIDE="$run_secret_value"
-  TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v \
+  export TMPDIR="$temp_root/run-tmp"
+  exec "$cladding_bin" --cladding-dir "$project_root" run -v \
     --secret "$run_secret_name=env:CLADDING_RUN_SECRET_OVERRIDE" -- \
     /bin/sh -ec 'test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
       while [ ! -f /home/user/workspace/.run-origin-ready ]; do sleep 1; done
@@ -1180,16 +1223,7 @@ test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
       touch /home/user/workspace/.run-request-done
       while [ ! -f /home/user/workspace/.run-finish ]; do sleep 1; done
       exit 7' \
-    > "$temp_root/run.log" 2>&1 &
-  run_child=$!
-  trap 'kill "$run_child" 2>/dev/null || true; wait "$run_child" 2>/dev/null || true' HUP INT TERM
-  if wait "$run_child"; then
-    run_status=0
-  else
-    run_status=$?
-  fi
-  trap - HUP INT TERM
-  printf '%s\n' "$run_status" > "$temp_root/run.status"
+    > "$temp_root/run.log" 2>&1
 ) &
 run_pid=$!
 run_root=
@@ -1201,7 +1235,7 @@ while [ "$attempt" -lt 60 ]; do
   if [ -n "$run_root" ]; then
     break
   fi
-  if [ -f "$temp_root/run.status" ]; then
+  if reap_finished_run; then
     echo "one-off runtime exited before creating its private runtime root" >&2
     exit 1
   fi
@@ -1230,7 +1264,7 @@ fi
 attempt=0
 while ! podman container exists "$run_name-proxy-instance" >/dev/null 2>&1 \
   || ! podman container exists "$run_name-agent-instance" >/dev/null 2>&1; do
-  if [ "$attempt" -ge 60 ] || [ -f "$temp_root/run.status" ]; then
+  if [ "$attempt" -ge 60 ] || reap_finished_run; then
     echo "one-off runtime did not start its proxy and agent containers" >&2
     exit 1
   fi
@@ -1325,7 +1359,7 @@ touch "$temp_root/workspace/.run-origin-ready"
 phase="verify Baffle resolves the run-only secret override"
 attempt=0
 while [ ! -f "$temp_root/workspace/.run-request-done" ]; do
-  if [ "$attempt" -ge 60 ] || [ -f "$temp_root/run.status" ]; then
+  if [ "$attempt" -ge 60 ] || reap_finished_run; then
     echo "one-off command did not complete its Baffle secret request" >&2
     exit 1
   fi
@@ -1349,10 +1383,13 @@ run_origin_name=
 phase="verify one-off command preserves its nonzero exit status"
 touch "$temp_root/workspace/.run-finish"
 set +e
-wait "$run_pid"
+if wait_for_process_exit "$run_pid" 600; then
+  reap_finished_run || run_status=125
+else
+  echo "one-off command did not exit after its workload gate was released" >&2
+  exit 1
+fi
 set -e
-run_status=$(cat "$temp_root/run.status")
-run_pid=
 if [ "$run_status" -ne 7 ]; then
   echo "one-off command exited with status $run_status; expected 7" >&2
   exit 1
@@ -1391,17 +1428,10 @@ echo "Baffle policy, HTTPS clients, reload, trust, project-state reuse, CA reuse
 phase="start one-off runtime for failure-trap cleanup check"
 (
   cd "$temp_root/workspace"
-  TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v -- \
-    /bin/sh -ec 'while :; do sleep 1; done' > "$temp_root/failure-run.log" 2>&1 &
-  run_child=$!
-  trap 'kill "$run_child" 2>/dev/null || true; wait "$run_child" 2>/dev/null || true' HUP INT TERM
-  if wait "$run_child"; then
-    run_status=0
-  else
-    run_status=$?
-  fi
-  trap - HUP INT TERM
-  printf '%s\n' "$run_status" > "$temp_root/failure-run.status"
+  export TMPDIR="$temp_root/run-tmp"
+  exec "$cladding_bin" --cladding-dir "$project_root" run -v -- \
+    /bin/sh -ec 'while [ ! -f /home/user/workspace/.failure-run-finish ]; do sleep 1; done' \
+    > "$temp_root/failure-run.log" 2>&1
 ) &
 run_pid=$!
 run_root=
@@ -1413,7 +1443,7 @@ while [ "$attempt" -lt 60 ]; do
   if [ -n "$run_root" ]; then
     break
   fi
-  if [ -f "$temp_root/failure-run.status" ]; then
+  if reap_finished_run; then
     echo "one-off failure-trap runtime exited before creating its private runtime root" >&2
     exit 1
   fi
@@ -1433,7 +1463,7 @@ run_proxy="$run_name-proxy-instance"
 attempt=0
 while ! podman container exists "$run_proxy" >/dev/null 2>&1 \
   || ! podman container exists "$run_name-agent-instance" >/dev/null 2>&1; do
-  if [ "$attempt" -ge 60 ] || [ -f "$temp_root/failure-run.status" ]; then
+  if [ "$attempt" -ge 60 ] || reap_finished_run; then
     echo "one-off failure-trap runtime did not start its proxy and agent containers" >&2
     exit 1
   fi
