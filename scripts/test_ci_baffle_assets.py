@@ -111,6 +111,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("grep -Ei 'error|failed|permission|denied", validator)
         self.assertIn('cut -c1-4000', validator)
 
+    def test_topology_validator_prepares_nested_workspace_mount_point(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        prepare = 'mkdir -p "$project_root/home/workspace"'
+        self.assertIn(prepare, validator)
+        self.assertLess(
+            validator.index(prepare), validator.index('phase="start Cladding topology"')
+        )
+
     def test_topology_validator_builds_and_times_one_minimal_shared_image(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
         containerfile = RUNTIME_TOPOLOGY_IMAGE.read_text()

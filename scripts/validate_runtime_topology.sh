@@ -153,6 +153,11 @@ phase="initialize Cladding project"
   "$cladding_bin" init "$project_name" >/dev/null
 )
 
+phase="prepare nested workspace mount point"
+# The workspace bind is nested under the project-home bind. Create its
+# target before a remote rootless runtime mounts the home directory.
+mkdir -p "$project_root/home/workspace"
+
 phase="configure sandbox communication and a shared managed mount"
 host_uid=$(id -u)
 host_gid=$(id -g)
