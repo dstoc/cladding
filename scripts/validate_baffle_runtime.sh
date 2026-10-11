@@ -135,7 +135,11 @@ client_image="localhost/$project_name-client:latest"
 origin_image="localhost/$project_name-origin:latest"
 run_origin_name=
 run_pid=
+run_root=
+run_name=
+run_proxy=
 run_secret_value=
+failure_trap_probe=false
 phase=initialize
 
 redact_run_log() {
@@ -181,15 +185,84 @@ sys.stdout.buffer.write(output)
 cleanup() {
   status=$?
   trap - EXIT
-  if [ -n "$run_origin_name" ] && ! cleanup_origin_container "$run_origin_name"; then
-    status=1
+  expected_failure_probe=false
+  cleanup_failed=false
+  if [ "$failure_trap_probe" = true ] && [ "$status" -eq 86 ]; then
+    expected_failure_probe=true
   fi
-  if ! cleanup_origin_container "$origin_name"; then
-    status=1
+  if [ "$status" -ne 0 ] || [ "$expected_failure_probe" = true ]; then
+    if [ -n "$run_origin_name" ]; then
+      podman logs "$run_origin_name" > "$temp_root/run-origin.log" 2>&1 || true
+    fi
+    podman logs "$origin_name" > "$temp_root/origin.log" 2>&1 || true
+    podman logs "$proxy" > "$temp_root/proxy.log" 2>&1 || true
+    if [ -n "$run_proxy" ]; then
+      podman logs "$run_proxy" > "$temp_root/run-proxy.log" 2>&1 || true
+    fi
+  fi
+  if [ -n "$run_origin_name" ] && ! cleanup_origin_container "$run_origin_name"; then
+    cleanup_failed=true
+  fi
+  if [ -n "$run_origin_name" ] \
+    && podman container exists "$run_origin_name" >/dev/null 2>&1; then
+    if ! podman rm "$run_origin_name" >/dev/null; then
+      echo "could not remove stopped one-off TLS origin $run_origin_name" >&2
+      cleanup_failed=true
+    fi
+  fi
+  if [ -n "$run_origin_name" ] \
+    && podman container exists "$run_origin_name" >/dev/null 2>&1; then
+    echo "one-off TLS origin $run_origin_name remains before runtime cleanup" >&2
+    cleanup_failed=true
   fi
   if [ -n "$run_pid" ]; then
     kill "$run_pid" 2>/dev/null || true
     wait "$run_pid" 2>/dev/null || true
+    run_pid=
+  fi
+  if ! cleanup_origin_container "$origin_name"; then
+    cleanup_failed=true
+  fi
+  if podman container exists "$origin_name" >/dev/null 2>&1; then
+    if ! podman rm "$origin_name" >/dev/null; then
+      echo "could not remove stopped persistent TLS origin $origin_name" >&2
+      cleanup_failed=true
+    fi
+  fi
+  if [ "$expected_failure_probe" = true ]; then
+    if [ -n "$run_proxy" ] && podman container exists "$run_proxy" >/dev/null 2>&1; then
+      echo "one-off proxy remains after failure-trap cleanup: $run_proxy" >&2
+      cleanup_failed=true
+    fi
+    for component in agent nw-sandbox fs-sandbox; do
+      if [ -n "$run_name" ] \
+        && podman container exists "$run_name-$component-instance" >/dev/null 2>&1; then
+        echo "one-off $component remains after failure-trap cleanup: $run_name-$component-instance" >&2
+        cleanup_failed=true
+      fi
+    done
+    socket_volumes=$(managed_socket_volume_names)
+    if [ -n "$socket_volumes" ]; then
+      echo "managed socket volumes remain after failure-trap cleanup: $socket_volumes" >&2
+      cleanup_failed=true
+    fi
+    if [ -n "$run_root" ] && [ -e "$run_root" ]; then
+      echo "one-off runtime root remains after failure-trap cleanup: $run_root" >&2
+      cleanup_failed=true
+    fi
+    if [ -n "$run_origin_name" ] \
+      && podman container exists "$run_origin_name" >/dev/null 2>&1; then
+      echo "one-off TLS origin remains after failure-trap cleanup: $run_origin_name" >&2
+      cleanup_failed=true
+    fi
+    if [ "$cleanup_failed" = false ]; then
+      echo "one-off failure-trap cleanup passed ($runtime runtime)"
+      status=0
+    else
+      status=1
+    fi
+  elif [ "$cleanup_failed" = true ]; then
+    status=1
   fi
   if [ "$status" -ne 0 ]; then
     echo "Baffle runtime integration failed during: $phase" >&2
@@ -201,19 +274,13 @@ cleanup() {
         echo "Could not safely redact the saved cladding run output; log omitted." >&2
       fi
     fi
-    podman logs "$project_name-proxy-instance" 2>&1 \
-      | redact_fixture_values >&2 || true
-    podman logs "$origin_name" 2>&1 \
-      | redact_fixture_values >&2 || true
-    if [ -n "$run_origin_name" ]; then
-      podman logs "$run_origin_name" 2>&1 \
-        | redact_fixture_values >&2 || true
-    fi
+    for log_file in "$temp_root/proxy.log" "$temp_root/origin.log" \
+      "$temp_root/run-proxy.log" "$temp_root/run-origin.log"; do
+      if [ -s "$log_file" ]; then
+        redact_fixture_values < "$log_file" >&2 || true
+      fi
+    done
   fi
-  if [ -n "$run_origin_name" ]; then
-    podman rm "$run_origin_name" >/dev/null 2>&1 || true
-  fi
-  podman rm "$origin_name" >/dev/null 2>&1 || true
   "$cladding_bin" --cladding-dir "$project_root" down >/dev/null 2>&1 || true
   podman image rm "$proxy_image" "$client_image" "$origin_image" >/dev/null 2>&1 || true
   rm -rf "$temp_root"
@@ -1320,3 +1387,73 @@ if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sand
 fi
 
 echo "Baffle policy, HTTPS clients, reload, trust, project-state reuse, CA reuse, and run cleanup passed ($runtime runtime)"
+
+phase="start one-off runtime for failure-trap cleanup check"
+(
+  cd "$temp_root/workspace"
+  TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v -- \
+    /bin/sh -ec 'while :; do sleep 1; done' > "$temp_root/failure-run.log" 2>&1 &
+  run_child=$!
+  trap 'kill "$run_child" 2>/dev/null || true; wait "$run_child" 2>/dev/null || true' HUP INT TERM
+  if wait "$run_child"; then
+    run_status=0
+  else
+    run_status=$?
+  fi
+  trap - HUP INT TERM
+  printf '%s\n' "$run_status" > "$temp_root/failure-run.status"
+) &
+run_pid=$!
+run_root=
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+  run_root=$(find "$temp_root/run-tmp" -mindepth 2 -maxdepth 4 \
+    -path '*/runtime/scripts/proxy_startup.sh' -print -quit \
+    | sed 's|/runtime/scripts/proxy_startup.sh$||')
+  if [ -n "$run_root" ]; then
+    break
+  fi
+  if [ -f "$temp_root/failure-run.status" ]; then
+    echo "one-off failure-trap runtime exited before creating its private runtime root" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+if [ -z "$run_root" ]; then
+  echo "one-off failure-trap runtime did not create its private startup script" >&2
+  exit 1
+fi
+run_name=$(sed -n 's/^starting one-off instance: //p' "$temp_root/failure-run.log" | head -n 1)
+if [ -z "$run_name" ]; then
+  echo "one-off failure-trap runtime did not report its runtime name" >&2
+  exit 1
+fi
+run_proxy="$run_name-proxy-instance"
+attempt=0
+while ! podman container exists "$run_proxy" >/dev/null 2>&1 \
+  || ! podman container exists "$run_name-agent-instance" >/dev/null 2>&1; do
+  if [ "$attempt" -ge 60 ] || [ -f "$temp_root/failure-run.status" ]; then
+    echo "one-off failure-trap runtime did not start its proxy and agent containers" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+require_socket_volume_count 2
+run_origin_name="$project_name-failure-run-origin"
+phase="start TLS origin for one-off failure-trap cleanup"
+podman run --detach --name "$run_origin_name" --network "container:$run_proxy" "$origin_image" >/dev/null
+attempt=0
+while ! podman exec "$run_origin_name" curl --insecure --fail --silent \
+  https://localhost:8443/health >/dev/null 2>&1; do
+  if [ "$attempt" -ge 60 ]; then
+    echo "one-off failure-trap TLS origin did not become ready" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+failure_trap_probe=true
+phase="exercise one-off failure-trap cleanup"
+exit 86
