@@ -246,7 +246,8 @@ cleanup() {
     touch "$temp_root/workspace/.run-origin-ready" \
       "$temp_root/workspace/.run-finish" \
       "$temp_root/workspace/.failure-run-finish" 2>/dev/null || true
-    if ! wait_for_process_exit "$run_pid" 50; then
+    # Let Podman finish runsc teardown before the forced-kill fallback.
+    if ! wait_for_process_exit "$run_pid" 600; then
       echo "one-off run did not exit after its workload gates were released; sending SIGKILL" >&2
       kill -KILL "$run_pid" 2>/dev/null || true
       if ! wait_for_process_exit "$run_pid" 20; then
