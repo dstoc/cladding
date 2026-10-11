@@ -471,7 +471,7 @@ jobs:
           path: ${{ runner.temp }}/cladding-baffle-tools-aarch64
           if-no-files-found: error
 
-  baffle-podman-machine:
+  baffle-podman-machine-linux:
     runs-on: ubuntu-24.04
     needs: baffle-podman-machine-assets-x86_64
     timeout-minutes: 45
@@ -564,11 +564,17 @@ jobs:
           set -euo pipefail
           machine_name=podman-machine-default
           podman_cli=/usr/local/bin/podman
+          host_probe_root="$GITHUB_WORKSPACE/cladding-machine-bind-repro-${GITHUB_RUN_ID}"
+          host_probe_workspace="$host_probe_root/workspace"
+          vm_probe_root="/tmp/cladding-machine-bind-repro-${GITHUB_RUN_ID}"
+          vm_probe_workspace="$vm_probe_root/workspace"
           cleanup() {
             status=$?
             trap - EXIT INT TERM
+            "$podman_cli" machine ssh "$machine_name" rm -rf "$vm_probe_root" >/dev/null 2>&1 || true
             "$podman_cli" machine stop "$machine_name" >/dev/null 2>&1 || true
             "$podman_cli" machine rm --force "$machine_name" >/dev/null 2>&1 || true
+            rmdir "$host_probe_workspace" "$host_probe_root" >/dev/null 2>&1 || true
             exit "$status"
           }
           trap cleanup EXIT
@@ -595,7 +601,81 @@ jobs:
           test "$(command -v podman)" = "$podman_wrapper_dir/podman"
           test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
 
+          podman_machine_ssh="$RUNNER_TEMP/podman-machine-ssh"
+          cat > "$podman_machine_ssh" <<'EOF'
+          #!/bin/sh
+          exec /usr/local/bin/podman machine ssh "$PODMAN_MACHINE_CONNECTION" "$@"
+          EOF
+          chmod 0755 "$podman_machine_ssh"
+          mkdir -p "$host_probe_workspace"
+          "$podman_machine_ssh" mkdir -p "$vm_probe_workspace"
+          host_uid=$(id -u)
+          host_gid=$(id -g)
+          podman build --tag localhost/cladding-runtime-topology:latest \
+            --build-arg "UID=$host_uid" \
+            --build-arg "GID=$host_gid" \
+            --file scripts/runtime-topology-image/Containerfile \
+            scripts/runtime-topology-image
+          sh scripts/validate_podman_machine_binds.sh \
+            localhost/cladding-runtime-topology:latest \
+            "$host_probe_workspace" \
+            "$vm_probe_workspace" \
+            "$GITHUB_WORKSPACE" \
+            "$podman_machine_ssh"
+
           CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" \
+            CLADDING_TOPOLOGY_TMP_DIR="$GITHUB_WORKSPACE" \
+            scripts/validate_runtime_topology.sh default
+
+  baffle-podman-machine:
+    # Keep the macOS fallback until the Linux bind and topology checks pass.
+    runs-on: macos-15-intel
+    needs: baffle-macos-x86_64-build
+    env:
+      PODMAN_VERSION: 5.8.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-macos-x86_64
+          path: ${{ runner.temp }}/cladding-macos-x86_64
+      - name: Restore the native macOS Cladding CLI
+        run: |
+          cladding_bin="$RUNNER_TEMP/cladding-macos-x86_64/cladding"
+          test -f "$cladding_bin"
+          chmod 0755 "$cladding_bin"
+          test -x "$cladding_bin"
+          file "$cladding_bin"
+      - name: Install pinned Podman for macOS
+        run: |
+          podman_pkg="$RUNNER_TEMP/podman-installer-macos-amd64.pkg"
+          curl --fail --location --retry 3 --output "$podman_pkg" "https://github.com/podman-container-tools/podman/releases/download/v${PODMAN_VERSION}/podman-installer-macos-amd64.pkg"
+          echo "2312f91523aeb168709f35d41576ade763c891c3991befe7173aac0edf133af9  $podman_pkg" | shasum -a 256 --check
+          sudo installer -pkg "$podman_pkg" -target /
+          echo "/opt/podman/bin" >> "$GITHUB_PATH"
+          export PATH="/opt/podman/bin:$PATH"
+          podman --version
+      - name: Start fallback Podman Machine and validate topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          machine_name=podman-machine-default
+          cleanup() {
+            status=$?
+            trap - EXIT INT TERM
+            podman machine stop "$machine_name" >/dev/null 2>&1 || true
+            podman machine rm --force "$machine_name" >/dev/null 2>&1 || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          podman machine init --cpus 2 --memory 4096 --rootful=false "$machine_name"
+          podman machine start "$machine_name"
+          rootless=$(podman --connection "$machine_name" info --format '{{.Host.Security.Rootless}}')
+          test "$rootless" = true
+          CLADDING_BIN="$RUNNER_TEMP/cladding-macos-x86_64/cladding" \
             CLADDING_TOPOLOGY_TMP_DIR="$GITHUB_WORKSPACE" \
             scripts/validate_runtime_topology.sh default
 
