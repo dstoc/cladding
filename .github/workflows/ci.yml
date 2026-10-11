@@ -471,7 +471,7 @@ jobs:
           path: ${{ runner.temp }}/cladding-baffle-tools-aarch64
           if-no-files-found: error
 
-  baffle-podman-machine-linux:
+  baffle-podman-machine:
     runs-on: ubuntu-24.04
     needs: baffle-podman-machine-assets-x86_64
     timeout-minutes: 45
@@ -647,73 +647,6 @@ jobs:
           name: cladding-macos-x86_64
           path: ${{ runner.temp }}/cladding-macos-x86_64/cladding
           if-no-files-found: error
-
-  baffle-podman-machine:
-    # Keep the macOS fallback until Linux-hosted Cladding topology passes.
-    runs-on: macos-15-intel
-    needs: baffle-macos-x86_64-build
-    env:
-      PODMAN_VERSION: 5.8.2
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: cladding-macos-x86_64
-          path: ${{ runner.temp }}/cladding-macos-x86_64
-      # Artifact downloads do not retain executable file modes.
-      - name: Restore the native macOS Cladding CLI
-        run: |
-          cladding_bin="$RUNNER_TEMP/cladding-macos-x86_64/cladding"
-          test -f "$cladding_bin"
-          chmod 0755 "$cladding_bin"
-          test -x "$cladding_bin"
-          file "$cladding_bin"
-      - name: Install pinned Podman for macOS
-        run: |
-          podman_pkg="$RUNNER_TEMP/podman-installer-macos-amd64.pkg"
-          curl --fail --location --retry 3 --output "$podman_pkg" "https://github.com/podman-container-tools/podman/releases/download/v${PODMAN_VERSION}/podman-installer-macos-amd64.pkg"
-          echo "2312f91523aeb168709f35d41576ade763c891c3991befe7173aac0edf133af9  $podman_pkg" | shasum -a 256 --check
-          sudo installer -pkg "$podman_pkg" -target /
-          echo "/opt/podman/bin" >> "$GITHUB_PATH"
-          export PATH="/opt/podman/bin:$PATH"
-          podman --version
-      - name: Initialize Podman machine
-        run: |
-          set +e
-          podman --log-level=debug machine init >"$RUNNER_TEMP/podman-machine-init.log" 2>&1
-          status=$?
-          set -e
-          cat "$RUNNER_TEMP/podman-machine-init.log"
-          if [ "$status" -ne 0 ]; then
-            tail -n 20 "$RUNNER_TEMP/podman-machine-init.log" | while IFS= read -r line; do
-              escaped="${line//%/%25}"
-              printf '::error title=podman machine init::%s\n' "$escaped"
-            done
-            exit "$status"
-          fi
-      - name: Start Podman machine
-        run: |
-          set +e
-          podman --log-level=debug machine start >"$RUNNER_TEMP/podman-machine-start.log" 2>&1
-          status=$?
-          set -e
-          cat "$RUNNER_TEMP/podman-machine-start.log"
-          if [ "$status" -ne 0 ]; then
-            diagnostics="$(grep -Ei -B 2 -A 2 'error|failed|invalid|unsupported|vfkit|hypervisor|hv_' "$RUNNER_TEMP/podman-machine-start.log" | tail -n 25 | tr '\n' ' ' || true)"
-            if [ -z "$diagnostics" ]; then
-              diagnostics="$(tail -n 25 "$RUNNER_TEMP/podman-machine-start.log" | tr '\n' ' ')"
-            fi
-            diagnostics="${diagnostics//%/%25}"
-            printf '::error title=Podman machine startup diagnostics::%s\n' "$diagnostics"
-            hypervisor="$(sysctl kern.hv_support 2>&1 || true)"
-            printf '::error title=Host hypervisor capability::%s\n' "${hypervisor//%/%25}"
-            exit "$status"
-          fi
-      - name: Verify rootless Podman machine
-        run: |
-          podman info --format '{{.Host.Security.Rootless}}'
-      - name: Validate shared runtime topology through macOS Podman machine
-        run: CLADDING_BIN="$RUNNER_TEMP/cladding-macos-x86_64/cladding" CLADDING_TOPOLOGY_TMP_DIR="$GITHUB_WORKSPACE" scripts/validate_runtime_topology.sh default
 
   # Keep the native Apple Silicon build check independent of Machine coverage.
   baffle-apple-silicon-build:
