@@ -1,4 +1,5 @@
 use super::commands::{build_idle_supervisor_command, build_mcp_run_supervisor_command};
+use super::identity::read_run_identity;
 use super::mounts::{
     apply_custom_mounts, build_agent_mounts, build_custom_mounts, build_fs_sandbox_mounts,
     build_proxy_mounts, build_sandbox_mounts,
@@ -448,6 +449,11 @@ fn build_labels(
             "cladding_runtime_root".to_string(),
             runtime_root.display().to_string(),
         );
+        if let Ok(Some(identity)) = read_run_identity(runtime_root)
+            && identity.owner == project_name
+        {
+            labels.insert("cladding_runtime_identity".to_string(), identity.id);
+        }
     }
 
     labels
@@ -470,6 +476,9 @@ mod tests {
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static RUN_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn execution_config(
         nw_enabled: bool,
@@ -838,6 +847,49 @@ mod tests {
             assert!(!component.labels.contains_key("cladding_resource"));
             assert!(!component.labels.contains_key("cladding_runtime_root"));
         }
+    }
+
+    #[test]
+    fn one_off_container_labels_include_the_private_root_identity() {
+        let owner = "cladding-run-12345678-1234-4234-8234-123456789abc";
+        let identity = "fedcba98-7654-4321-8765-cba987654321";
+        let serial = RUN_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "cladding-component-identity-{}-{serial}",
+            std::process::id()
+        ));
+        let runtime_root = base.join(owner);
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&runtime_root, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        crate::runtime::write_run_identity(&runtime_root, owner, identity).unwrap();
+
+        let project_root = Path::new("/tmp/project/.cladding");
+        let workspace_root = Path::new("/tmp/project");
+        let mut config = execution_config(true, true, Vec::new(), false);
+        config.name = owner.to_string();
+        let spec =
+            RuntimeSpec::build_with_roots(project_root, workspace_root, &runtime_root, &config);
+        for component in [
+            &spec.proxy,
+            &spec.agent,
+            spec.nw_sandbox.as_ref().unwrap(),
+            spec.fs_sandbox.as_ref().unwrap(),
+        ] {
+            assert_eq!(
+                component
+                    .labels
+                    .get("cladding_runtime_identity")
+                    .map(String::as_str),
+                Some(identity)
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

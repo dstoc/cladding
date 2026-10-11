@@ -398,8 +398,20 @@ fn socket_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, Stri
             "cladding_runtime_root".to_string(),
             spec.runtime_root.to_string_lossy().into_owned(),
         );
+        add_run_identity_label(&mut labels, spec);
     }
     labels
+}
+
+fn add_run_identity_label(labels: &mut BTreeMap<String, String>, spec: &RuntimeSpec) {
+    if spec.runtime_root == spec.project_root {
+        return;
+    }
+    if let Ok(Some(identity)) = crate::runtime::read_run_identity(&spec.runtime_root)
+        && identity.owner == spec.project_name
+    {
+        labels.insert("cladding_runtime_identity".to_string(), identity.id);
+    }
 }
 
 fn socket_volume_labels_match(
@@ -498,7 +510,7 @@ fn ensure_managed_mount_volumes(
 }
 
 fn managed_mount_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut labels = BTreeMap::from([
         ("cladding".to_string(), spec.project_name.clone()),
         (
             "project_root".to_string(),
@@ -510,7 +522,9 @@ fn managed_mount_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<Strin
             spec.runtime_root.to_string_lossy().into_owned(),
         ),
         ("cladding_mount_volume".to_string(), name.to_string()),
-    ])
+    ]);
+    add_run_identity_label(&mut labels, spec);
+    labels
 }
 
 fn managed_mount_seed_helper_name(name: &str) -> String {
@@ -1418,6 +1432,9 @@ mod tests {
         RuntimeUserNamespace,
     };
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static RUN_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn command_args(cmd: &Command) -> Vec<String> {
         cmd.get_args()
@@ -2034,6 +2051,41 @@ mod tests {
         let missing_resource =
             serde_json::to_value(missing_resource).expect("serialize incomplete volume labels");
         assert!(!labels_match_expected(&missing_resource, &expected));
+    }
+
+    #[test]
+    fn one_off_volume_and_seed_helper_labels_include_the_private_root_identity() {
+        let owner = "cladding-run-12345678-1234-4234-8234-123456789abc";
+        let identity = "fedcba98-7654-4321-8765-cba987654321";
+        let serial = RUN_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "cladding-volume-identity-{}-{serial}",
+            std::process::id()
+        ));
+        let root = base.join(owner);
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        crate::runtime::write_run_identity(&root, owner, identity).unwrap();
+
+        let mut spec = test_runtime_spec();
+        spec.project_name = owner.to_string();
+        spec.runtime_root = root.clone();
+        for labels in [
+            socket_volume_labels(&spec, "run-socket"),
+            managed_mount_volume_labels(&spec, "managed-volume"),
+            managed_mount_seed_helper_labels(&spec, "managed-volume"),
+        ] {
+            assert_eq!(
+                labels.get("cladding_runtime_identity").map(String::as_str),
+                Some(identity)
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

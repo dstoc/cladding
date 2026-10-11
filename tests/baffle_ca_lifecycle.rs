@@ -73,6 +73,7 @@ if [ "$1" = "volume" ] && [ "$2" = "create" ]; then
   project_root=
   resource=
   runtime_root=
+  runtime_identity=
   socket_volume=
   while [ "$#" -gt 0 ]; do
     if [ "$1" = "--label" ]; then
@@ -82,6 +83,7 @@ if [ "$1" = "volume" ] && [ "$2" = "create" ]; then
         project_root=*) project_root=${1#project_root=} ;;
         cladding_resource=*) resource=${1#cladding_resource=} ;;
         cladding_runtime_root=*) runtime_root=${1#cladding_runtime_root=} ;;
+        cladding_runtime_identity=*) runtime_identity=${1#cladding_runtime_identity=} ;;
         cladding_socket_volume=*) socket_volume=${1#cladding_socket_volume=} ;;
       esac
     else
@@ -89,8 +91,8 @@ if [ "$1" = "volume" ] && [ "$2" = "create" ]; then
     fi
     shift
   done
-  printf '%s|%s|%s|%s|%s|%s\n' \
-    "$volume_name" "$cladding_name" "$project_root" "$resource" "$socket_volume" "$runtime_root" \
+  printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    "$volume_name" "$cladding_name" "$project_root" "$resource" "$socket_volume" "$runtime_root" "$runtime_identity" \
     >> "$volume_state"
   printf '%s\n' "$volume_name"
   exit 0
@@ -111,10 +113,11 @@ if [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then
   resource=$(printf '%s\n' "$row" | cut -d '|' -f 4)
   socket_volume=$(printf '%s\n' "$row" | cut -d '|' -f 5)
   runtime_root=$(printf '%s\n' "$row" | cut -d '|' -f 6)
+  runtime_identity=$(printf '%s\n' "$row" | cut -d '|' -f 7)
   if [ "$4" = "{{json .Labels}}" ]; then
     if [ -n "$runtime_root" ]; then
-      printf '{"cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_socket_volume":"%s","cladding_runtime_root":"%s"}\n' \
-        "$cladding_name" "$project_root" "$resource" "$socket_volume" "$runtime_root"
+      printf '{"cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_socket_volume":"%s","cladding_runtime_root":"%s","cladding_runtime_identity":"%s"}\n' \
+        "$cladding_name" "$project_root" "$resource" "$socket_volume" "$runtime_root" "$runtime_identity"
     else
       printf '{"cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_socket_volume":"%s"}\n' \
         "$cladding_name" "$project_root" "$resource" "$socket_volume"
@@ -134,11 +137,11 @@ if [ "$1" = "container" ] && [ "$2" = "ps" ]; then
   printf '['
   separator=
   if [ -f "$state" ]; then
-    while IFS='|' read -r name project_name project_root app resource runtime_root; do
+    while IFS='|' read -r name project_name project_root app resource runtime_root runtime_identity; do
       [ -n "$name" ] || continue
       if [ -n "$runtime_root" ]; then
-        printf '%s{"Names":["%s"],"Labels":{"app":"%s","cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_runtime_root":"%s"}}' \
-          "$separator" "$name" "$app" "$project_name" "$project_root" "$resource" "$runtime_root"
+        printf '%s{"Names":["%s"],"Labels":{"app":"%s","cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_runtime_root":"%s","cladding_runtime_identity":"%s"}}' \
+          "$separator" "$name" "$app" "$project_name" "$project_root" "$resource" "$runtime_root" "$runtime_identity"
       else
         printf '%s{"Names":["%s"],"Labels":{"app":"%s","cladding":"%s","project_root":"%s"}}' \
           "$separator" "$name" "$app" "$project_name" "$project_root"
@@ -183,10 +186,11 @@ if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
   app=$(printf '%s\n' "$row" | cut -d '|' -f 4)
   resource=$(printf '%s\n' "$row" | cut -d '|' -f 5)
   runtime_root=$(printf '%s\n' "$row" | cut -d '|' -f 6)
+  runtime_identity=$(printf '%s\n' "$row" | cut -d '|' -f 7)
   if [ "$4" = "{{json .Config.Labels}}" ]; then
     if [ -n "$runtime_root" ]; then
-      printf '{"app":"%s","cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_runtime_root":"%s"}\n' \
-        "$app" "$project_name" "$project_root" "$resource" "$runtime_root"
+      printf '{"app":"%s","cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_runtime_root":"%s","cladding_runtime_identity":"%s"}\n' \
+        "$app" "$project_name" "$project_root" "$resource" "$runtime_root" "$runtime_identity"
     else
       printf '{"app":"%s","cladding":"%s","project_root":"%s"}\n' \
         "$app" "$project_name" "$project_root"
@@ -221,6 +225,7 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
   app=
   resource=
   runtime_root=
+  runtime_identity=
   next=
   for argument in "$@"; do
     if [ -n "$next" ]; then
@@ -233,6 +238,7 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
             app=*) app=${argument#app=} ;;
             cladding_resource=*) resource=${argument#cladding_resource=} ;;
             cladding_runtime_root=*) runtime_root=${argument#cladding_runtime_root=} ;;
+            cladding_runtime_identity=*) runtime_identity=${argument#cladding_runtime_identity=} ;;
           esac
           ;;
       esac
@@ -341,7 +347,7 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
       fi
       printf '%s\n' 'ONE_OFF_SECRET_SOURCE_IS_SEPARATE_AND_PRIVATE' >> "$CLADDING_PODMAN_LOG"
     fi
-    printf '%s|%s|%s|%s|%s|%s\n' "$name" "$project_name" "$project_root" "$app" "$resource" "$runtime_root" >> "$state"
+    printf '%s|%s|%s|%s|%s|%s|%s\n' "$name" "$project_name" "$project_root" "$app" "$resource" "$runtime_root" "$runtime_identity" >> "$state"
     exit 0
   fi
   credentials_dir=

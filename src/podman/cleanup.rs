@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::runtime::read_run_identity;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -140,6 +141,7 @@ struct CleanedRun {
 enum RootDisposition {
     Removed,
     Missing,
+    Preserved,
     NotAssociated,
 }
 
@@ -191,6 +193,15 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
             return report;
         }
     };
+    let private_roots = match discover_private_run_roots(allowed_bases) {
+        Ok(roots) => roots,
+        Err(error) => {
+            report
+                .failures
+                .push(format!("private runtime root discovery failed: {error}"));
+            return report;
+        }
+    };
 
     let mut groups = BTreeMap::<String, Vec<ResourceSnapshot>>::new();
     for resource in discovered {
@@ -201,8 +212,9 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
             groups.entry(owner.clone()).or_default().push(resource);
         }
     }
+    let resource_owners = groups.keys().cloned().collect::<BTreeSet<_>>();
 
-    for (owner, listed_resources) in groups {
+    'runs: for (owner, listed_resources) in groups {
         let group = match validate_group(&owner, &listed_resources, allowed_bases) {
             Ok(group) => group,
             Err(reason) => {
@@ -237,42 +249,161 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
                 .push(SkippedRun { owner, reason });
             continue;
         }
+
+        // Refresh inventory before any deletion so a newly appeared container
+        // can make the whole run ineligible for cleanup.
+        let listed_ids = group
+            .resources
+            .iter()
+            .map(|resource| (resource.kind, resource.name.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut known_ids = current
+            .iter()
+            .map(|resource| (resource.kind, resource.name.clone()))
+            .collect::<BTreeSet<_>>();
+        let refreshed = match backend.discover() {
+            Ok(resources) => resources,
+            Err(error) => {
+                report.skipped_unverifiable.push(SkippedRun {
+                    owner: owner.clone(),
+                    reason: format!("could not refresh run inventory: {error}"),
+                });
+                continue 'runs;
+            }
+        };
+        for resource in refreshed.into_iter().filter(|resource| {
+            resource.labels.get("cladding") == Some(&owner)
+                || listed_ids.contains(&(resource.kind, resource.name.clone()))
+        }) {
+            if !known_ids.insert((resource.kind, resource.name.clone())) {
+                continue;
+            }
+            match backend.inspect(resource.kind, &resource.name) {
+                Ok(Some(snapshot)) => current.push(snapshot),
+                Ok(None) => {}
+                Err(error) => {
+                    report.skipped_unverifiable.push(SkippedRun {
+                        owner: owner.clone(),
+                        reason: format!(
+                            "could not inspect newly discovered {} '{}': {error}",
+                            resource.kind.as_str(),
+                            resource.name
+                        ),
+                    });
+                    continue 'runs;
+                }
+            }
+        }
         if let Some(reason) = current.iter().find_map(|resource| {
-            validate_resource(&owner, &group.project_root, &group.root, resource).err()
+            validate_resource(
+                &owner,
+                &group.project_root,
+                &group.root,
+                &group.identity,
+                resource,
+            )
+            .err()
         }) {
             report
                 .skipped_unverifiable
                 .push(SkippedRun { owner, reason });
-            continue;
+            continue 'runs;
         }
 
-        if let Some(live) = current.iter().find(|resource| {
-            resource.kind == ResourceKind::Container && !is_stopped(resource.state.as_deref())
-        }) {
-            report.skipped_live.push(SkippedRun {
-                owner,
-                reason: format!(
-                    "container '{}' has live or unknown state '{}'",
-                    live.name,
-                    display_state(live.state.as_deref())
-                ),
-            });
-            continue;
+        for resource in current
+            .iter()
+            .filter(|resource| resource.kind == ResourceKind::Container)
+        {
+            match container_state(resource.state.as_deref()) {
+                ContainerState::Stopped => {}
+                ContainerState::Live => {
+                    report.skipped_live.push(SkippedRun {
+                        owner: owner.clone(),
+                        reason: format!(
+                            "container '{}' has live state '{}'",
+                            resource.name,
+                            display_state(resource.state.as_deref())
+                        ),
+                    });
+                    continue 'runs;
+                }
+                ContainerState::Unknown => {
+                    report.skipped_unverifiable.push(SkippedRun {
+                        owner: owner.clone(),
+                        reason: format!(
+                            "container '{}' has unverifiable state '{}'",
+                            resource.name,
+                            display_state(resource.state.as_deref())
+                        ),
+                    });
+                    continue 'runs;
+                }
+            }
         }
 
-        // Keep the labeled Podman resources as retry evidence until the
-        // private directory is removed successfully. If root removal fails,
-        // this run remains untouched. If a later Podman removal fails, its
-        // labels still associate the remaining resources with the missing root.
-        let root_disposition =
-            match remove_verified_runtime_root(group.root.as_deref(), &owner, allowed_bases) {
-                Ok(disposition) => disposition,
+        // Recheck every container as a set before the first removal. This
+        // avoids retiring one stopped container when another has become live.
+        for resource in current
+            .iter()
+            .filter(|resource| resource.kind == ResourceKind::Container)
+        {
+            let latest = match backend.inspect(resource.kind, &resource.name) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => continue,
                 Err(error) => {
-                    report.failures.push(format!("{owner}: {error}"));
-                    continue;
+                    report.skipped_unverifiable.push(SkippedRun {
+                        owner: owner.clone(),
+                        reason: format!(
+                            "could not recheck container '{}' before cleanup: {error}",
+                            resource.name
+                        ),
+                    });
+                    continue 'runs;
                 }
             };
+            if let Err(reason) = validate_resource(
+                &owner,
+                &group.project_root,
+                &group.root,
+                &group.identity,
+                &latest,
+            ) {
+                report.skipped_unverifiable.push(SkippedRun {
+                    owner: owner.clone(),
+                    reason,
+                });
+                continue 'runs;
+            }
+            match container_state(latest.state.as_deref()) {
+                ContainerState::Stopped => {}
+                ContainerState::Live => {
+                    report.skipped_live.push(SkippedRun {
+                        owner: owner.clone(),
+                        reason: format!(
+                            "container '{}' became live with state '{}'",
+                            latest.name,
+                            display_state(latest.state.as_deref())
+                        ),
+                    });
+                    continue 'runs;
+                }
+                ContainerState::Unknown => {
+                    report.skipped_unverifiable.push(SkippedRun {
+                        owner: owner.clone(),
+                        reason: format!(
+                            "container '{}' has unverifiable state '{}' before cleanup",
+                            latest.name,
+                            display_state(latest.state.as_deref())
+                        ),
+                    });
+                    continue 'runs;
+                }
+            }
+        }
 
+        // Keep the private root as retry evidence until Podman resources are
+        // retired and the final inventory confirms that none appeared.
+        let mut root_disposition = RootDisposition::Preserved;
         let mut removed_resources = Vec::new();
         let mut stop_for_safety = None;
         let mut became_live = None;
@@ -294,19 +425,36 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
                     break;
                 }
             };
-            if let Err(reason) =
-                validate_resource(&owner, &group.project_root, &group.root, &latest)
-            {
+            if let Err(reason) = validate_resource(
+                &owner,
+                &group.project_root,
+                &group.root,
+                &group.identity,
+                &latest,
+            ) {
                 stop_for_safety = Some(reason);
                 break;
             }
-            if latest.kind == ResourceKind::Container && !is_stopped(latest.state.as_deref()) {
-                stop_for_safety = Some(format!(
-                    "container '{}' became live or has unknown state '{}'",
-                    latest.name,
-                    display_state(latest.state.as_deref())
-                ));
-                break;
+            if latest.kind == ResourceKind::Container {
+                match container_state(latest.state.as_deref()) {
+                    ContainerState::Stopped => {}
+                    ContainerState::Live => {
+                        became_live = Some(format!(
+                            "container '{}' became live with state '{}'",
+                            latest.name,
+                            display_state(latest.state.as_deref())
+                        ));
+                        break;
+                    }
+                    ContainerState::Unknown => {
+                        stop_for_safety = Some(format!(
+                            "container '{}' has unverifiable state '{}' before removal",
+                            latest.name,
+                            display_state(latest.state.as_deref())
+                        ));
+                        break;
+                    }
+                }
             }
 
             match backend.remove(latest.kind, &latest.name) {
@@ -320,19 +468,29 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
                             latest.kind.as_str(),
                             latest.name
                         )),
-                        Ok(Some(current)) if !is_stopped(current.state.as_deref()) => {
-                            became_live = Some(format!(
-                                "container '{}' became live or has unknown state '{}'",
-                                current.name,
-                                display_state(current.state.as_deref())
-                            ));
-                            break;
-                        }
-                        Ok(Some(_)) => removal_failures.push(format!(
-                            "failed to remove {} '{}': {error}",
-                            latest.kind.as_str(),
-                            latest.name
-                        )),
+                        Ok(Some(current)) => match container_state(current.state.as_deref()) {
+                            ContainerState::Live => {
+                                became_live = Some(format!(
+                                    "container '{}' became live with state '{}'",
+                                    current.name,
+                                    display_state(current.state.as_deref())
+                                ));
+                                break;
+                            }
+                            ContainerState::Unknown => {
+                                stop_for_safety = Some(format!(
+                                    "container '{}' has unverifiable state '{}' after removal failed",
+                                    current.name,
+                                    display_state(current.state.as_deref())
+                                ));
+                                break;
+                            }
+                            ContainerState::Stopped => removal_failures.push(format!(
+                                "failed to remove {} '{}': {error}",
+                                latest.kind.as_str(),
+                                latest.name
+                            )),
+                        },
                         Err(inspect_error) => {
                             stop_for_safety = Some(format!(
                                 "could not verify container '{}' after removal failed: {inspect_error}",
@@ -400,8 +558,7 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
 
         // A resource can appear between the initial inventory and removal.
         // Report the run as partial if the fresh inventory is not empty.
-        let original_ids = group
-            .resources
+        let original_ids = current
             .iter()
             .map(|resource| (resource.kind, resource.name.clone()))
             .collect::<BTreeSet<_>>();
@@ -427,6 +584,77 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
             }
         };
         if let Some(resource) = remaining.first() {
+            if resource.kind == ResourceKind::Container {
+                match backend.inspect(resource.kind, &resource.name) {
+                    Ok(Some(snapshot)) => {
+                        if let Err(reason) = validate_resource(
+                            &owner,
+                            &group.project_root,
+                            &group.root,
+                            &group.identity,
+                            &snapshot,
+                        ) {
+                            report.skipped_unverifiable.push(SkippedRun {
+                                owner: owner.clone(),
+                                reason,
+                            });
+                            report.cleaned.push(CleanedRun {
+                                owner,
+                                resources: removed_resources,
+                                runtime_root: RootDisposition::Preserved,
+                                complete: false,
+                            });
+                            continue;
+                        }
+                        match container_state(snapshot.state.as_deref()) {
+                            ContainerState::Live => report.skipped_live.push(SkippedRun {
+                                owner: owner.clone(),
+                                reason: format!(
+                                    "new associated container '{}' has live state '{}'",
+                                    snapshot.name,
+                                    display_state(snapshot.state.as_deref())
+                                ),
+                            }),
+                            ContainerState::Unknown => {
+                                report.skipped_unverifiable.push(SkippedRun {
+                                    owner: owner.clone(),
+                                    reason: format!(
+                                        "new associated container '{}' has unverifiable state '{}'",
+                                        snapshot.name,
+                                        display_state(snapshot.state.as_deref())
+                                    ),
+                                })
+                            }
+                            ContainerState::Stopped => {}
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => report.skipped_unverifiable.push(SkippedRun {
+                        owner: owner.clone(),
+                        reason: format!(
+                            "could not verify newly discovered container '{}': {error}",
+                            resource.name
+                        ),
+                    }),
+                }
+                if report
+                    .skipped_live
+                    .last()
+                    .is_some_and(|run| run.owner == owner)
+                    || report
+                        .skipped_unverifiable
+                        .last()
+                        .is_some_and(|run| run.owner == owner)
+                {
+                    report.cleaned.push(CleanedRun {
+                        owner,
+                        resources: removed_resources,
+                        runtime_root: RootDisposition::Preserved,
+                        complete: false,
+                    });
+                    continue;
+                }
+            }
             let reason = if resource.labels.get("cladding") == Some(&owner) {
                 format!(
                     "resource {} '{}' remains after cleanup",
@@ -450,6 +678,25 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
             continue;
         }
 
+        root_disposition = match remove_verified_runtime_root(
+            group.root.as_deref(),
+            &owner,
+            &group.identity,
+            allowed_bases,
+        ) {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                report.failures.push(format!("{owner}: {error}"));
+                report.cleaned.push(CleanedRun {
+                    owner,
+                    resources: removed_resources,
+                    runtime_root: RootDisposition::Preserved,
+                    complete: false,
+                });
+                continue;
+            }
+        };
+
         report.cleaned.push(CleanedRun {
             owner,
             resources: removed_resources,
@@ -458,12 +705,56 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
         });
     }
 
+    // A process can be killed after creating its private runtime root but
+    // before Podman creates any labeled resources. Its private marker is the
+    // durable ownership record for this otherwise resource-free retry.
+    for root in private_roots {
+        if resource_owners.contains(&root.owner) {
+            continue;
+        }
+        let resources = match backend.discover() {
+            Ok(resources) => resources,
+            Err(error) => {
+                report.failures.push(format!(
+                    "{}: could not verify Podman resources before removing its private root: {error}",
+                    root.owner
+                ));
+                continue;
+            }
+        };
+        if resources
+            .iter()
+            .any(|resource| resource.labels.get("cladding") == Some(&root.owner))
+        {
+            report.skipped_unverifiable.push(SkippedRun {
+                owner: root.owner,
+                reason: "run resources appeared after inventory; rerun cleanup".to_string(),
+            });
+            continue;
+        }
+        match remove_verified_runtime_root(
+            Some(&root.path),
+            &root.owner,
+            &root.identity,
+            allowed_bases,
+        ) {
+            Ok(disposition) => report.cleaned.push(CleanedRun {
+                owner: root.owner,
+                resources: Vec::new(),
+                runtime_root: disposition,
+                complete: true,
+            }),
+            Err(error) => report.failures.push(format!("{}: {error}", root.owner)),
+        }
+    }
+
     report
 }
 
 struct ValidatedGroup {
     project_root: String,
     root: Option<PathBuf>,
+    identity: String,
     resources: Vec<ResourceSnapshot>,
 }
 
@@ -513,9 +804,13 @@ fn validate_group(
     let project_root = project_roots.into_iter().next().expect("one project root");
 
     let mut runtime_roots = BTreeSet::new();
+    let mut runtime_identities = BTreeSet::new();
     for resource in resources {
         if let Some(root) = resource.labels.get("cladding_runtime_root") {
             runtime_roots.insert(root.clone());
+        }
+        if let Some(identity) = resource.labels.get("cladding_runtime_identity") {
+            runtime_identities.insert(identity.clone());
         }
         if resource.kind == ResourceKind::Volume
             && matches!(
@@ -543,6 +838,9 @@ fn validate_group(
     if runtime_roots.len() > 1 {
         return Err("run resources have mismatched cladding_runtime_root labels".to_string());
     }
+    if runtime_identities.len() > 1 {
+        return Err("run resources have mismatched cladding_runtime_identity labels".to_string());
+    }
     if resources
         .iter()
         .any(|resource| !resource.labels.contains_key("cladding_runtime_root"))
@@ -552,18 +850,26 @@ fn validate_group(
     let raw_root = runtime_roots.into_iter().next().ok_or_else(|| {
         "run resources are missing their cladding_runtime_root labels".to_string()
     })?;
+    let identity = runtime_identities.into_iter().next().ok_or_else(|| {
+        "run resources are missing their cladding_runtime_identity labels".to_string()
+    })?;
+    if !is_uuid(&identity) {
+        return Err("run resources have an invalid cladding_runtime_identity label".to_string());
+    }
     let root = PathBuf::from(raw_root);
     verify_allowed_run_root(&root, owner, allowed_bases).map_err(|error| error.to_string())?;
     verify_runtime_root_path(&root).map_err(|error| error.to_string())?;
+    verify_runtime_root_identity(&root, owner, &identity).map_err(|error| error.to_string())?;
     let root = Some(root);
 
     for resource in resources {
-        validate_resource(owner, &project_root, &root, resource)?;
+        validate_resource(owner, &project_root, &root, &identity, resource)?;
     }
 
     Ok(ValidatedGroup {
         project_root,
         root,
+        identity,
         resources: resources.to_vec(),
     })
 }
@@ -674,6 +980,7 @@ fn validate_resource(
     owner: &str,
     project_root: &str,
     runtime_root: &Option<PathBuf>,
+    runtime_identity: &str,
     resource: &ResourceSnapshot,
 ) -> std::result::Result<(), String> {
     validate_resource_shape(owner, resource)?;
@@ -704,6 +1011,21 @@ fn validate_resource(
             resource.name
         ));
     }
+    if resource
+        .labels
+        .get("cladding_runtime_identity")
+        .map(String::as_str)
+        != Some(runtime_identity)
+    {
+        return Err(format!(
+            "resource '{}' has a mismatched cladding_runtime_identity label",
+            resource.name
+        ));
+    }
+    if let Some(root) = runtime_root {
+        verify_runtime_root_identity(root, owner, runtime_identity)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -711,19 +1033,25 @@ fn is_run_owner(owner: &str) -> bool {
     let Some(uuid) = owner.strip_prefix(RUN_PREFIX) else {
         return false;
     };
-    let bytes = uuid.as_bytes();
-    bytes.len() == 36
-        && bytes.iter().enumerate().all(|(index, byte)| match index {
-            8 | 13 | 18 | 23 => *byte == b'-',
-            _ => byte.is_ascii_hexdigit(),
-        })
+    is_uuid(uuid)
 }
 
-fn is_stopped(state: Option<&str>) -> bool {
-    matches!(
-        state.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("exited" | "stopped")
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerState {
+    Stopped,
+    Live,
+    Unknown,
+}
+
+fn container_state(state: Option<&str>) -> ContainerState {
+    match state.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("exited" | "stopped") => ContainerState::Stopped,
+        Some(
+            "running" | "paused" | "restarting" | "starting" | "created" | "initialized"
+            | "configured" | "stopping" | "removing",
+        ) => ContainerState::Live,
+        _ => ContainerState::Unknown,
+    }
 }
 
 fn display_state(state: Option<&str>) -> String {
@@ -736,6 +1064,92 @@ fn display_state(state: Option<&str>) -> String {
 fn is_allowed_run_root(root: &Path, owner: &str, allowed_bases: &[PathBuf]) -> bool {
     root.file_name().and_then(|name| name.to_str()) == Some(owner)
         && allowed_bases.iter().any(|base| root == base.join(owner))
+}
+
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+fn verify_runtime_root_identity(
+    root: &Path,
+    owner: &str,
+    identity: &str,
+) -> std::result::Result<(), Error> {
+    match read_run_identity(root) {
+        Ok(None) => Ok(()),
+        Ok(Some(metadata)) if metadata.owner == owner && metadata.id == identity => Ok(()),
+        Ok(Some(_)) => Err(Error::message(format!(
+            "private runtime root {} has a mismatched run identity",
+            root.display()
+        ))),
+        Err(error) => Err(Error::message(format!(
+            "failed to verify private runtime root identity at {}: {error}",
+            root.display()
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrivateRunRoot {
+    owner: String,
+    identity: String,
+    path: PathBuf,
+}
+
+fn discover_private_run_roots(
+    allowed_bases: &[PathBuf],
+) -> std::result::Result<Vec<PrivateRunRoot>, Error> {
+    let mut roots = Vec::new();
+    for base in allowed_bases {
+        let entries = fs::read_dir(base).map_err(|error| {
+            Error::message(format!(
+                "failed to list temporary base {}: {error}",
+                base.display()
+            ))
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                Error::message(format!(
+                    "failed to read an entry under temporary base {}: {error}",
+                    base.display()
+                ))
+            })?;
+            let Some(owner) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !is_run_owner(&owner) {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                continue;
+            }
+            let identity = match read_run_identity(&path) {
+                Ok(Some(identity)) if identity.owner == owner && is_uuid(&identity.id) => identity,
+                _ => continue,
+            };
+            if verify_allowed_run_root(&path, &owner, allowed_bases).is_err()
+                || verify_runtime_root_path(&path).is_err()
+            {
+                continue;
+            }
+            roots.push(PrivateRunRoot {
+                owner,
+                identity: identity.id,
+                path,
+            });
+        }
+    }
+    Ok(roots)
 }
 
 fn verify_allowed_run_root(
@@ -801,6 +1215,7 @@ fn verify_runtime_root_path(root: &Path) -> std::result::Result<(), Error> {
 fn remove_verified_runtime_root(
     root: Option<&Path>,
     owner: &str,
+    identity: &str,
     allowed_bases: &[PathBuf],
 ) -> std::result::Result<RootDisposition, Error> {
     let Some(root) = root else {
@@ -820,6 +1235,7 @@ fn remove_verified_runtime_root(
         Ok(_) => {}
     }
     verify_runtime_root_path(root)?;
+    verify_runtime_root_identity(root, owner, identity)?;
     fs::remove_dir_all(root).map_err(|error| {
         Error::message(format!(
             "failed to remove private runtime root {}: {error}",
@@ -863,6 +1279,7 @@ fn print_report(report: &CleanupReport) {
             match run.runtime_root {
                 RootDisposition::Removed => "; private runtime root removed",
                 RootDisposition::Missing => "; private runtime root already missing",
+                RootDisposition::Preserved => "; private runtime root preserved",
                 RootDisposition::NotAssociated => "",
             }
         );
@@ -1023,9 +1440,11 @@ fn trace_command(command: &Command, verbose: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::write_run_identity;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const OWNER: &str = "cladding-run-12345678-1234-4234-8234-123456789abc";
+    const IDENTITY: &str = "fedcba98-7654-4321-8765-cba987654321";
     static ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Default)]
@@ -1033,14 +1452,57 @@ mod tests {
         resources: BTreeMap<(ResourceKind, String), ResourceSnapshot>,
         removed: Vec<(ResourceKind, String)>,
         fail_once: BTreeSet<(ResourceKind, String)>,
+        inspect_counts: BTreeMap<(ResourceKind, String), usize>,
+        state_changes_on_inspect: BTreeMap<(ResourceKind, String), (usize, String)>,
+        inspect_failures: BTreeSet<(ResourceKind, String, usize)>,
+        add_on_discover: BTreeMap<usize, Vec<ResourceSnapshot>>,
+        discover_count: usize,
+        replace_root_on_inspect: Option<(ResourceKind, String, usize, PathBuf)>,
     }
 
     impl CleanupBackend for FakeBackend {
         fn discover(&mut self) -> Result<Vec<ResourceSnapshot>> {
+            self.discover_count += 1;
+            if let Some(additions) = self.add_on_discover.remove(&self.discover_count) {
+                for resource in additions {
+                    self.resources
+                        .insert((resource.kind, resource.name.clone()), resource);
+                }
+            }
             Ok(self.resources.values().cloned().collect())
         }
 
         fn inspect(&mut self, kind: ResourceKind, name: &str) -> Result<Option<ResourceSnapshot>> {
+            let key = (kind, name.to_string());
+            let count = self.inspect_counts.entry(key.clone()).or_default();
+            *count += 1;
+            let inspection = *count;
+            if self
+                .inspect_failures
+                .remove(&(kind, name.to_string(), inspection))
+            {
+                return Err(Error::message("injected inspection failure"));
+            }
+            if let Some((at, state)) = self.state_changes_on_inspect.get(&key)
+                && *at == inspection
+                && let Some(resource) = self.resources.get_mut(&key)
+            {
+                resource.state = Some(state.clone());
+            }
+            if let Some((target_kind, target_name, at, root)) = &self.replace_root_on_inspect
+                && *target_kind == kind
+                && target_name == name
+                && *at == inspection
+            {
+                fs::remove_dir_all(root).unwrap();
+                fs::create_dir(root).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                fs::write(root.join("unrelated"), "collision").unwrap();
+            }
             Ok(self.resources.get(&(kind, name.to_string())).cloned())
         }
 
@@ -1073,6 +1535,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         }
+        write_run_identity(&root, OWNER, IDENTITY).unwrap();
         fs::write(root.join("secret-override"), "fixture").unwrap();
         root
     }
@@ -1091,6 +1554,10 @@ mod tests {
                 (
                     "cladding_runtime_root".to_string(),
                     base.join(OWNER).display().to_string(),
+                ),
+                (
+                    "cladding_runtime_identity".to_string(),
+                    IDENTITY.to_string(),
                 ),
                 (
                     "project_root".to_string(),
@@ -1117,6 +1584,10 @@ mod tests {
                     base.join(OWNER).display().to_string(),
                 ),
                 (
+                    "cladding_runtime_identity".to_string(),
+                    IDENTITY.to_string(),
+                ),
+                (
                     "project_root".to_string(),
                     "/missing/project/.cladding".to_string(),
                 ),
@@ -1136,6 +1607,10 @@ mod tests {
                 (
                     "cladding_runtime_root".to_string(),
                     base.join(OWNER).display().to_string(),
+                ),
+                (
+                    "cladding_runtime_identity".to_string(),
+                    IDENTITY.to_string(),
                 ),
                 (
                     "project_root".to_string(),
@@ -1160,6 +1635,10 @@ mod tests {
                 (
                     "cladding_runtime_root".to_string(),
                     base.join(OWNER).display().to_string(),
+                ),
+                (
+                    "cladding_runtime_identity".to_string(),
+                    IDENTITY.to_string(),
                 ),
                 (
                     "project_root".to_string(),
@@ -1269,9 +1748,118 @@ mod tests {
             volume,
         ]);
         let report = cleanup_with(&mut unknown, std::slice::from_ref(&base));
-        assert_eq!(report.skipped_live.len(), 1);
+        assert_eq!(report.skipped_unverifiable.len(), 1);
+        assert!(report.needs_failure_status());
         assert_eq!(unknown.resources.len(), 2);
+
+        for state in [Some(""), Some("unknown-ish")] {
+            let mut uncertain = backend_with(vec![
+                ResourceSnapshot {
+                    state: state.map(str::to_string),
+                    ..container(&format!("{OWNER}-agent-instance"), "agent", "exited", &base)
+                },
+                socket_volume("run-socket", &base),
+            ]);
+            let report = cleanup_with(&mut uncertain, std::slice::from_ref(&base));
+            assert_eq!(report.skipped_unverifiable.len(), 1);
+            assert!(report.needs_failure_status());
+            assert_eq!(uncertain.resources.len(), 2);
+        }
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn container_that_becomes_live_on_final_inspection_keeps_the_run_root_and_resources() {
+        let base = temp_base("late-live");
+        let root = make_private_root(&base);
+        let container_name = format!("{OWNER}-agent-instance");
+        let mut backend = backend_with(vec![
+            container(&container_name, "agent", "exited", &base),
+            socket_volume("run-socket", &base),
+        ]);
+        backend.state_changes_on_inspect.insert(
+            (ResourceKind::Container, container_name.clone()),
+            (2, "running".to_string()),
+        );
+
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.skipped_live.len(), 1);
+        assert_eq!(backend.resources.len(), 2);
+        assert!(backend.removed.is_empty());
+        assert!(root.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn failed_final_container_inspection_preserves_the_entire_run() {
+        let base = temp_base("inspect-failure");
+        let root = make_private_root(&base);
+        let container_name = format!("{OWNER}-agent-instance");
+        let mut backend = backend_with(vec![
+            container(&container_name, "agent", "exited", &base),
+            socket_volume("run-socket", &base),
+        ]);
+        backend
+            .inspect_failures
+            .insert((ResourceKind::Container, container_name, 2));
+
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.skipped_unverifiable.len(), 1);
+        assert!(report.needs_failure_status());
+        assert_eq!(backend.resources.len(), 2);
+        assert!(backend.removed.is_empty());
+        assert!(root.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_new_live_container_found_during_refresh_leaves_all_run_resources_untouched() {
+        let base = temp_base("new-container");
+        let root = make_private_root(&base);
+        let agent = container(&format!("{OWNER}-agent-instance"), "agent", "exited", &base);
+        let volume = socket_volume("run-socket", &base);
+        let new_container = container(
+            &format!("{OWNER}-proxy-instance"),
+            "proxy",
+            "running",
+            &base,
+        );
+        let mut backend = backend_with(vec![agent, volume]);
+        backend
+            .add_on_discover
+            .insert(2, vec![new_container.clone()]);
+
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.skipped_live.len(), 1);
+        assert_eq!(backend.resources.len(), 3);
+        assert!(backend.removed.is_empty());
+        assert!(root.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn replaced_runtime_directory_does_not_match_the_recorded_run_identity() {
+        let base = temp_base("root-collision");
+        let root = make_private_root(&base);
+        let container_name = format!("{OWNER}-agent-instance");
+        let mut backend = backend_with(vec![
+            container(&container_name, "agent", "exited", &base),
+            socket_volume("run-socket", &base),
+        ]);
+        backend.replace_root_on_inspect =
+            Some((ResourceKind::Container, container_name, 2, root.clone()));
+
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.skipped_unverifiable.len(), 1);
+        assert!(report.needs_failure_status());
+        assert_eq!(backend.resources.len(), 2);
+        assert!(backend.removed.is_empty());
+        assert!(root.join("unrelated").exists());
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1293,6 +1881,46 @@ mod tests {
         assert_eq!(backend.resources.len(), 2);
         assert!(root.exists());
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn mismatched_runtime_identity_label_preserves_the_entire_run() {
+        let base = temp_base("identity-label");
+        let root = make_private_root(&base);
+        let mut volume = socket_volume("run-socket", &base);
+        volume.labels.insert(
+            "cladding_runtime_identity".to_string(),
+            "00000000-0000-4000-8000-000000000000".to_string(),
+        );
+        let mut backend = backend_with(vec![
+            container(&format!("{OWNER}-agent-instance"), "agent", "exited", &base),
+            volume,
+        ]);
+
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.skipped_unverifiable.len(), 1);
+        assert!(report.needs_failure_status());
+        assert_eq!(backend.resources.len(), 2);
+        assert!(backend.removed.is_empty());
+        assert!(root.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn cleanup_retries_a_marked_private_root_without_podman_resources() {
+        let base = temp_base("root-only");
+        let root = make_private_root(&base);
+        let mut backend = backend_with(Vec::new());
+
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.cleaned.len(), 1);
+        assert!(report.cleaned[0].complete);
+        assert!(report.cleaned[0].resources.is_empty());
+        assert_eq!(report.cleaned[0].runtime_root, RootDisposition::Removed);
+        assert!(!root.exists());
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1369,14 +1997,14 @@ mod tests {
 
         let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
         assert_eq!(report.failures.len(), 1);
-        assert!(!root.exists());
+        assert!(root.exists());
         assert_eq!(backend.resources.len(), 1);
 
         let retry = cleanup_with(&mut backend, std::slice::from_ref(&base));
         assert_eq!(retry.failures.len(), 0);
         assert_eq!(retry.cleaned.len(), 1);
         assert_eq!(retry.cleaned[0].resources, ["volume managed-data"]);
-        assert_eq!(retry.cleaned[0].runtime_root, RootDisposition::Missing);
+        assert_eq!(retry.cleaned[0].runtime_root, RootDisposition::Removed);
         assert!(backend.resources.is_empty());
         assert!(!root.exists());
         let _ = fs::remove_dir_all(base);

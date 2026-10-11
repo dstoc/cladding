@@ -584,6 +584,7 @@ fn generate_uuid_v4() -> Result<String> {
 }
 
 fn create_private_runtime_root(instance_name: &str, workspace_root: &Path) -> Result<PathBuf> {
+    let identity = generate_uuid_v4()?;
     let workspace_root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
@@ -623,6 +624,13 @@ fn create_private_runtime_root(instance_name: &str, workspace_root: &Path) -> Re
                     root.display()
                 )
             })?;
+        }
+        if let Err(error) = cladding::runtime::write_run_identity(&root, instance_name, &identity) {
+            let _ = fs::remove_dir_all(&root);
+            return Err(Error::message(format!(
+                "failed to record ownership for private runtime root {}: {error:#}",
+                root.display()
+            )));
         }
         return Ok(root);
     }

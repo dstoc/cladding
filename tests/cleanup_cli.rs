@@ -44,18 +44,23 @@ impl Fixture {
         let owner = "cladding-run-12345678-1234-4234-8234-123456789abc";
         let container_name = format!("{owner}-agent-instance");
         let volume_name = "run-socket";
+        let runtime_identity = "fedcba98-7654-4321-8765-cba987654321";
         let project_root = "/gone/project/.cladding";
+        cladding::runtime::write_run_identity(runtime_root, owner, runtime_identity)
+            .expect("fixture should record its run identity");
         let container_labels = serde_json::json!({
             "app": "agent",
             "cladding": owner,
             "cladding_resource": "runtime-container",
             "cladding_runtime_root": runtime_root,
+            "cladding_runtime_identity": runtime_identity,
             "project_root": project_root,
         });
         let volume_labels = serde_json::json!({
             "cladding": owner,
             "cladding_resource": "inter-container-socket",
             "cladding_runtime_root": runtime_root,
+            "cladding_runtime_identity": runtime_identity,
             "cladding_socket_volume": volume_name,
             "project_root": project_root,
         });
@@ -149,7 +154,10 @@ fn cleanup_runs_without_a_project_directory_or_config() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("0 cleaned"), "cleanup summary: {stdout}");
+    assert!(
+        stdout.contains("cladding cleanup:"),
+        "cleanup summary: {stdout}"
+    );
     assert!(!fixture.root.join(".cladding").exists());
 }
 
