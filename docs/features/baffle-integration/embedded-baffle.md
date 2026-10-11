@@ -1,9 +1,9 @@
 # Embedded Baffle binary
 
-Cladding embeds `baffle-proxy` **1.0.0** from crates.io. The package publishes
-the `baffle` executable and declares Rust 1.96 as its minimum supported
-version. Cladding pins that version in `build.rs` and invokes Cargo with
-`--locked`.
+A normal local build without `CLADDING_BAFFLE_BIN` embeds `baffle-proxy`
+**1.0.0** from crates.io. The package publishes the `baffle` executable and
+declares Rust 1.96 as its minimum supported version. Cladding pins that
+version in `build.rs` and invokes Cargo with `--locked`.
 
 ## Build requirements
 
@@ -21,11 +21,14 @@ extracts during `cladding build`.
 
 Published release archives are built for Linux x86_64, Linux aarch64, and
 Apple Silicon macOS. Each archive embeds the Linux GNU Baffle executable for
-the matching Podman guest architecture. CI builds Baffle on a native Linux
-runner for each architecture, checks it in the default proxy image, and reuses
-the validated files in the release jobs. The Linux-hosted Podman Machine job
-checks the x86_64 guest topology. The Apple Silicon build job checks the
-embedded aarch64 executable.
+the matching Podman guest architecture. The release workflow downloads the
+pinned Baffle v1.1.0 Linux archive and checks its checksum against that
+release's `SHA256SUMS` before extraction. It uses the x86_64 archive for the
+x86_64 Linux package and the aarch64 archive for the aarch64 Linux and Apple
+Silicon macOS packages. CI uses the same verified published binaries, checks
+them in the default proxy image, and runs the integration suite. The
+Linux-hosted Podman Machine job checks the x86_64 guest topology. The Apple
+Silicon build job checks the embedded aarch64 executable.
 
 Cladding writes the embedded executable to `.cladding/tools/bin/baffle` and
 sets its mode to executable. `cladding check` reports a missing or outdated
@@ -33,31 +36,26 @@ copy. Run `cladding build` to refresh it.
 
 ## Updating the pinned version
 
-1. Confirm that the new `baffle-proxy` version is published on crates.io.
-2. Review its tagged `Cargo.toml` for its binary name, Rust minimum version,
-   native build requirements, target support, and license.
-3. Update `BAFFLE_VERSION` and the minimum Rust version in `build.rs`.
-4. Update the Rust toolchain and Cargo install version in the CI and release
-   workflows.
-5. Build one Linux GNU binary for each supported architecture. Use the
-   resulting artifact through `CLADDING_BAFFLE_BIN` for Cladding release jobs.
-6. Regenerate the release notices with
-   `scripts/collect-baffle-notices.py` from the installed crate source.
-7. Run the runtime smoke test against the selected proxy image for each
+1. Confirm that the new Baffle version publishes Linux GNU release archives
+   for x86_64 and aarch64, with a `SHA256SUMS` file.
+2. Review the release archive contents for the executable, architecture,
+   license, and third-party notices.
+3. Update the explicit Baffle version and archive names in the CI and release
+   workflows. Keep checksum verification before archive extraction.
+4. Update the architecture and redistribution checks in
+   `scripts/test_ci_baffle_assets.py`.
+5. Update `BAFFLE_VERSION` in `build.rs` separately when changing the version
+   used by local source builds.
+6. Run the runtime smoke test against the selected proxy image for each
    supported architecture.
-
-Do not use Baffle's GitHub release assets for normal packaging. Cargo's locked
-crate graph is the source of the executable and its release notices.
 
 ## Redistribution notices
 
-`baffle-proxy` 1.0.0 declares the MIT license. The Baffle executable also
-contains code from its locked dependencies, and each dependency keeps its own
-license terms. Release archives include `THIRD_PARTY_NOTICES.md`, the upstream
-`Cargo.lock` when present in the published crate, and license or notice files
-shipped in each crate archive. The notice file points to each copied file under
-`licenses/<crate>-<version>/`. Review entries with no declared license before
-publishing a release.
+The Cladding release archive includes Baffle's upstream `LICENSE`,
+`THIRD-PARTY-NOTICES.txt`, and the `webpki-root-certs` CDLA Permissive 2.0
+license text. The third-party notice file contains license text and attribution
+for the dependencies in the published Baffle executable. Cladding copies these
+files from the checksum-verified upstream archive under `licenses/baffle/`.
 
 ## Session file migration
 

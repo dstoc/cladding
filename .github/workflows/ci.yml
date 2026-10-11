@@ -181,8 +181,6 @@ jobs:
         run: cargo build --locked -p cladding --bin cladding
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
-      - name: Test Baffle redistribution notices
-        run: python3 scripts/test_collect_baffle_notices.py
       - name: Test pinned Baffle CI asset selection
         run: python3 scripts/test_ci_baffle_assets.py
       - name: Test

@@ -24,9 +24,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Cladding embeds Linux mcp-run/run-remote helpers for its sandbox containers
-  # and a Linux Baffle executable for the proxy container. Build native helper
-  # artifacts for each Linux guest architecture and reuse them on host builds.
+  # Cladding embeds Linux mcp-run/run-remote helpers for its sandbox containers.
+  # Build native helper artifacts for each Linux guest architecture and reuse
+  # them on host builds.
   build-helpers:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -59,71 +59,10 @@ jobs:
           name: mcp-run-helpers-${{ matrix.arch }}-linux
           path: helpers/
 
-  # Build the pinned Baffle crate once for each supported Linux guest
-  # architecture. Reuse these validated binaries in the host release jobs.
-  build-baffle:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    env:
-      BAFFLE_PROXY_VERSION: 1.0.0
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v1-baffle-release
-          shared-key: ${{ matrix.arch }}-${{ env.BAFFLE_PROXY_VERSION }}
-          cache-all-crates: true
-      - name: Install Baffle build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential clang cmake file libclang-dev
-      - name: Install pinned Baffle
-        run: cargo install --locked --force --version "=$BAFFLE_PROXY_VERSION" --root "$RUNNER_TEMP/baffle-install" --bin baffle baffle-proxy
-      - name: Verify the Baffle architecture
-        run: |
-          description=$(file -b "$RUNNER_TEMP/baffle-install/bin/baffle")
-          printf '%s\n' "$description"
-          case "${{ matrix.arch }}:$description" in
-            x86_64:*"ELF 64-bit"*x86-64*) ;;
-            aarch64:*"ELF 64-bit"*aarch64*) ;;
-            *) echo "Baffle is not the expected Linux ${{ matrix.arch }} executable" >&2; exit 1 ;;
-          esac
-      - name: Collect Baffle license notices
-        run: |
-          manifest=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -path "*/baffle-proxy-$BAFFLE_PROXY_VERSION/Cargo.toml" -print -quit)
-          test -n "$manifest"
-          cargo fetch --locked --manifest-path "$manifest"
-          mkdir -p baffle
-          cp "$RUNNER_TEMP/baffle-install/bin/baffle" baffle/baffle
-          python3 scripts/collect-baffle-notices.py "$manifest" baffle
-      - name: Build the default proxy runtime image
-        run: docker build --file Containerfile.proxy --tag cladding-baffle-proxy-check .
-      - name: Start Baffle in the default proxy runtime image
-        run: |
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE/baffle/baffle:/opt/tools/bin/baffle:ro" \
-            --entrypoint /opt/tools/bin/baffle \
-            cladding-baffle-proxy-check --help
-      - uses: actions/upload-artifact@v4
-        with:
-          name: baffle-linux-${{ matrix.arch }}
-          path: baffle/
-
   # Only runs on the push that merges the release PR (release_created == true).
   # Builds a release binary per target and attaches it to the draft Release.
   upload-binaries:
-    needs: [release-please, build-helpers, build-baffle]
+    needs: [release-please, build-helpers]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     permissions:
       contents: write
@@ -146,10 +85,44 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: baffle-linux-${{ matrix.baffle_arch }}
-          path: baffle
+      - name: Download and verify pinned Baffle v1.1.0 release
+        env:
+          BAFFLE_ARCH: ${{ matrix.baffle_arch }}
+          BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-${{ matrix.baffle_arch }}-unknown-linux-gnu.tar.gz
+        run: |
+          set -euo pipefail
+          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"
+          archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
+          mkdir -p "$RUNNER_TEMP/baffle"
+          curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/SHA256SUMS" "$release_url/SHA256SUMS"
+          expected=$(awk -v archive="$BAFFLE_ARCHIVE" '$2 == archive || $2 == "*" archive { print $1 }' "$RUNNER_TEMP/SHA256SUMS")
+          if [ "${#expected}" -ne 64 ]; then
+            echo "Expected one SHA256SUMS entry for $BAFFLE_ARCHIVE" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$archive_path" | awk '{ print $1 }')
+          elif command -v shasum >/dev/null 2>&1; then
+            actual=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
+          else
+            echo "No SHA-256 utility is available" >&2
+            exit 1
+          fi
+          test "$actual" = "$expected"
+          tar -xzf "$archive_path" -C "$RUNNER_TEMP/baffle"
+          test -s "$RUNNER_TEMP/baffle/LICENSE"
+          test -s "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt"
+          test -s "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt"
+          chmod 0755 "$RUNNER_TEMP/baffle/baffle"
+          description=$(file -b "$RUNNER_TEMP/baffle/baffle")
+          printf '%s\n' "$description"
+          case "$BAFFLE_ARCH:$description" in
+            x86_64:"ELF 64-bit"*x86-64*) ;;
+            aarch64:"ELF 64-bit"*aarch64*) ;;
+            *) echo "Baffle is not the expected Linux $BAFFLE_ARCH executable" >&2; exit 1 ;;
+          esac
+          test -x "$RUNNER_TEMP/baffle/baffle"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -166,7 +139,7 @@ jobs:
           echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/helpers/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/helpers/run-remote" >> "$GITHUB_ENV"
       - name: Point build.rs at the validated Linux Baffle binary
-        run: echo "CLADDING_BAFFLE_BIN=$GITHUB_WORKSPACE/baffle/baffle" >> "$GITHUB_ENV"
+        run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
       # --locked is safe: the cargo-workspace plugin keeps the root Cargo.lock
       # in sync with the version bump on the release commit.
       - name: Build
@@ -181,9 +154,10 @@ jobs:
           cp "target/${{ matrix.target }}/release/${bin}" "$staging/"
           cp README.md "$staging/"
           cp docs/features/baffle-integration/embedded-baffle.md "$staging/docs/features/baffle-integration/"
-          cp baffle/THIRD_PARTY_NOTICES.md "$staging/"
-          cp -R baffle/licenses "$staging/"
-          if [ -f baffle/Cargo.lock ]; then cp baffle/Cargo.lock "$staging/baffle-Cargo.lock"; fi
+          mkdir -p "$staging/licenses/baffle"
+          cp "$RUNNER_TEMP/baffle/LICENSE" "$staging/licenses/baffle/LICENSE"
+          cp "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt" "$staging/licenses/baffle/"
+          cp "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt" "$staging/licenses/baffle/"
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
       - name: Upload to release
