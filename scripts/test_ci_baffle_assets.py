@@ -116,7 +116,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
             cleanup.index('touch "$temp_root/workspace/.run-origin-ready"'),
         )
         self.assertIn('"$temp_root/workspace/.failure-run-finish"', cleanup)
-        self.assertIn('wait_for_process_exit "$run_pid" 50', cleanup)
+        self.assertIn('wait_for_process_exit "$run_pid" 600', cleanup)
         self.assertIn('kill -KILL "$run_pid"', cleanup)
         self.assertIn(
             "one-off run did not exit after its workload gates were released",
