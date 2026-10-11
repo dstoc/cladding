@@ -492,7 +492,14 @@ pub(crate) fn resolve_executable_path(command: &str) -> Result<String, String> {
     }
 
     let path = std::env::var_os("PATH").ok_or_else(|| "PATH is not set".to_string())?;
-    for directory in std::env::split_paths(&path) {
+    resolve_executable_in_path(command, &path)
+}
+
+fn resolve_executable_in_path(
+    command: &str,
+    search_path: &std::ffi::OsStr,
+) -> Result<String, String> {
+    for directory in std::env::split_paths(search_path) {
         let candidate = directory.join(command);
         if !candidate.is_file() {
             continue;
@@ -723,20 +730,8 @@ mod tests {
         let link_path = temp.path().join("cargo");
         symlink(&real_bin, &link_path).expect("symlink");
 
-        let original_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", temp.path());
-        }
-        let resolved = resolve_executable_path("cargo").expect("resolve");
-        if let Some(value) = original_path {
-            unsafe {
-                std::env::set_var("PATH", value);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("PATH");
-            }
-        }
+        let resolved =
+            resolve_executable_in_path("cargo", temp.path().as_os_str()).expect("resolve");
 
         assert_eq!(resolved, link_path.to_string_lossy());
     }

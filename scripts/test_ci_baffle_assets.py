@@ -10,6 +10,10 @@ WORKFLOW = Path(__file__).parents[1] / ".github/workflows/ci.yml"
 TEXT = WORKFLOW.read_text()
 RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github/workflows/release-please.yml"
 RELEASE_TEXT = RELEASE_WORKFLOW.read_text()
+EMBEDDED_BAFFLE_DOC = (
+    Path(__file__).parents[1] / "docs/features/baffle-integration/embedded-baffle.md"
+)
+BAFFLE_PRD = Path(__file__).parents[1] / "docs/features/baffle-integration/prd.md"
 BAFFLE_CONFIG_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_baffle_config.sh"
 BAFFLE_RUNTIME_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_baffle_runtime.sh"
@@ -379,7 +383,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertNotIn("cargo build --locked --release -p mcp-run", block)
                 self.assertNotIn("cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c", block)
 
-    def test_each_release_download_is_pinned_verified_and_arch_checked(self):
+    def test_each_ci_download_is_pinned_verified_and_arch_checked(self):
         cases = {
             "test": ("x86_64", "baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz"),
             "baffle-config": (
@@ -413,6 +417,113 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertIn('description=$(file -b "$RUNNER_TEMP/baffle/baffle")', block)
                 machine = "x86-64" if arch == "x86_64" else "aarch64"
                 self.assertIn(f'"ELF 64-bit"*{machine}*) ;;', block)
+
+    def test_release_jobs_use_pinned_verified_baffle_release_archives(self):
+        self.assertNotIn("  build-baffle:\n", RELEASE_TEXT)
+        self.assertNotRegex(
+            RELEASE_TEXT, r"(?m)^\s*run: cargo install .*baffle-proxy"
+        )
+        self.assertNotIn("scripts/collect-baffle-notices.py", RELEASE_TEXT)
+
+        upload = job_block("upload-binaries", RELEASE_TEXT)
+        self.assertIn("needs: [release-please, build-helpers]", upload)
+        release_platforms = re.findall(
+            r"(?m)^          - os: ([^\s]+)\n            target: ([^\s]+)\n"
+            r"            baffle_arch: ([^\s]+)\n            helper_arch: ([^\s]+)$",
+            upload,
+        )
+        self.assertEqual(
+            release_platforms,
+            [
+                (
+                    "ubuntu-latest",
+                    "x86_64-unknown-linux-gnu",
+                    "x86_64",
+                    "x86_64",
+                ),
+                (
+                    "ubuntu-24.04-arm",
+                    "aarch64-unknown-linux-gnu",
+                    "aarch64",
+                    "aarch64",
+                ),
+                (
+                    "macos-latest",
+                    "aarch64-apple-darwin",
+                    "aarch64",
+                    "aarch64",
+                ),
+            ],
+        )
+
+        download = upload.split(
+            "- name: Download and verify pinned Baffle v1.1.0 release", 1
+        )[1].split("- uses: dtolnay/rust-toolchain@stable", 1)[0]
+        self.assertIn(
+            "BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-${{ matrix.baffle_arch }}-unknown-linux-gnu.tar.gz",
+            download,
+        )
+        self.assertIn(
+            'release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"',
+            download,
+        )
+        self.assertIn('"$release_url/$BAFFLE_ARCHIVE"', download)
+        self.assertIn('"$release_url/SHA256SUMS"', download)
+        self.assertIn("awk -v archive=", download)
+        self.assertIn('test "$actual" = "$expected"', download)
+        self.assertLess(
+            download.index('test "$actual" = "$expected"'),
+            download.index("tar -xzf"),
+        )
+        self.assertIn("sha256sum", download)
+        self.assertIn("shasum -a 256", download)
+        self.assertIn('test -s "$RUNNER_TEMP/baffle/LICENSE"', download)
+        self.assertIn(
+            'test -s "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt"',
+            download,
+        )
+        self.assertIn(
+            'test -s "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt"',
+            download,
+        )
+        self.assertIn(
+            'description=$(file -b "$RUNNER_TEMP/baffle/baffle")', download
+        )
+        self.assertIn('x86_64:"ELF 64-bit"*x86-64*) ;;', download)
+        self.assertIn('aarch64:"ELF 64-bit"*aarch64*) ;;', download)
+        self.assertIn(
+            'CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle', upload
+        )
+
+    def test_release_package_copies_upstream_baffle_redistribution_files(self):
+        upload = job_block("upload-binaries", RELEASE_TEXT)
+        package = upload.split("- name: Package", 1)[1].split(
+            "- name: Upload to release", 1
+        )[0]
+        for path in (
+            '"$RUNNER_TEMP/baffle/LICENSE" "$staging/licenses/baffle/LICENSE"',
+            '"$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt" "$staging/licenses/baffle/"',
+            '"$RUNNER_TEMP/baffle/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt" "$staging/licenses/baffle/"',
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, package)
+        self.assertNotIn("THIRD_PARTY_NOTICES.md", package)
+        self.assertNotIn("baffle-Cargo.lock", package)
+
+    def test_baffle_docs_describe_source_builds_and_published_release_assets(self):
+        guide = EMBEDDED_BAFFLE_DOC.read_text()
+        prd = BAFFLE_PRD.read_text()
+        self.assertIn("pinned Baffle v1.1.0 Linux archive", guide)
+        self.assertIn("`SHA256SUMS` before extraction", guide)
+        self.assertIn("under `licenses/baffle/`", guide)
+        self.assertNotIn("Do not use Baffle's GitHub release assets", guide)
+        self.assertIn(
+            "Do not download GitHub release assets for this source-build path.",
+            prd,
+        )
+        self.assertIn(
+            "The workflows use the explicit v1.1.0 release archives", prd
+        )
 
     def test_required_test_path_waits_only_for_x86_64_helper_prep(self):
         test = job_block("test")
@@ -485,10 +596,10 @@ class BaffleCiAssetsTests(unittest.TestCase):
             ],
         )
 
-    def test_behavior_and_notice_coverage_remain_in_ci(self):
+    def test_behavior_and_release_packaging_checks_remain_in_ci(self):
         test = job_block("test")
-        self.assertIn("python3 scripts/test_collect_baffle_notices.py", test)
         self.assertIn("python3 scripts/test_ci_baffle_assets.py", test)
+        self.assertNotIn("test_collect_baffle_notices.py", test)
 
         config = job_block("baffle-config")
         for validator in (
