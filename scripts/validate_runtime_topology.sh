@@ -104,7 +104,13 @@ cleanup() {
       fi
     done
     if [ -s "$temp_root/startup.log" ]; then
-      startup_details=$(tail -n 25 "$temp_root/startup.log" | tr '\n' ' ' | sed -e 's/%/%25/g' -e 's/\r/%0D/g')
+      startup_details=$(
+        {
+          grep -Ei 'error|failed|permission|denied|no such|not found|exit code|exec format|operation not permitted' \
+            "$temp_root/startup.log" || true
+          tail -n 10 "$temp_root/startup.log"
+        } | awk '!seen[$0]++' | tail -n 30 | tr '\r\n' '  ' | sed 's/%/%25/g'
+      )
       startup_details=$(printf '%s' "$startup_details" | cut -c1-4000)
       printf '::error title=Runtime topology startup details::%s\n' "$startup_details"
     fi
