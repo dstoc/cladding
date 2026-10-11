@@ -223,7 +223,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertNotIn(excluded, containerfile.lower())
 
     def test_local_and_machine_ci_use_the_shared_topology_validator(self):
-        linux = job_block("baffle-config")
+        linux = job_block("linux-integration")
         machine = job_block("baffle-podman-machine")
         self.assertIn("scripts/validate_runtime_topology.sh default", linux)
         self.assertIn("scripts/validate_runtime_topology.sh default", machine)
@@ -403,7 +403,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
     def test_ci_consumers_download_matching_complete_artifacts_directly(self):
         cases = (
             ("test", "x86_64", "x86-64"),
-            ("baffle-config", "x86_64", "x86-64"),
+            ("linux-integration", "x86_64", "x86-64"),
             ("baffle-podman-machine", "x86_64", "x86-64"),
             ("baffle-apple-silicon-build", "aarch64", "aarch64"),
         )
@@ -438,12 +438,12 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote",
             test,
         )
-        config = job_block("baffle-config")
+        integration = job_block("linux-integration")
         self.assertIn(
             "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe",
-            config,
+            integration,
         )
-        self.assertIn('"$RUNNER_TEMP/linux-tools/bin/baffle"', config)
+        self.assertIn('"$RUNNER_TEMP/linux-tools/bin/baffle"', integration)
 
     def test_linux_asset_graph_has_no_intermediate_staging_jobs(self):
         for old_job in (
@@ -571,9 +571,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("aarch64", test)
         self.assertNotIn("baffle-podman-machine", test)
 
-        config = job_block("baffle-config")
-        self.assertIn("needs: embedded-linux-tools-x86_64", config)
-        self.assertNotIn("aarch64", config)
+        integration = job_block("linux-integration")
+        self.assertIn("needs: embedded-linux-tools-x86_64", integration)
+        self.assertNotIn("aarch64", integration)
 
         for arch in ("x86_64", "aarch64"):
             with self.subTest(arch=arch):
@@ -582,7 +582,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
         linux_machine = job_block("baffle-podman-machine")
         self.assertIn("needs: embedded-linux-tools-x86_64", linux_machine)
-        self.assertNotIn("baffle-config", linux_machine)
+        self.assertNotIn("linux-integration", linux_machine)
 
         apple_silicon = job_block("baffle-apple-silicon-build")
         self.assertIn("needs: embedded-linux-tools-aarch64", apple_silicon)
@@ -635,7 +635,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("python3 scripts/test_ci_baffle_assets.py", test)
         self.assertNotIn("test_collect_baffle_notices.py", test)
 
-        config = job_block("baffle-config")
+        integration = job_block("linux-integration")
         for validator in (
             "scripts/validate_baffle_config.sh",
             "scripts/validate_baffle_runtime.sh default",
@@ -643,7 +643,21 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "scripts/validate_managed_mounts.sh default",
             "scripts/validate_managed_mounts.sh runsc",
         ):
-            self.assertIn(validator, config)
+            self.assertIn(validator, integration)
+
+    def test_linux_integration_job_keeps_all_integration_coverage(self):
+        integration = job_block("linux-integration")
+        self.assertNotIn("baffle-config:", TEXT)
+        for validator in (
+            "scripts/validate_baffle_config.sh",
+            "scripts/validate_runtime_topology.sh default",
+            "scripts/validate_baffle_runtime.sh default",
+            "scripts/validate_baffle_runtime.sh runsc",
+            "scripts/validate_managed_mounts.sh default",
+            "scripts/validate_managed_mounts.sh runsc",
+        ):
+            with self.subTest(validator=validator):
+                self.assertIn(validator, integration)
 
 
 if __name__ == "__main__":

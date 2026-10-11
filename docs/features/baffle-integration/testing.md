@@ -1,7 +1,7 @@
 # Baffle integration test matrix
 
 The Baffle tests use the pinned **baffle-proxy 1.0.0** executable. They run
-from the **baffle-config** GitHub Actions job with rootless Podman.
+from the **linux-integration** GitHub Actions job with rootless Podman.
 
 | Environment | Coverage |
 | --- | --- |
