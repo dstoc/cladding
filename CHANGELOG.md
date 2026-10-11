@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/dstoc/cladding/compare/v0.4.0...v0.4.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* stop Baffle test origins promptly ([#88](https://github.com/dstoc/cladding/issues/88)) ([f84371b](https://github.com/dstoc/cladding/commit/f84371b414d8b4ed21c0c4971b1f97e0cf4b093a))
+
 ## [0.4.0](https://github.com/dstoc/cladding/compare/v0.3.9...v0.4.0) (2026-10-11)
 
 
