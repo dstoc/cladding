@@ -100,6 +100,13 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('assert_denied_connect "$agent" agent', validator)
         self.assertIn('assert_denied_connect "$nw_sandbox" nw-sandbox', validator)
 
+    def test_topology_validator_saves_startup_diagnostics_to_actions_summary(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        self.assertIn('if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then', validator)
+        self.assertIn("Runtime topology failure diagnostics", validator)
+        self.assertIn('tail -n 200 "$temp_root/startup.log"', validator)
+        self.assertIn('tail -n 200 "$temp_root/partial-startup.log"', validator)
+
     def test_topology_validator_builds_and_times_one_minimal_shared_image(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
         containerfile = RUNTIME_TOPOLOGY_IMAGE.read_text()

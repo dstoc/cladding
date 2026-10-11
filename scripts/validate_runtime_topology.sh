@@ -103,6 +103,29 @@ cleanup() {
         podman logs "$container" 2>&1 | tail -n 30 >&2 || true
       fi
     done
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      {
+        echo "### Runtime topology failure diagnostics"
+        echo
+        printf 'Phase: `%s` (exit code %s).\n' "$phase" "$status"
+        if [ -s "$temp_root/startup.log" ]; then
+          echo
+          echo "Cladding startup output (last 200 lines):"
+          echo
+          echo '```text'
+          tail -n 200 "$temp_root/startup.log"
+          echo '```'
+        fi
+        if [ -s "$temp_root/partial-startup.log" ]; then
+          echo
+          echo "Cladding partial-startup output (last 200 lines):"
+          echo
+          echo '```text'
+          tail -n 200 "$temp_root/partial-startup.log"
+          echo '```'
+        fi
+      } >> "$GITHUB_STEP_SUMMARY"
+    fi
   fi
   "$cladding_bin" --cladding-dir "$project_root" down >/dev/null 2>&1 || true
   rm -rf "$temp_root"
