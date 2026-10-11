@@ -30,12 +30,12 @@ jobs:
           set -euo pipefail
           helper_dir=/usr/local/libexec/podman
           sudo install -d "$helper_dir"
-          for helper in gvproxy virtiofsd; do
-            source_path=$(command -v "$helper")
-            sudo ln -sf "$source_path" "$helper_dir/$helper"
-            test -x "$helper_dir/$helper"
-            echo "$helper: $(readlink -f "$helper_dir/$helper")"
-          done
+          sudo ln -sf /usr/bin/gvproxy "$helper_dir/gvproxy"
+          sudo ln -sf /usr/libexec/virtiofsd "$helper_dir/virtiofsd"
+          test -x "$helper_dir/gvproxy"
+          test -x "$helper_dir/virtiofsd"
+          echo "gvproxy: $(readlink -f "$helper_dir/gvproxy")"
+          echo "virtiofsd: $(readlink -f "$helper_dir/virtiofsd")"
           ls -l "$helper_dir"
 
           sudo chmod 666 /dev/kvm
