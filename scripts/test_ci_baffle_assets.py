@@ -170,14 +170,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
     def test_local_and_machine_ci_use_the_shared_topology_validator(self):
         linux = job_block("baffle-config")
-        machine = job_block("baffle-podman-machine-linux")
+        machine = job_block("baffle-podman-machine")
         self.assertIn("scripts/validate_runtime_topology.sh default", linux)
         self.assertIn("scripts/validate_runtime_topology.sh default", machine)
         self.assertNotIn("scripts/validate_baffle_runtime.sh", machine)
         self.assertNotIn("scripts/validate_managed_mounts.sh", machine)
 
     def test_linux_machine_job_uses_the_pinned_rootless_remote_engine(self):
-        machine = job_block("baffle-podman-machine-linux")
+        machine = job_block("baffle-podman-machine")
         self.assertIn("runs-on: ubuntu-24.04", machine)
         self.assertIn("needs: baffle-podman-machine-assets-x86_64", machine)
         self.assertIn("PODMAN_VERSION: 5.8.2", machine)
@@ -203,12 +203,11 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("baffle-macos-x86_64-build", machine)
         self.assertNotIn("macos", machine)
 
-        fallback = job_block("baffle-podman-machine")
-        self.assertIn("runs-on: macos-15-intel", fallback)
-        self.assertIn("scripts/validate_runtime_topology.sh default", fallback)
+        self.assertNotIn("baffle-podman-machine-linux", TEXT)
+        self.assertIn("needs: baffle-podman-machine-assets-x86_64", machine)
 
     def test_linux_machine_job_runs_the_four_case_bind_mount_reproduction(self):
-        machine = job_block("baffle-podman-machine-linux")
+        machine = job_block("baffle-podman-machine")
         validator = PODMAN_MACHINE_BIND_VALIDATOR.read_text()
         repro = "scripts/validate_podman_machine_binds.sh"
         topology = "scripts/validate_runtime_topology.sh default"
@@ -435,17 +434,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("cladding-baffle-linux-tools-x86_64", intel_build)
         self.assertIn("cladding-macos-x86_64", intel_build)
 
-        linux_machine = job_block("baffle-podman-machine-linux")
+        linux_machine = job_block("baffle-podman-machine")
         self.assertIn("needs: baffle-podman-machine-assets-x86_64", linux_machine)
         self.assertNotIn("baffle-macos-x86_64-build", linux_machine)
         self.assertNotIn("baffle-config", linux_machine)
         self.assertNotIn(
-            "needs: baffle-podman-machine-linux\n",
+            "needs: baffle-podman-machine\n",
             job_block("baffle-macos-x86_64-build"),
         )
-
-        mac_fallback = job_block("baffle-podman-machine")
-        self.assertIn("needs: baffle-macos-x86_64-build", mac_fallback)
 
         apple_assets = job_block("baffle-podman-machine-assets-aarch64")
         self.assertIn("needs: linux-helper-assets-aarch64", apple_assets)
