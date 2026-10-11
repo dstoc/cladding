@@ -471,6 +471,134 @@ jobs:
           path: ${{ runner.temp }}/cladding-baffle-tools-aarch64
           if-no-files-found: error
 
+  baffle-podman-machine-linux:
+    runs-on: ubuntu-24.04
+    needs: baffle-podman-machine-assets-x86_64
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      PODMAN_VERSION: 5.8.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-baffle-linux-tools-x86_64
+          path: ${{ runner.temp }}/linux-tools
+      - name: Restore and verify embedded x86_64 Linux tools
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/linux-tools/bin"
+          for name in baffle mcp-run run-remote; do
+            tool="$tool_dir/$name"
+            test -f "$tool"
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected an x86_64 Linux executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - name: Set embedded Linux tool paths
+        run: |
+          echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
+          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
+          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: true
+      - name: Build Cladding with the embedded x86_64 Linux tools
+        run: cargo build --locked --bin cladding
+      - name: Install Podman Machine and QEMU dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            podman \
+            qemu-system-x86 \
+            qemu-utils \
+            gvproxy \
+            virtiofsd \
+            uidmap \
+            slirp4netns \
+            fuse-overlayfs
+          qemu-system-x86_64 --version
+      - name: Install pinned upstream Podman remote client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/podman-${PODMAN_VERSION}"
+          mkdir -p "$release_dir"
+          gh release download "v${PODMAN_VERSION}" \
+            --repo podman-container-tools/podman \
+            --pattern podman-remote-static-linux_amd64.tar.gz \
+            --dir "$release_dir"
+          archive="$release_dir/podman-remote-static-linux_amd64.tar.gz"
+          tar -tzf "$archive" | grep -Fx bin/podman-remote-static-linux_amd64
+          tar -xzf "$archive" -C "$release_dir"
+          sudo install -m 0755 \
+            "$release_dir/bin/podman-remote-static-linux_amd64" \
+            /usr/local/bin/podman
+          test "$(command -v podman)" = /usr/local/bin/podman
+          test "$(podman --version)" = "podman version ${PODMAN_VERSION}"
+          podman --version
+      - name: Configure Podman Machine helpers and KVM
+        run: |
+          set -euo pipefail
+          helper_dir=/usr/local/libexec/podman
+          sudo install -d "$helper_dir"
+          sudo ln -sf /usr/bin/gvproxy "$helper_dir/gvproxy"
+          sudo ln -sf /usr/libexec/virtiofsd "$helper_dir/virtiofsd"
+          test -x "$helper_dir/gvproxy"
+          test -x "$helper_dir/virtiofsd"
+          echo "gvproxy: $(readlink -f "$helper_dir/gvproxy")"
+          echo "virtiofsd: $(readlink -f "$helper_dir/virtiofsd")"
+          sudo chmod 666 /dev/kvm
+          stat --format='KVM permissions: %a %n' /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Start rootless Podman Machine and validate Cladding topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          machine_name=podman-machine-default
+          podman_cli=/usr/local/bin/podman
+          cleanup() {
+            status=$?
+            trap - EXIT INT TERM
+            "$podman_cli" machine stop "$machine_name" >/dev/null 2>&1 || true
+            "$podman_cli" machine rm --force "$machine_name" >/dev/null 2>&1 || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          "$podman_cli" machine init --cpus 2 --memory 4096 --rootful=false "$machine_name"
+          "$podman_cli" machine start "$machine_name"
+          rootless=$("$podman_cli" --connection "$machine_name" info --format '{{.Host.Security.Rootless}}')
+          test "$rootless" = true
+          machine_uid=$("$podman_cli" machine ssh "$machine_name" id -u)
+          test "$machine_uid" -gt 0
+          printf 'Podman Machine rootless=%s uid=%s\n' "$rootless" "$machine_uid"
+
+          podman_wrapper_dir="$RUNNER_TEMP/podman-machine-wrapper"
+          mkdir -p "$podman_wrapper_dir"
+          cat > "$podman_wrapper_dir/podman" <<'EOF'
+          #!/bin/sh
+          exec /usr/local/bin/podman --connection "${PODMAN_MACHINE_CONNECTION:?}" "$@"
+          EOF
+          chmod 0755 "$podman_wrapper_dir/podman"
+          export PODMAN_MACHINE_CONNECTION="$machine_name"
+          export PATH="$podman_wrapper_dir:$PATH"
+          test "$(command -v podman)" = "$podman_wrapper_dir/podman"
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+
+          CLADDING_BIN="$GITHUB_WORKSPACE/target/debug/cladding" \
+            CLADDING_TOPOLOGY_TMP_DIR="$GITHUB_WORKSPACE" \
+            scripts/validate_runtime_topology.sh default
+
   baffle-macos-x86_64-build:
     runs-on: macos-15-intel
     needs: baffle-podman-machine-assets-x86_64
@@ -521,7 +649,7 @@ jobs:
           if-no-files-found: error
 
   baffle-podman-machine:
-    # Keep the macOS fallback until hosted Linux Machine startup is repeatable.
+    # Keep the macOS fallback until Linux-hosted Cladding topology passes.
     runs-on: macos-15-intel
     needs: baffle-macos-x86_64-build
     env:
