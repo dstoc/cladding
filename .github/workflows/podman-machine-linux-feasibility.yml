@@ -25,6 +25,22 @@ jobs:
             fuse-overlayfs
           podman --version
           qemu-system-x86_64 --version
+      - name: Configure Podman Machine helpers and KVM
+        run: |
+          set -euo pipefail
+          helper_dir=/usr/local/libexec/podman
+          sudo install -d "$helper_dir"
+          for helper in gvproxy virtiofsd; do
+            source_path=$(command -v "$helper")
+            sudo ln -sf "$source_path" "$helper_dir/$helper"
+            test -x "$helper_dir/$helper"
+            echo "$helper: $(readlink -f "$helper_dir/$helper")"
+          done
+          ls -l "$helper_dir"
+
+          sudo chmod 666 /dev/kvm
+          stat --format='KVM permissions: %a %n' /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
       - name: Repeat Podman Machine startup and remote-engine checks
         shell: bash
         run: |
