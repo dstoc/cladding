@@ -55,7 +55,7 @@ pub(super) fn cmd_run(
         ))
     })?;
 
-    let runtime_root = match create_private_runtime_root(
+    let (runtime_root, _identity_guard) = match create_private_runtime_root(
         &instance_name,
         &source_context.workspace_root,
     ) {
@@ -583,7 +583,10 @@ fn generate_uuid_v4() -> Result<String> {
     ))
 }
 
-fn create_private_runtime_root(instance_name: &str, workspace_root: &Path) -> Result<PathBuf> {
+fn create_private_runtime_root(
+    instance_name: &str,
+    workspace_root: &Path,
+) -> Result<(PathBuf, cladding::runtime::RunIdentityGuard)> {
     let identity = generate_uuid_v4()?;
     let workspace_root = workspace_root
         .canonicalize()
@@ -625,14 +628,18 @@ fn create_private_runtime_root(instance_name: &str, workspace_root: &Path) -> Re
                 )
             })?;
         }
-        if let Err(error) = cladding::runtime::write_run_identity(&root, instance_name, &identity) {
-            let _ = fs::remove_dir_all(&root);
-            return Err(Error::message(format!(
-                "failed to record ownership for private runtime root {}: {error:#}",
-                root.display()
-            )));
-        }
-        return Ok(root);
+        let identity_guard =
+            match cladding::runtime::create_run_identity_guard(&root, instance_name, &identity) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&root);
+                    return Err(Error::message(format!(
+                        "failed to record ownership for private runtime root {}: {error:#}",
+                        root.display()
+                    )));
+                }
+            };
+        return Ok((root, identity_guard));
     }
 
     Err(anyhow::anyhow!(
@@ -713,7 +720,8 @@ mod tests {
             .join(&name);
         fs::create_dir_all(&workspace).unwrap();
 
-        let runtime_root = create_private_runtime_root(&name, &workspace).unwrap();
+        let (runtime_root, _identity_guard) =
+            create_private_runtime_root(&name, &workspace).unwrap();
 
         assert!(!runtime_root.starts_with(&workspace));
         assert!(runtime_root.is_dir());
@@ -861,12 +869,12 @@ mod tests {
 
     #[test]
     fn run_secret_files_are_private_independent_and_removed_with_the_runtime() {
-        let first_root = create_private_runtime_root(
+        let (first_root, _first_identity_guard) = create_private_runtime_root(
             &format!("cladding-run-{}", generate_uuid_v4().unwrap()),
             Path::new("/workspace"),
         )
         .unwrap();
-        let second_root = create_private_runtime_root(
+        let (second_root, _second_identity_guard) = create_private_runtime_root(
             &format!("cladding-run-{}", generate_uuid_v4().unwrap()),
             Path::new("/workspace"),
         )

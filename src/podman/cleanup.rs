@@ -1,5 +1,8 @@
 use crate::error::{Error, Result};
-use crate::runtime::read_run_identity;
+use crate::runtime::{
+    RunIdentityGuard, preserve_run_identity, read_run_identity, read_sidecar_identity,
+    remove_run_identity_sidecar, try_lock_run_identity,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -7,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const RUN_PREFIX: &str = "cladding-run-";
+const RUN_IDENTITY_SIDECAR_SUFFIX: &str = ".cladding-run-identity";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ResourceKind {
@@ -215,7 +219,7 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
     let resource_owners = groups.keys().cloned().collect::<BTreeSet<_>>();
 
     'runs: for (owner, listed_resources) in groups {
-        let group = match validate_group(&owner, &listed_resources, allowed_bases) {
+        let mut group = match validate_group(&owner, &listed_resources, allowed_bases) {
             Ok(group) => group,
             Err(reason) => {
                 report
@@ -224,6 +228,55 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
                 continue;
             }
         };
+
+        let root_path = group
+            .root
+            .as_deref()
+            .expect("validated run has a runtime root");
+        let root_exists = match fs::symlink_metadata(root_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                report.skipped_unverifiable.push(SkippedRun {
+                    owner,
+                    reason: format!("could not inspect private runtime root: {error}"),
+                });
+                continue;
+            }
+        };
+        if root_exists {
+            group.identity_guard = match try_lock_run_identity(root_path, &owner, &group.identity) {
+                Ok(Some(guard)) => Some(guard),
+                Ok(None) => {
+                    report.skipped_live.push(SkippedRun {
+                        owner,
+                        reason: "private runtime root is locked by an active run".to_string(),
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    report.skipped_unverifiable.push(SkippedRun {
+                        owner,
+                        reason: format!("could not claim private runtime root: {error:#}"),
+                    });
+                    continue;
+                }
+            };
+        }
+        if let Err(error) = verify_runtime_root_identity(
+            group
+                .root
+                .as_deref()
+                .expect("validated run has a runtime root"),
+            &owner,
+            &group.identity,
+        ) {
+            report.skipped_unverifiable.push(SkippedRun {
+                owner,
+                reason: error.to_string(),
+            });
+            continue;
+        }
 
         // Refresh every discovered resource before deciding that a run is
         // abandoned. A resource that vanished after listing is already clean.
@@ -683,6 +736,7 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
             &owner,
             &group.identity,
             allowed_bases,
+            group.identity_guard.as_ref(),
         ) {
             Ok(disposition) => disposition,
             Err(error) => {
@@ -732,11 +786,51 @@ fn cleanup_with(backend: &mut impl CleanupBackend, allowed_bases: &[PathBuf]) ->
             });
             continue;
         }
+        let root_guard = match try_lock_run_identity(&root.path, &root.owner, &root.identity) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
+                report.skipped_live.push(SkippedRun {
+                    owner: root.owner,
+                    reason: "private runtime root is locked by an active run".to_string(),
+                });
+                continue;
+            }
+            Err(error) => {
+                let sidecar = root
+                    .path
+                    .parent()
+                    .expect("validated runtime root has a parent")
+                    .join(format!(".{}{RUN_IDENTITY_SIDECAR_SUFFIX}", root.owner));
+                let root_gone = matches!(
+                    fs::symlink_metadata(&root.path),
+                    Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
+                );
+                let sidecar_gone = matches!(
+                    fs::symlink_metadata(&sidecar),
+                    Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
+                );
+                if root_gone && sidecar_gone {
+                    report.cleaned.push(CleanedRun {
+                        owner: root.owner,
+                        resources: Vec::new(),
+                        runtime_root: RootDisposition::Missing,
+                        complete: true,
+                    });
+                    continue;
+                }
+                report.skipped_unverifiable.push(SkippedRun {
+                    owner: root.owner,
+                    reason: format!("could not claim private runtime root: {error:#}"),
+                });
+                continue;
+            }
+        };
         match remove_verified_runtime_root(
             Some(&root.path),
             &root.owner,
             &root.identity,
             allowed_bases,
+            Some(&root_guard),
         ) {
             Ok(disposition) => report.cleaned.push(CleanedRun {
                 owner: root.owner,
@@ -756,6 +850,7 @@ struct ValidatedGroup {
     root: Option<PathBuf>,
     identity: String,
     resources: Vec<ResourceSnapshot>,
+    identity_guard: Option<RunIdentityGuard>,
 }
 
 fn validate_group(
@@ -871,6 +966,7 @@ fn validate_group(
         root,
         identity,
         resources: resources.to_vec(),
+        identity_guard: None,
     })
 }
 
@@ -1104,7 +1200,7 @@ struct PrivateRunRoot {
 fn discover_private_run_roots(
     allowed_bases: &[PathBuf],
 ) -> std::result::Result<Vec<PrivateRunRoot>, Error> {
-    let mut roots = Vec::new();
+    let mut roots = BTreeMap::<String, PrivateRunRoot>::new();
     for base in allowed_bases {
         let entries = fs::read_dir(base).map_err(|error| {
             Error::message(format!(
@@ -1119,37 +1215,82 @@ fn discover_private_run_roots(
                     base.display()
                 ))
             })?;
-            let Some(owner) = entry.file_name().to_str().map(str::to_string) else {
+            let Some(entry_name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            if !is_run_owner(&owner) {
+            if is_run_owner(&entry_name) {
+                let path = entry.path();
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    continue;
+                }
+                let identity = match read_run_identity(&path) {
+                    Ok(Some(identity)) if identity.owner == entry_name && is_uuid(&identity.id) => {
+                        identity
+                    }
+                    _ => continue,
+                };
+                if verify_allowed_run_root(&path, &entry_name, allowed_bases).is_err()
+                    || verify_runtime_root_path(&path).is_err()
+                {
+                    continue;
+                }
+                roots.insert(
+                    entry_name.clone(),
+                    PrivateRunRoot {
+                        owner: entry_name,
+                        identity: identity.id,
+                        path,
+                    },
+                );
                 continue;
             }
-            let path = entry.path();
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
+
+            let Some(owner) = entry_name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(RUN_IDENTITY_SIDECAR_SUFFIX))
+                .filter(|owner| is_run_owner(owner))
+                .map(str::to_string)
+            else {
+                continue;
             };
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                continue;
-            }
-            let identity = match read_run_identity(&path) {
+            let path = base.join(&owner);
+            let identity = match read_sidecar_identity(&path) {
                 Ok(Some(identity)) if identity.owner == owner && is_uuid(&identity.id) => identity,
                 _ => continue,
             };
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    continue;
+                }
+                Ok(_) => match read_run_identity(&path) {
+                    Ok(Some(root_identity))
+                        if root_identity.owner == identity.owner
+                            && root_identity.id == identity.id => {}
+                    _ => continue,
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => continue,
+            }
             if verify_allowed_run_root(&path, &owner, allowed_bases).is_err()
                 || verify_runtime_root_path(&path).is_err()
             {
                 continue;
             }
-            roots.push(PrivateRunRoot {
-                owner,
-                identity: identity.id,
-                path,
-            });
+            roots.insert(
+                owner.clone(),
+                PrivateRunRoot {
+                    owner,
+                    identity: identity.id,
+                    path,
+                },
+            );
         }
     }
-    Ok(roots)
+    Ok(roots.into_values().collect())
 }
 
 fn verify_allowed_run_root(
@@ -1217,28 +1358,55 @@ fn remove_verified_runtime_root(
     owner: &str,
     identity: &str,
     allowed_bases: &[PathBuf],
+    guard: Option<&RunIdentityGuard>,
 ) -> std::result::Result<RootDisposition, Error> {
     let Some(root) = root else {
         return Ok(RootDisposition::NotAssociated);
     };
     verify_allowed_run_root(root, owner, allowed_bases)?;
-    match fs::symlink_metadata(root) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RootDisposition::Missing);
-        }
+    let root_exists = match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => {
             return Err(Error::message(format!(
                 "failed to inspect private runtime root {}: {error}",
                 root.display()
             )));
         }
-        Ok(_) => {}
+        Ok(_) => true,
+    };
+    if !root_exists {
+        verify_runtime_root_identity(root, owner, identity)?;
+        remove_run_identity_sidecar(root, owner, identity).map_err(|error| {
+            Error::message(format!(
+                "failed to remove run identity sidecar for {}: {error:#}",
+                root.display()
+            ))
+        })?;
+        return Ok(RootDisposition::Missing);
+    }
+    if guard.is_none() {
+        return Err(Error::message(format!(
+            "private runtime root {} appeared without a cleanup lock",
+            root.display()
+        )));
     }
     verify_runtime_root_path(root)?;
     verify_runtime_root_identity(root, owner, identity)?;
+    preserve_run_identity(root, owner, identity).map_err(|error| {
+        Error::message(format!(
+            "failed to preserve run identity for {}: {error:#}",
+            root.display()
+        ))
+    })?;
     fs::remove_dir_all(root).map_err(|error| {
         Error::message(format!(
             "failed to remove private runtime root {}: {error}",
+            root.display()
+        ))
+    })?;
+    remove_run_identity_sidecar(root, owner, identity).map_err(|error| {
+        Error::message(format!(
+            "failed to remove run identity sidecar for {}: {error:#}",
             root.display()
         ))
     })?;
@@ -1440,7 +1608,7 @@ fn trace_command(command: &Command, verbose: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::write_run_identity;
+    use crate::runtime::{create_run_identity_guard, write_run_identity};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const OWNER: &str = "cladding-run-12345678-1234-4234-8234-123456789abc";
@@ -1925,6 +2093,41 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_skips_a_run_held_before_its_first_podman_resource() {
+        let base = temp_base("active-startup");
+        let root = base.join(OWNER);
+        fs::create_dir(&root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // This guard represents the creator between private-root setup and
+        // the first Podman resource. Its lifetime matches the production run.
+        let creator_guard = create_run_identity_guard(&root, OWNER, IDENTITY).unwrap();
+        fs::write(root.join("startup-state"), "still starting").unwrap();
+        let mut backend = backend_with(Vec::new());
+
+        let report = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(report.skipped_live.len(), 1);
+        assert!(report.cleaned.is_empty());
+        assert!(root.join("startup-state").exists());
+        drop(creator_guard);
+
+        let retry = cleanup_with(&mut backend, std::slice::from_ref(&base));
+        assert_eq!(retry.cleaned.len(), 1);
+        assert!(retry.cleaned[0].complete);
+        assert!(!root.exists());
+        assert!(
+            !base
+                .join(format!(".{OWNER}.cladding-run-identity"))
+                .exists()
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn cleans_containers_helpers_volumes_and_the_verified_private_root() {
         let base = temp_base("complete");
         let root = make_private_root(&base);
@@ -2007,6 +2210,54 @@ mod tests {
         assert_eq!(retry.cleaned[0].runtime_root, RootDisposition::Removed);
         assert!(backend.resources.is_empty());
         assert!(!root.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_private_root_removal_keeps_identity_for_retry_after_repair() {
+        if unsafe { libc::geteuid() } == 0 {
+            // Root can traverse mode-0500 directories, so this failure cannot
+            // be exercised reliably under a privileged test runner.
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = temp_base("root-content-retry");
+        let root = make_private_root(&base);
+        let blocked = root.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("private"), "fixture").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
+        let sidecar = base.join(format!(".{OWNER}.cladding-run-identity"));
+        let mut backend = backend_with(Vec::new());
+
+        let first = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert_eq!(first.failures.len(), 1);
+        assert!(root.exists());
+        assert!(sidecar.exists());
+        // Model the failure point reproduced in review: the root marker may
+        // already have been removed when recursive deletion hits a child it
+        // cannot remove. The sibling hard link remains authoritative.
+        let marker = root.join(".cladding-run-identity");
+        if marker.exists() {
+            fs::remove_file(&marker).unwrap();
+        }
+        assert!(
+            read_run_identity(&root)
+                .unwrap()
+                .is_some_and(|identity| identity.owner == OWNER && identity.id == IDENTITY)
+        );
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        let retry = cleanup_with(&mut backend, std::slice::from_ref(&base));
+
+        assert!(retry.failures.is_empty());
+        assert_eq!(retry.cleaned.len(), 1);
+        assert!(retry.cleaned[0].complete);
+        assert!(!root.exists());
+        assert!(!sidecar.exists());
         let _ = fs::remove_dir_all(base);
     }
 
