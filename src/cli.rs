@@ -29,18 +29,26 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let command = cli.command.unwrap();
 
-    let cwd = std::env::current_dir().with_context(|| "failed to determine current directory")?;
     if cli.config.is_some() && !command.uses_config() {
         eprintln!("error: this command does not read configuration");
         eprintln!("hint: --config applies to commands that use the Cladding configuration");
         return Err(Error::message("unsupported --config option for command"));
     }
-    if cli.cladding_dir.is_some() && matches!(&command, CommandSpec::Ps) {
-        eprintln!("error: 'ps' is not scoped to a project directory");
-        eprintln!("hint: omit --cladding-dir when listing all running projects");
-        return Err(Error::message("unsupported --cladding-dir option for ps"));
+    if cli.cladding_dir.is_some()
+        && matches!(&command, CommandSpec::Ps | CommandSpec::Cleanup { .. })
+    {
+        eprintln!("error: this command is not scoped to a project directory");
+        eprintln!("hint: omit --cladding-dir for commands that inspect all Cladding runtimes");
+        return Err(Error::message(
+            "unsupported --cladding-dir option for unscoped command",
+        ));
     }
 
+    if let CommandSpec::Cleanup { verbose } = &command {
+        return cladding::podman::cleanup_abandoned_runs(*verbose);
+    }
+
+    let cwd = std::env::current_dir().with_context(|| "failed to determine current directory")?;
     let selected_root = cli.cladding_dir.as_ref().or(cli.project_root.as_ref());
     let project_root = resolve_project_root(&cwd, selected_root, &command)?;
     let workspace_root = resolve_workspace_root(&cwd);
@@ -83,6 +91,7 @@ pub fn run() -> Result<()> {
         CommandSpec::Logs { target, args } => exec::cmd_logs(&context, target, &args),
         CommandSpec::ReloadProxy => exec::cmd_reload_proxy(&context),
         CommandSpec::Ps => lifecycle::cmd_ps(&context),
+        CommandSpec::Cleanup { .. } => unreachable!("cleanup returns before project resolution"),
         CommandSpec::Expose(args) => expose::cmd_expose(&context, &args),
         CommandSpec::Inject(args) => inject::cmd_inject(&context, &args),
     }

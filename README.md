@@ -172,7 +172,7 @@ cladding --cladding-dir /tmp/project/.cladding down
 cat custom.json | cladding --cladding-dir /tmp/project/.cladding --config - check
 ```
 
-`init` accepts `--cladding-dir` to choose where it creates the directory. It does not read `--config`. `ps` lists all running projects, so it does not accept either project-specific option. Reading `--config -` consumes stdin as configuration; the same stdin stream is not available to a command run through `cladding run`.
+`init` accepts `--cladding-dir` to choose where it creates the directory. It does not read `--config`. `ps` lists all running projects, and `cleanup` removes abandoned one-off resources, so neither command accepts project-specific options. Reading `--config -` consumes stdin as configuration; the same stdin stream is not available to a command run through `cladding run`.
 
 ### Project CA and injection credentials
 
@@ -464,6 +464,7 @@ cladding init [name]  # create .cladding config and runtime layout
 cladding build       # build images, refresh embedded tools, initialize persistent Baffle CA
 cladding check        # verify project prerequisites, including the persistent Baffle CA
 cladding ps           # list running cladding projects
+cladding cleanup      # remove abandoned one-off run resources
 cladding run [-v|--verbose] [--env KEY[=VALUE] ...] [--secret NAME=env:VARIABLE|file:PATH ...] [--] <cmd> [args...] # create a temporary runtime, run a command, and remove the runtime
 cladding exec [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...] <cmd> [args...] # execute in the selected container of a running runtime
 cladding expose <containerport> [hostport] [--bind-address <address>] # block while forwarding host address/port to agent containerport

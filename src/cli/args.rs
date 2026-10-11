@@ -106,6 +106,12 @@ pub(super) enum CommandSpec {
     ReloadProxy,
     /// Show running cladding projects
     Ps,
+    /// Remove abandoned one-off run resources
+    Cleanup {
+        /// Show Podman commands and cleanup diagnostics
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Publish an agent TCP port to the host
     Expose(ExposeArgs),
     /// Connect agent localhost to a host-reachable TCP endpoint
@@ -114,7 +120,7 @@ pub(super) enum CommandSpec {
 
 impl CommandSpec {
     pub(super) fn uses_config(&self) -> bool {
-        !matches!(self, Self::Init { .. } | Self::Ps)
+        !matches!(self, Self::Init { .. } | Self::Ps | Self::Cleanup { .. })
     }
 }
 
@@ -388,6 +394,16 @@ mod tests {
             CommandSpec::Down { verbose } => assert!(verbose),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cleanup_parses_without_project_arguments() {
+        let cli = Cli::try_parse_from(["cladding", "cleanup", "--verbose"])
+            .expect("cleanup should parse without a project directory");
+        assert!(matches!(
+            cli.command,
+            Some(CommandSpec::Cleanup { verbose: true })
+        ));
     }
 
     #[test]

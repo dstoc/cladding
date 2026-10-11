@@ -1,10 +1,12 @@
 mod build;
+mod cleanup;
 mod command;
 mod discovery;
 mod mounts;
 mod runtime;
 
 pub use build::{podman_build_image, podman_build_proxy_image};
+pub use cleanup::cleanup_abandoned_runs;
 pub use command::{
     ensure_success, ensure_success_output, forward_output, run_helper_command, trace_command,
 };

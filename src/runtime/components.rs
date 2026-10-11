@@ -146,7 +146,7 @@ fn build_proxy_component(
         name: names.proxy_name.clone(),
         use_runsc: false,
         security_opts: Vec::new(),
-        labels: build_labels(&config.name, project_root, "proxy"),
+        labels: build_labels(&config.name, project_root, runtime_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
         containers,
         user_namespace: RuntimeUserNamespace::KeepId,
@@ -242,7 +242,7 @@ fn build_agent_component(
         name: names.agent_name.clone(),
         use_runsc: config.use_runsc,
         security_opts: config.agent.security_opts.clone(),
-        labels: build_labels(&config.name, project_root, "agent"),
+        labels: build_labels(&config.name, project_root, runtime_root, "agent"),
         network_name: NETWORK_NONE.to_string(),
         containers: vec![RuntimeContainer {
             name: runtime_container_name(&names.agent_name),
@@ -337,7 +337,7 @@ fn build_nw_sandbox_component(
             .as_ref()
             .map(|component| component.security_opts.clone())
             .unwrap_or_default(),
-        labels: build_labels(&config.name, project_root, "nw-sandbox"),
+        labels: build_labels(&config.name, project_root, runtime_root, "nw-sandbox"),
         network_name: NETWORK_NONE.to_string(),
         containers: vec![RuntimeContainer {
             name: runtime_container_name(component_name),
@@ -359,7 +359,7 @@ fn build_nw_sandbox_component(
 
 fn build_fs_sandbox_component(
     project_root: &Path,
-    _runtime_root: &Path,
+    runtime_root: &Path,
     config: &ExecutionConfig,
     _names: &RuntimeNames,
     component_name: &str,
@@ -385,7 +385,7 @@ fn build_fs_sandbox_component(
             .as_ref()
             .map(|component| component.security_opts.clone())
             .unwrap_or_default(),
-        labels: build_labels(&config.name, project_root, "fs-sandbox"),
+        labels: build_labels(&config.name, project_root, runtime_root, "fs-sandbox"),
         network_name: NETWORK_NONE.to_string(),
         containers: vec![RuntimeContainer {
             name: runtime_container_name(component_name),
@@ -421,15 +421,36 @@ fn build_fs_sandbox_component(
     }
 }
 
-fn build_labels(project_name: &str, project_root: &Path, app: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
+fn build_labels(
+    project_name: &str,
+    project_root: &Path,
+    runtime_root: &Path,
+    app: &str,
+) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::from([
         ("app".to_string(), app.to_string()),
         ("cladding".to_string(), project_name.to_string()),
         (
             "project_root".to_string(),
             project_root.display().to_string(),
         ),
-    ])
+    ]);
+
+    // Persistent project runtimes keep their existing label set. One-off run
+    // containers carry the private runtime path and resource kind so cleanup
+    // can distinguish them from persistent resources with similar names.
+    if runtime_root != project_root {
+        labels.insert(
+            "cladding_resource".to_string(),
+            "runtime-container".to_string(),
+        );
+        labels.insert(
+            "cladding_runtime_root".to_string(),
+            runtime_root.display().to_string(),
+        );
+    }
+
+    labels
 }
 
 fn build_no_proxy() -> String {
@@ -783,6 +804,40 @@ mod tests {
             .into_iter()
             .collect()
         );
+    }
+
+    #[test]
+    fn only_one_off_runtime_containers_receive_cleanup_ownership_labels() {
+        let project_root = Path::new("/tmp/project/.cladding");
+        let workspace_root = Path::new("/tmp/project");
+        let runtime_root = Path::new("/tmp/cladding-run-12345678-1234-4234-8234-123456789abc");
+        let mut config = execution_config(false, false, Vec::new(), false);
+        config.name = "cladding-run-12345678-1234-4234-8234-123456789abc".to_string();
+
+        let run_spec =
+            RuntimeSpec::build_with_roots(project_root, workspace_root, runtime_root, &config);
+        for component in [&run_spec.proxy, &run_spec.agent] {
+            assert_eq!(
+                component
+                    .labels
+                    .get("cladding_resource")
+                    .map(String::as_str),
+                Some("runtime-container")
+            );
+            assert_eq!(
+                component
+                    .labels
+                    .get("cladding_runtime_root")
+                    .map(String::as_str),
+                Some(runtime_root.to_str().unwrap())
+            );
+        }
+
+        let persistent_spec = RuntimeSpec::build(project_root, &config);
+        for component in [&persistent_spec.proxy, &persistent_spec.agent] {
+            assert!(!component.labels.contains_key("cladding_resource"));
+            assert!(!component.labels.contains_key("cladding_runtime_root"));
+        }
     }
 
     #[test]

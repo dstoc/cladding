@@ -381,7 +381,7 @@ fn remove_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool)
 }
 
 fn socket_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut labels = BTreeMap::from([
         ("cladding".to_string(), spec.project_name.clone()),
         (
             "project_root".to_string(),
@@ -392,7 +392,14 @@ fn socket_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, Stri
             "inter-container-socket".to_string(),
         ),
         ("cladding_socket_volume".to_string(), name.to_string()),
-    ])
+    ]);
+    if spec.runtime_root != spec.project_root {
+        labels.insert(
+            "cladding_runtime_root".to_string(),
+            spec.runtime_root.to_string_lossy().into_owned(),
+        );
+    }
+    labels
 }
 
 fn socket_volume_labels_match(
@@ -405,10 +412,20 @@ fn socket_volume_labels_match(
     let labels: serde_json::Value = serde_json::from_str(&labels)
         .with_context(|| format!("failed to parse labels for Podman volume {name}"))?;
 
-    Ok(labels_match_expected(
-        &labels,
-        &socket_volume_labels(spec, name),
-    ))
+    let mut expected = socket_volume_labels(spec, name);
+    let expected_runtime_root = expected.remove("cladding_runtime_root");
+    let actual_runtime_root = labels
+        .get("cladding_runtime_root")
+        .and_then(serde_json::Value::as_str);
+    let runtime_root_matches = match (expected_runtime_root.as_deref(), actual_runtime_root) {
+        (Some(expected), Some(actual)) => expected == actual,
+        // Older one-off runs did not label their socket volumes with the
+        // private root. Continue to allow their normal teardown path.
+        (Some(_), None) => true,
+        (None, None) => true,
+        (None, Some(_)) => false,
+    };
+    Ok(runtime_root_matches && labels_match_expected(&labels, &expected))
 }
 
 fn managed_mount_volumes(spec: &RuntimeSpec) -> BTreeMap<String, ManagedVolumeKind> {
@@ -1400,6 +1417,7 @@ mod tests {
         RuntimeComponent, RuntimeContainer, RuntimeEnvVar, RuntimeMount, RuntimeMountSource,
         RuntimeUserNamespace,
     };
+    use std::path::PathBuf;
 
     fn command_args(cmd: &Command) -> Vec<String> {
         cmd.get_args()
@@ -2048,6 +2066,26 @@ mod tests {
         let foreign_channel =
             serde_json::to_value(foreign_channel).expect("serialize foreign socket volume labels");
         assert!(!labels_match_expected(&foreign_channel, &expected));
+
+        let mut run_spec = spec.clone();
+        run_spec.project_name = "cladding-run-12345678-1234-4234-8234-123456789abc".to_string();
+        run_spec.runtime_root =
+            PathBuf::from("/tmp/cladding-run-12345678-1234-4234-8234-123456789abc");
+        let run_labels = socket_volume_labels(&run_spec, name);
+        assert_eq!(
+            run_labels.get("cladding_runtime_root").map(String::as_str),
+            Some("/tmp/cladding-run-12345678-1234-4234-8234-123456789abc")
+        );
+        assert!(
+            command_args(&build_socket_volume_create_command(name, &run_spec))
+                .windows(2)
+                .any(|pair| {
+                    pair == [
+                        "--label",
+                        "cladding_runtime_root=/tmp/cladding-run-12345678-1234-4234-8234-123456789abc",
+                    ]
+                })
+        );
     }
 
     #[test]
