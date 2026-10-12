@@ -147,6 +147,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 mkdir -p "$workspace"
+printf 'host workspace only\n' > "$workspace/.host-workspace-marker"
 phase="initialize Cladding project"
 (
   cd "$workspace"
@@ -255,6 +256,24 @@ podman exec "$proxy" sh -ec '
   done
 '
 
+phase="verify the default runtime does not mount the host workspace"
+for container in "$agent" "$nw_sandbox"; do
+  if podman inspect "$container" | jq -e \
+    '.[0].Mounts | any(.Destination == "/home/user/workspace")' >/dev/null; then
+    echo "$container unexpectedly mounts /home/user/workspace" >&2
+    exit 1
+  fi
+  workdir=$(podman inspect --format '{{.Config.WorkingDir}}' "$container")
+  if [ "$workdir" != /home/user ]; then
+    echo "$container has an invalid default workdir: $workdir" >&2
+    exit 1
+  fi
+done
+podman exec "$agent" sh -ec \
+  'test ! -e /home/user/workspace/.host-workspace-marker'
+podman exec "$nw_sandbox" sh -ec \
+  'test ! -e /home/user/workspace/.host-workspace-marker'
+
 assert_denied_connect() {
   container=$1
   component=$2
@@ -295,6 +314,42 @@ require_no_project_resources
 test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
 test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 
+phase="configure and verify an explicit host workspace mount"
+jq '.mounts += [{"mount":"/host-project", "hostPath":"..", "targets":["agent", "nw-sandbox"]}]' \
+  "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
+mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
+if (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up --verbose) \
+  > "$temp_root/startup.log" 2>&1; then
+  cat "$temp_root/startup.log"
+else
+  status=$?
+  cat "$temp_root/startup.log" >&2
+  exit "$status"
+fi
+for container in "$agent" "$nw_sandbox"; do
+  if ! podman inspect "$container" | jq -e \
+    '.[0].Mounts | any(.Destination == "/host-project")' >/dev/null; then
+    echo "$container does not have the configured /host-project mount" >&2
+    exit 1
+  fi
+  if ! podman inspect "$container" | jq -e \
+    '.[0].Mounts | any(.Destination == "/host-project/.cladding")' >/dev/null; then
+    echo "$container does not mask private .cladding state below /host-project" >&2
+    exit 1
+  fi
+done
+for container in "$agent" "$nw_sandbox"; do
+  podman exec "$container" sh -ec \
+    'test -f /host-project/.host-workspace-marker
+     test ! -e /host-project/.cladding/config/proxy/daemon.toml'
+done
+for target in agent nw-sandbox; do
+  (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" \
+    exec --target "$target" sh -ec 'test "$PWD" = /host-project')
+done
+(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
+require_no_project_resources
+
 phase="run a one-off command with shared project-state bind sources"
 run_podman_wrapper="$temp_root/run-podman-wrapper"
 mkdir -p "$run_podman_wrapper"
@@ -313,11 +368,12 @@ run_status=0
   CLADDING_TOPOLOGY_PODMAN_LOG="$run_podman_log" \
     CLADDING_TOPOLOGY_REAL_PODMAN="$real_podman" \
     PATH="$run_podman_wrapper:$PATH" \
-    "$cladding_bin" --cladding-dir "$project_root" run -v -- /bin/echo ok
+    "$cladding_bin" --cladding-dir "$project_root" run -v -- \
+      /bin/sh -ec 'test "$PWD" = /host-project; echo ok'
 ) > "$run_log" 2>&1 || run_status=$?
 cat "$run_log"
 if [ "$run_status" -ne 0 ] || ! grep -Fx ok "$run_log" >/dev/null; then
-  echo "cladding run did not complete /bin/echo ok successfully" >&2
+  echo "cladding run did not complete the explicit-mount workdir check" >&2
   exit 1
 fi
 run_name=$(sed -n 's/^starting one-off instance: //p' "$run_log" | head -n 1)
@@ -341,6 +397,14 @@ for source in \
     exit 1
   fi
 done
+if ! grep -F "$workspace:/host-project" "$run_podman_log" >/dev/null; then
+  echo "cladding run did not apply the configured host workspace mount" >&2
+  exit 1
+fi
+if grep -F "$workspace:/home/user/workspace" "$run_podman_log" >/dev/null; then
+  echo "cladding run added an implicit host workspace mount" >&2
+  exit 1
+fi
 for temp_run_root in "/tmp/$run_name" "/var/tmp/$run_name" "/dev/shm/$run_name"; do
   if grep -F "$temp_run_root" "$run_podman_log" >/dev/null; then
     echo "cladding run passed a host temporary path to Podman: $temp_run_root" >&2

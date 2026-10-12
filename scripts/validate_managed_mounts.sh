@@ -127,6 +127,7 @@ jq --arg image localhost/cladding-proxy:latest \
    | .nw_sandbox.image = $image
    | .use_runsc = ($runtime == "runsc")
    | .mounts = [
+       {"mount":"/home/user/workspace", "hostPath":"..", "targets":["agent", "nw-sandbox"]},
        {"mount":"/snapshot", "hostPath":"../snapshot-source", "type":"copy", "targets":["agent", "nw-sandbox"]},
        {"mount":"/shared", "type":"tmpfs", "size":"32MiB", "targets":["agent", "nw-sandbox"]}
      ]' \

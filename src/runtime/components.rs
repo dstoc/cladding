@@ -29,20 +29,19 @@ impl RuntimeSpec {
 
     pub fn build_with_workspace_root(
         project_root: &Path,
-        workspace_root: &Path,
+        _workspace_root: &Path,
         config: &ExecutionConfig,
     ) -> Self {
-        Self::build_with_roots(project_root, workspace_root, project_root, config)
+        Self::build_with_roots(project_root, _workspace_root, project_root, config)
     }
 
     pub fn build_with_roots(
         project_root: &Path,
-        workspace_root: &Path,
+        _workspace_root: &Path,
         runtime_root: &Path,
         config: &ExecutionConfig,
     ) -> Self {
         let project_root = project_root.to_path_buf();
-        let workspace_root = workspace_root.to_path_buf();
         let runtime_root = runtime_root.to_path_buf();
         let custom_mounts =
             build_custom_mounts(&project_root, &runtime_root, &config.name, &config.mounts);
@@ -50,23 +49,10 @@ impl RuntimeSpec {
 
         let proxy =
             build_proxy_component(&project_root, &runtime_root, config, &names, &custom_mounts);
-        let agent = build_agent_component(
-            &project_root,
-            &workspace_root,
-            &runtime_root,
-            config,
-            &names,
-            &custom_mounts,
-        );
+        let agent =
+            build_agent_component(&project_root, &runtime_root, config, &names, &custom_mounts);
         let nw_sandbox = names.nw_sandbox_name.as_ref().map(|component_name| {
-            build_nw_sandbox_component(
-                &project_root,
-                &workspace_root,
-                &runtime_root,
-                config,
-                component_name,
-                &custom_mounts,
-            )
+            build_nw_sandbox_component(&project_root, config, component_name, &custom_mounts)
         });
         let fs_sandbox = names.fs_sandbox_name.as_ref().map(|component_name| {
             build_fs_sandbox_component(
@@ -156,14 +142,13 @@ fn build_proxy_component(
 
 fn build_agent_component(
     project_root: &Path,
-    workspace_root: &Path,
     runtime_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimeComponent {
     let mut mounts = apply_custom_mounts(
-        build_agent_mounts(project_root, workspace_root, runtime_root, custom_mounts),
+        build_agent_mounts(project_root),
         custom_mounts,
         MountTarget::Agent,
     );
@@ -253,7 +238,7 @@ fn build_agent_component(
                 "socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/cladding/proxy/agent/proxy.sock",
                 "sleep infinity",
             ),
-            workdir: Some("/home/user/workspace".to_string()),
+            workdir: Some("/home/user".to_string()),
             env,
             mounts,
             ports: Vec::new(),
@@ -266,14 +251,12 @@ fn build_agent_component(
 
 fn build_nw_sandbox_component(
     project_root: &Path,
-    workspace_root: &Path,
-    runtime_root: &Path,
     config: &ExecutionConfig,
     component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimeComponent {
     let mut mounts = apply_custom_mounts(
-        build_sandbox_mounts(project_root, workspace_root, runtime_root, custom_mounts),
+        build_sandbox_mounts(project_root),
         custom_mounts,
         MountTarget::NwSandbox,
     );
@@ -353,7 +336,7 @@ fn build_nw_sandbox_component(
                 "socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/cladding/proxy/nw-sandbox/proxy.sock",
                 "chmod 0700 /run/cladding/run/nw-sandbox && umask 077 && exec mcp-run",
             ),
-            workdir: Some("/home/user/workspace".to_string()),
+            workdir: Some("/home/user".to_string()),
             env,
             mounts,
             ports: Vec::new(),
@@ -408,7 +391,7 @@ fn build_fs_sandbox_component(
                 "chmod 0700 /run/cladding/run/fs-sandbox && umask 077 && exec mcp-run"
                     .to_string(),
             ],
-            workdir: Some("/home/user/workspace".to_string()),
+            workdir: Some("/home/user".to_string()),
             env: vec![
                 RuntimeEnvVar {
                     name: "PATH".to_string(),
@@ -658,16 +641,22 @@ mod tests {
                 if path == &PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy")
         ));
         let agent = container(&spec.agent, "demo-agent-instance");
+        assert!(!mount_paths(agent).contains("/home/user/workspace"));
+        assert_eq!(agent.workdir.as_deref(), Some("/home/user"));
         assert!(!mount_paths(agent).contains("/run/baffle"));
         let nw = container(
             spec.nw_sandbox.as_ref().expect("network sandbox"),
             "demo-nw-sandbox-instance",
         );
+        assert!(!mount_paths(nw).contains("/home/user/workspace"));
+        assert_eq!(nw.workdir.as_deref(), Some("/home/user"));
         assert!(!mount_paths(nw).contains("/run/baffle"));
         let fs = container(
             spec.fs_sandbox.as_ref().expect("filesystem sandbox"),
             "demo-fs-sandbox-instance",
         );
+        assert!(!mount_paths(fs).contains("/home/user/workspace"));
+        assert_eq!(fs.workdir.as_deref(), Some("/home/user"));
         assert!(!mount_paths(fs).contains("/run/baffle"));
 
         assert!(
@@ -787,7 +776,6 @@ mod tests {
                 .into_iter()
                 .collect::<BTreeSet<_>>(),
             [
-                PathBuf::from("/tmp/project/.cladding/.."),
                 PathBuf::from("/tmp/project/.cladding/config"),
                 PathBuf::from("/tmp/project/.cladding/credentials/baffle"),
                 PathBuf::from("/tmp/project/.cladding/credentials/baffle/ca.crt"),
@@ -801,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn external_runtime_directory_does_not_select_workspace_mount() {
+    fn external_workspace_root_does_not_create_an_implicit_mount() {
         let config = execution_config(true, false, Vec::new(), false);
         let spec = RuntimeSpec::build_with_workspace_root(
             Path::new("/tmp/other/.cladding"),
@@ -809,31 +797,15 @@ mod tests {
             &config,
         );
         let agent = container(&spec.agent, "demo-agent-instance");
-        let workspace = agent
-            .mounts
-            .iter()
-            .find(|mount| mount.mount_path == "/home/user/workspace")
-            .expect("agent workspace mount");
-        assert!(matches!(
-            &workspace.source,
-            super::super::types::RuntimeMountSource::HostPath { path }
-                if path == &PathBuf::from("/repo")
-        ));
+        assert!(!mount_paths(agent).contains("/home/user/workspace"));
+        assert_eq!(agent.workdir.as_deref(), Some("/home/user"));
 
         let nw = container(
             spec.nw_sandbox.as_ref().expect("nw sandbox"),
             "demo-nw-sandbox-instance",
         );
-        let workspace = nw
-            .mounts
-            .iter()
-            .find(|mount| mount.mount_path == "/home/user/workspace")
-            .expect("sandbox workspace mount");
-        assert!(matches!(
-            &workspace.source,
-            super::super::types::RuntimeMountSource::HostPath { path }
-                if path == &PathBuf::from("/repo")
-        ));
+        assert!(!mount_paths(nw).contains("/home/user/workspace"));
+        assert_eq!(nw.workdir.as_deref(), Some("/home/user"));
 
         let config_mount = agent
             .mounts

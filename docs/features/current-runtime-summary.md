@@ -145,9 +145,10 @@ The current runtime mounts the following built-in paths for the agent and
 - `/run/cladding/ca/baffle.crt`
 - `/opt/tools`
 - `/home/user`
-- `/home/user/workspace`
-- `/home/user/workspace/.cladding` as a generated empty mask
 
+Cladding does not mount the host workspace by default. Add a host-backed entry
+to `mounts` when a workflow needs host files. If that mount contains the
+project `.cladding` directory, Cladding adds an empty mask at its mapped path.
 The `fs-sandbox` default mount set is limited to read-only `/opt/config`,
 read-only `/opt/tools`, and its internal run socket.
 

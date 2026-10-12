@@ -2465,7 +2465,7 @@ mod tests {
             name: "demo-agent-instance".to_string(),
             image: "demo:image".to_string(),
             command: vec!["sleep".to_string(), "infinity".to_string()],
-            workdir: Some("/home/user/workspace".to_string()),
+            workdir: Some("/home/user".to_string()),
             env: vec![RuntimeEnvVar {
                 name: "PATH".to_string(),
                 value: "/opt/tools/bin".to_string(),
@@ -2495,6 +2495,13 @@ mod tests {
                     read_only: false,
                     source: RuntimeMountSource::NamedVolume {
                         claim_name: "demo-socket-baffle-agent".to_string(),
+                    },
+                },
+                RuntimeMount {
+                    mount_path: "/home/user/workspace".to_string(),
+                    read_only: false,
+                    source: RuntimeMountSource::HostPath {
+                        path: "/tmp/demo/workspace".into(),
                     },
                 },
                 RuntimeMount {
@@ -2535,7 +2542,7 @@ mod tests {
                 "--name",
                 "demo-agent-instance",
                 "--workdir",
-                "/home/user/workspace",
+                "/home/user",
                 "-i",
                 "-t",
                 "--env",
@@ -2548,6 +2555,8 @@ mod tests {
                 "cladding-demo-agent-empty-workspace-tmp:/workspace/tmp",
                 "--volume",
                 "demo-socket-baffle-agent:/run/cladding/proxy/agent",
+                "--volume",
+                "/tmp/demo/workspace:/home/user/workspace",
                 "--volume",
                 "/tmp/demo/runtime/empty-mask:/home/user/workspace/.cladding:ro",
                 "--expose",

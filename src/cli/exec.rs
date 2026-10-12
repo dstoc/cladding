@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_container_workdir_maps_the_effective_default_workspace_mount() {
+    fn resolve_container_workdir_uses_home_when_workspace_is_not_mounted() {
         let temp = create_temp_dir("default-workdir");
         let workspace = temp.join("workspace");
         let project_root = workspace.join(".cladding");
@@ -542,10 +542,7 @@ mod tests {
             resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
                 .expect("workdir");
 
-        assert_eq!(
-            resolved,
-            PathBuf::from(CONTAINER_WORKSPACE_DIR).join("src/module")
-        );
+        assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
     }
 
     #[test]
@@ -666,6 +663,34 @@ mod tests {
                 .expect("workdir");
 
         assert_eq!(resolved, PathBuf::from("/data/reports/weekly"));
+    }
+
+    #[test]
+    fn resolve_container_workdir_maps_an_explicit_host_workspace_mount() {
+        let temp = create_temp_dir("explicit-workspace-mount");
+        let workspace = temp.join("workspace");
+        let project_root = workspace.join(".cladding");
+        let cwd = workspace.join("src/module");
+        fs::create_dir_all(&cwd).expect("create nested workspace directory");
+        fs::create_dir_all(&project_root).expect("create project root");
+        let explicit_mount = ResolvedMountConfig {
+            mount_path: "/host-workspace".to_string(),
+            host_path: Some(workspace.clone()),
+            volume: None,
+            mount_type: MountType::Bind,
+            tmpfs_size_bytes: None,
+            read_only: false,
+            targets: vec![MountTarget::Agent],
+            ignore: false,
+        };
+        let runtime = runtime_spec(&project_root, &workspace, vec![explicit_mount], false);
+        let container = &runtime.agent.containers[0];
+
+        let resolved =
+            resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
+                .expect("workdir");
+
+        assert_eq!(resolved, PathBuf::from("/host-workspace/src/module"));
     }
 
     #[test]

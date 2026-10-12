@@ -73,12 +73,7 @@ pub(super) fn build_proxy_mounts(
     mounts
 }
 
-pub(super) fn build_agent_mounts(
-    project_root: &Path,
-    workspace_root: &Path,
-    runtime_root: &Path,
-    _custom_mounts: &[RuntimeCustomMount],
-) -> Vec<RuntimeMount> {
+pub(super) fn build_agent_mounts(project_root: &Path) -> Vec<RuntimeMount> {
     vec![
         RuntimeMount {
             mount_path: "/opt/config".to_string(),
@@ -106,31 +101,12 @@ pub(super) fn build_agent_mounts(
             read_only: false,
             source: RuntimeMountSource::HostPath {
                 path: project_root.join("home"),
-            },
-        },
-        RuntimeMount {
-            mount_path: "/home/user/workspace".to_string(),
-            read_only: false,
-            source: RuntimeMountSource::HostPath {
-                path: workspace_root.to_path_buf(),
-            },
-        },
-        RuntimeMount {
-            mount_path: "/home/user/workspace/.cladding".to_string(),
-            read_only: true,
-            source: RuntimeMountSource::GeneratedEmptyMask {
-                path: runtime_root.join("runtime/empty-mask"),
             },
         },
     ]
 }
 
-pub(super) fn build_sandbox_mounts(
-    project_root: &Path,
-    workspace_root: &Path,
-    runtime_root: &Path,
-    _custom_mounts: &[RuntimeCustomMount],
-) -> Vec<RuntimeMount> {
+pub(super) fn build_sandbox_mounts(project_root: &Path) -> Vec<RuntimeMount> {
     vec![
         RuntimeMount {
             mount_path: "/opt/config".to_string(),
@@ -158,20 +134,6 @@ pub(super) fn build_sandbox_mounts(
             read_only: false,
             source: RuntimeMountSource::HostPath {
                 path: project_root.join("home"),
-            },
-        },
-        RuntimeMount {
-            mount_path: "/home/user/workspace".to_string(),
-            read_only: false,
-            source: RuntimeMountSource::HostPath {
-                path: workspace_root.to_path_buf(),
-            },
-        },
-        RuntimeMount {
-            mount_path: "/home/user/workspace/.cladding".to_string(),
-            read_only: true,
-            source: RuntimeMountSource::GeneratedEmptyMask {
-                path: runtime_root.join("runtime/empty-mask"),
             },
         },
     ]
@@ -261,7 +223,11 @@ pub(super) fn build_custom_mounts(
     let empty_mask = runtime_root.join("runtime/empty-mask");
     let protected_root = canonical_or_normalized(project_root);
     for mount in mounts.iter().filter(|mount| {
-        !mount.ignore && matches!(mount.mount_type, MountType::Readonly | MountType::Copy)
+        !mount.ignore
+            && matches!(
+                mount.mount_type,
+                MountType::Bind | MountType::Readonly | MountType::Copy
+            )
     }) {
         let Some(host_path) = mount.host_path.as_deref() else {
             continue;
@@ -480,7 +446,6 @@ mod tests {
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/tools")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/tools/bin/baffle")));
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/home")));
-        assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/..")));
         assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/empty-mask")));
         assert!(required.contains(&PathBuf::from("/tmp/workspace")));
     }
@@ -605,14 +570,13 @@ mod tests {
             RuntimeMountSource::GeneratedEmptyMask { .. }
         ));
 
-        let workspace_root = project_root.join("..");
         let agent_mounts = apply_custom_mounts(
-            build_agent_mounts(project_root, &workspace_root, project_root, &custom_mounts),
+            build_agent_mounts(project_root),
             &custom_mounts,
             MountTarget::Agent,
         );
         let nw_sandbox_mounts = apply_custom_mounts(
-            build_sandbox_mounts(project_root, &workspace_root, project_root, &custom_mounts),
+            build_sandbox_mounts(project_root),
             &custom_mounts,
             MountTarget::NwSandbox,
         );
@@ -700,6 +664,91 @@ mod tests {
                 "/home/user/workspace/.cladding"
             ]
         );
+    }
+
+    #[test]
+    fn explicit_bind_mounts_mask_private_state_for_every_execution_target() {
+        let project_root = Path::new("/tmp/cladding-bind-mask/.cladding");
+        let workspace_root = project_root.join("..");
+        let config = execution_config(
+            true,
+            true,
+            vec![
+                ResolvedMountConfig {
+                    mount_path: "/host-project".to_string(),
+                    host_path: Some(workspace_root.clone()),
+                    volume: None,
+                    mount_type: MountType::Bind,
+                    tmpfs_size_bytes: None,
+                    read_only: false,
+                    targets: vec![
+                        MountTarget::Agent,
+                        MountTarget::NwSandbox,
+                        MountTarget::FsSandbox,
+                    ],
+                    ignore: false,
+                },
+                ResolvedMountConfig {
+                    mount_path: "/host-project/.cladding".to_string(),
+                    host_path: None,
+                    volume: None,
+                    mount_type: MountType::Bind,
+                    tmpfs_size_bytes: None,
+                    read_only: false,
+                    targets: vec![
+                        MountTarget::Agent,
+                        MountTarget::NwSandbox,
+                        MountTarget::FsSandbox,
+                    ],
+                    ignore: true,
+                },
+            ],
+            false,
+        );
+        let custom_mounts = build_custom_mounts(project_root, project_root, "demo", &config.mounts);
+
+        assert_eq!(custom_mounts.len(), 3);
+        assert_eq!(custom_mounts[2].mount_path, "/host-project/.cladding");
+        assert!(matches!(
+            &custom_mounts[2].source,
+            RuntimeMountSource::GeneratedEmptyMask { .. }
+        ));
+        assert_eq!(custom_mounts[2].targets, config.mounts[0].targets);
+
+        let agent = apply_custom_mounts(
+            build_agent_mounts(project_root),
+            &custom_mounts,
+            MountTarget::Agent,
+        );
+        let nw_sandbox = apply_custom_mounts(
+            build_sandbox_mounts(project_root),
+            &custom_mounts,
+            MountTarget::NwSandbox,
+        );
+        let fs_sandbox = apply_custom_mounts(
+            build_fs_sandbox_mounts(project_root, &custom_mounts),
+            &custom_mounts,
+            MountTarget::FsSandbox,
+        );
+        for mounts in [&agent, &nw_sandbox, &fs_sandbox] {
+            let host_project = mounts
+                .iter()
+                .find(|mount| mount.mount_path == "/host-project")
+                .expect("explicit host mount");
+            assert!(matches!(
+                &host_project.source,
+                RuntimeMountSource::HostPath { path } if path == &workspace_root
+            ));
+            let mask = mounts
+                .iter()
+                .find(|mount| mount.mount_path == "/host-project/.cladding")
+                .expect("generated private-state mask");
+            assert!(mask.read_only);
+            assert!(matches!(
+                &mask.source,
+                RuntimeMountSource::GeneratedEmptyMask { .. }
+            ));
+        }
     }
 
     #[test]
