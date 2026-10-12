@@ -288,29 +288,38 @@ fn runtime_cleanup_normal_report(
     let mut runtime_root_safe_to_remove = true;
 
     for component in runtime_components(spec) {
-        let mut legacy_pod_removed = false;
+        let mut container_errors = Vec::new();
         for container in &component.containers {
-            if let Err(container_error) = container_rm(&container.name, verbose, quiet_helpers) {
-                match remove_legacy_pod_after_container_error(component, verbose, quiet_helpers) {
-                    Ok(true) => {
-                        legacy_pod_removed = true;
-                        break;
-                    }
-                    Ok(false) => {
-                        errors.record(Err(container_error));
-                        runtime_root_safe_to_remove = false;
-                    }
-                    Err(pod_error) => {
-                        errors.record(Err(Error::message(format!(
-                            "{container_error}; legacy pod cleanup also failed: {pod_error}"
-                        ))));
-                        runtime_root_safe_to_remove = false;
+            if let Err(err) = container_rm(&container.name, verbose, quiet_helpers) {
+                container_errors.push(err.to_string());
+            }
+        }
+
+        // A legacy pod can remain after its member container was removed or
+        // was already missing. Check it independently of the container rm
+        // result, and remove it only after verifying its ownership labels.
+        match remove_legacy_pod(component, verbose, quiet_helpers) {
+            Ok(true) => {}
+            Ok(false) => {
+                if !container_errors.is_empty() {
+                    runtime_root_safe_to_remove = false;
+                    for err in container_errors {
+                        errors.record(Err(Error::message(err)));
                     }
                 }
             }
-        }
-        if legacy_pod_removed {
-            continue;
+            Err(pod_error) => {
+                runtime_root_safe_to_remove = false;
+                let message = if container_errors.is_empty() {
+                    pod_error.to_string()
+                } else {
+                    format!(
+                        "{}; legacy pod cleanup also failed: {pod_error}",
+                        container_errors.join("; ")
+                    )
+                };
+                errors.record(Err(Error::message(message)));
+            }
         }
     }
 
@@ -342,35 +351,39 @@ fn runtime_cleanup_normal_report(
     }
 }
 
-fn remove_legacy_pod_after_container_error(
+fn remove_legacy_pod(
     component: &RuntimeComponent,
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<bool> {
-    let mut cmd = build_resource_exists_command("pod", &component.name);
+    let mut cmd = Command::new("podman");
+    cmd.args([
+        "pod",
+        "inspect",
+        "--format",
+        "{{json .Labels}}",
+        &component.name,
+    ]);
     trace_command(&cmd, verbose);
-    let output = cmd.output().with_context(|| {
-        format!(
-            "failed to check whether legacy pod exists: {}",
-            component.name
-        )
-    })?;
-    match output.status.code() {
-        Some(1) => return Ok(false),
-        Some(0) => {}
-        _ => {
-            if quiet_helpers {
-                ensure_success_output_with_diagnostics(&output, "podman pod exists")?;
-            }
-            if verbose {
-                forward_output(&output)?;
-            }
-            ensure_success_output(&output, "podman pod exists")?;
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to inspect legacy pod labels: {}", component.name))?;
+    if !output.status.success() {
+        if remove_output_is_missing_pod(&output) {
+            return Ok(false);
         }
+        if quiet_helpers {
+            ensure_success_output_with_diagnostics(&output, "podman pod inspect")?;
+        }
+        if verbose {
+            forward_output(&output)?;
+        }
+        ensure_success_output(&output, "podman pod inspect")?;
     }
 
-    if !resource_labels_match_component("pod", &component.name, component, verbose, quiet_helpers)?
-    {
+    let labels: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("failed to parse labels for pod {}", component.name))?;
+    if !labels_match_expected(&labels, &component.labels) {
         return Err(Error::message(format!(
             "refusing to remove pod '{}' because it is not owned by this Cladding component",
             component.name

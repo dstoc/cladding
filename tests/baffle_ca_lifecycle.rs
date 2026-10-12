@@ -59,13 +59,6 @@ fi
 if [ "$1" = "rm" ] && [ "$CLADDING_TEST_FAIL_CLEANUP" = "1" ]; then
   exit 43
 fi
-if [ "$1" = "rm" ] && [ -f "$CLADDING_LEGACY_PODS" ]; then
-  component_name=${3%-instance}
-  if awk -F '|' -v name="$component_name" '$1 == name { found = 1 } END { exit !found }' "$CLADDING_LEGACY_PODS"; then
-    echo "Error: container is part of pod $component_name" >&2
-    exit 125
-  fi
-fi
 state=$CLADDING_PODMAN_STATE
 volume_state=$CLADDING_PODMAN_VOLUMES
 if [ "$1" = "image" ] && [ "$2" = "exists" ]; then exit 0; fi
@@ -157,7 +150,10 @@ if [ "$1" = "pod" ] && [ "$2" = "exists" ]; then
 fi
 if [ "$1" = "pod" ] && [ "$2" = "inspect" ]; then
   row=$(awk -F '|' -v name="$5" '$1 == name { print; exit }' "$CLADDING_LEGACY_PODS")
-  if [ -z "$row" ]; then exit 1; fi
+  if [ -z "$row" ]; then
+    echo "Error: no such pod: $5" >&2
+    exit 1
+  fi
   app=$(printf '%s\n' "$row" | cut -d '|' -f 2)
   project_name=$(printf '%s\n' "$row" | cut -d '|' -f 3)
   project_root=$(printf '%s\n' "$row" | cut -d '|' -f 4)
@@ -185,11 +181,14 @@ if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
 fi
 if [ "$1" = "rm" ]; then
   name=$3
-  if [ -f "$state" ]; then
+  if [ -f "$state" ] \
+    && awk -F '|' -v name="$name" '$1 == name { found = 1 } END { exit !found }' "$state"; then
     awk -F '|' -v name="$name" '$1 != name' "$state" > "$state.tmp"
     mv "$state.tmp" "$state"
+    exit 0
   fi
-  exit 0
+  echo "Error: no such container: $name" >&2
+  exit 1
 fi
 if [ "$1" = "pod" ] && [ "$2" = "rm" ]; then
   name=$4
@@ -935,10 +934,14 @@ exit 0
         "down must not remove pods for the standalone topology: {cleanup_log}"
     );
     assert!(
-        !cleanup_log.lines().any(|line| line.contains(" exists ")
-            || line.contains(" inspect ")
-            || line.contains(" ps ")),
-        "normal shutdown must remove current-spec resources without inspection: {cleanup_log}"
+        !cleanup_log.lines().any(|line| {
+            line.contains(" exists ")
+                || line.starts_with("container inspect ")
+                || line.starts_with("volume exists ")
+                || line.starts_with("volume inspect ")
+                || line.contains(" ps ")
+        }),
+        "normal shutdown must remove current-spec resources without per-resource inspection: {cleanup_log}"
     );
     assert_eq!(
         fs::read_to_string(&socket_volume_state).unwrap(),
@@ -1001,6 +1004,37 @@ exit 0
     );
     assert!(fs::read_to_string(&legacy_pods).unwrap().is_empty());
     assert!(fs::read_to_string(&container_state).unwrap().is_empty());
+
+    // A legacy pod can outlive its member container. The missing-container
+    // remove is idempotent, but cleanup must still discover and remove the
+    // owned pod after checking its labels.
+    fs::write(
+        &legacy_pods,
+        format!("demo-proxy|proxy|demo|{}\n", project_root.display()),
+    )
+    .unwrap();
+    fs::write(&container_state, "").unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut down_legacy_without_container = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    down_legacy_without_container.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
+    assert_success(down_legacy_without_container.output().unwrap());
+    let missing_container_cleanup_log = read_log(&podman_log);
+    assert!(
+        missing_container_cleanup_log.contains("rm -f demo-proxy-instance"),
+        "down should attempt exact-name removal even when the legacy member is missing: {missing_container_cleanup_log}"
+    );
+    assert!(
+        missing_container_cleanup_log.contains("pod inspect --format {{json .Labels}} demo-proxy")
+            && missing_container_cleanup_log.contains("pod rm -f demo-proxy"),
+        "down should verify and remove the owned legacy pod: {missing_container_cleanup_log}"
+    );
+    assert!(fs::read_to_string(&legacy_pods).unwrap().is_empty());
 
     fs::write(
         &legacy_pods,
