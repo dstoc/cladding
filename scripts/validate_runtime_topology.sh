@@ -295,12 +295,89 @@ require_no_project_resources
 test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
 test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
 
-phase="fail after partial startup and clean owned resources"
-# The network sandbox starts after the proxy and agent, so this runtime option
-# fails after Cladding has created several owned resources.
+phase="run a one-off command with shared project-state bind sources"
+run_podman_wrapper="$temp_root/run-podman-wrapper"
+mkdir -p "$run_podman_wrapper"
+cat > "$run_podman_wrapper/podman" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CLADDING_TOPOLOGY_PODMAN_LOG"
+exec "$CLADDING_TOPOLOGY_REAL_PODMAN" "$@"
+EOF
+chmod 0755 "$run_podman_wrapper/podman"
+real_podman=$(command -v podman)
+run_log="$temp_root/one-off-run.log"
+run_podman_log="$temp_root/one-off-podman.log"
+run_status=0
+(
+  cd "$workspace"
+  CLADDING_TOPOLOGY_PODMAN_LOG="$run_podman_log" \
+    CLADDING_TOPOLOGY_REAL_PODMAN="$real_podman" \
+    PATH="$run_podman_wrapper:$PATH" \
+    "$cladding_bin" --cladding-dir "$project_root" run -v -- /bin/echo ok
+) > "$run_log" 2>&1 || run_status=$?
+cat "$run_log"
+if [ "$run_status" -ne 0 ] || ! grep -Fx ok "$run_log" >/dev/null; then
+  echo "cladding run did not complete /bin/echo ok successfully" >&2
+  exit 1
+fi
+run_name=$(sed -n 's/^starting one-off instance: //p' "$run_log" | head -n 1)
+if [ -z "$run_name" ]; then
+  echo "cladding run did not report its one-off instance name" >&2
+  exit 1
+fi
+run_root="$project_root/runtime/runs/$run_name"
+for component in proxy agent nw-sandbox; do
+  if ! grep -F "$run_name-$component-instance" "$run_podman_log" >/dev/null; then
+    echo "cladding run did not start the $component container" >&2
+    exit 1
+  fi
+done
+for source in \
+  "$run_root/runtime/scripts/proxy_startup.sh" \
+  "$run_root/runtime/empty-mask" \
+  "$run_root/runtime/sockets/proxy"; do
+  if ! grep -F "$source" "$run_podman_log" >/dev/null; then
+    echo "cladding run did not pass the generated bind source to Podman: $source" >&2
+    exit 1
+  fi
+done
+if grep -E "/(tmp|var/tmp|dev/shm)/[^ ,:]*$run_name" "$run_podman_log" >/dev/null; then
+  echo "cladding run passed a host temporary path to Podman for $run_name" >&2
+  exit 1
+fi
+if [ -e "$run_root" ]; then
+  echo "cladding run left its private runtime root behind: $run_root" >&2
+  exit 1
+fi
+require_no_project_resources
+
+phase="fail a one-off startup after the agent starts and clean owned resources"
 jq '.nw_sandbox.security_opts = ["cladding-invalid-security-option"]' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
+failed_run_log="$temp_root/one-off-startup-failure.log"
+failed_run_status=0
+(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" run -v -- /bin/echo should-not-run) \
+  > "$failed_run_log" 2>&1 || failed_run_status=$?
+if [ "$failed_run_status" -eq 0 ]; then
+  echo "cladding run accepted the deliberate network-sandbox startup failure" >&2
+  exit 1
+fi
+failed_run_name=$(sed -n 's/^starting one-off instance: //p' "$failed_run_log" | head -n 1)
+if [ -z "$failed_run_name" ] || ! grep -F "$failed_run_name-nw-sandbox-instance" "$failed_run_log" >/dev/null; then
+  echo "cladding run failed before attempting the network-sandbox container" >&2
+  cat "$failed_run_log" >&2
+  exit 1
+fi
+if [ -e "$project_root/runtime/runs/$failed_run_name" ]; then
+  echo "failed cladding run left its private runtime root behind" >&2
+  exit 1
+fi
+require_no_project_resources
+
+phase="fail after partial startup and clean owned resources"
+# The network sandbox starts after the proxy and agent, so this runtime option
+# fails after Cladding has created several owned resources.
 startup_status=0
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up --verbose) \
   > "$temp_root/partial-startup.log" 2>&1 || startup_status=$?

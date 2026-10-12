@@ -57,7 +57,7 @@ pub(super) fn cmd_run(
 
     let runtime_root = match create_private_runtime_root(
         &instance_name,
-        &source_context.workspace_root,
+        &source_context.project_root,
     ) {
         Ok(root) => root,
         Err(err) => {
@@ -583,55 +583,106 @@ fn generate_uuid_v4() -> Result<String> {
     ))
 }
 
-fn create_private_runtime_root(instance_name: &str, workspace_root: &Path) -> Result<PathBuf> {
-    let workspace_root = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
-    let mut bases = vec![std::env::temp_dir()];
-    bases.extend([PathBuf::from("/var/tmp"), PathBuf::from("/dev/shm")]);
+fn create_private_runtime_root(instance_name: &str, project_root: &Path) -> Result<PathBuf> {
+    let runtime_dir = project_root.join("runtime");
+    ensure_run_runtime_directory(&runtime_dir, false)?;
 
-    for base in bases {
-        if !base.is_dir() {
-            continue;
-        }
-        let base = base.canonicalize().unwrap_or(base);
-        let root = base.join(instance_name);
-        if root.starts_with(&workspace_root) {
-            continue;
-        }
+    let runs_dir = runtime_dir.join("runs");
+    ensure_run_runtime_directory(&runs_dir, true)?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(0o700);
-            builder.create(&root).with_context(|| {
-                format!(
-                    "failed to create private runtime root {} (name collisions are not reused)",
-                    root.display()
-                )
-            })?;
-            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).with_context(|| {
-                format!("failed to secure private runtime root {}", root.display())
-            })?;
+    let root = runs_dir.join(instance_name);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(&root).with_context(|| {
+            format!(
+                "failed to create private runtime root {} (name collisions are not reused)",
+                root.display()
+            )
+        })?;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to secure private runtime root {}", root.display()))?;
+        use std::os::unix::fs::MetadataExt as _;
+        let owner = unsafe { libc::getuid() };
+        let metadata = fs::symlink_metadata(&root).with_context(|| {
+            format!("failed to inspect private runtime root {}", root.display())
+        })?;
+        if metadata.uid() != owner {
+            return Err(Error::message(format!(
+                "private runtime root {} is not owned by the invoking user",
+                root.display()
+            )));
         }
-        #[cfg(not(unix))]
-        {
-            fs::create_dir(&root).with_context(|| {
-                format!(
-                    "failed to create private runtime root {} (name collisions are not reused)",
-                    root.display()
-                )
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(&root).with_context(|| {
+        format!(
+            "failed to create private runtime root {} (name collisions are not reused)",
+            root.display()
+        )
+    })?;
+
+    Ok(root)
+}
+
+fn ensure_run_runtime_directory(path: &Path, private: bool) -> anyhow::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                let mut builder = fs::DirBuilder::new();
+                builder.mode(if private { 0o700 } else { 0o755 });
+                builder.create(path).with_context(|| {
+                    format!("failed to create runtime directory {}", path.display())
+                })?;
+            }
+            #[cfg(not(unix))]
+            fs::create_dir(path).with_context(|| {
+                format!("failed to create runtime directory {}", path.display())
             })?;
+            fs::symlink_metadata(path).with_context(|| {
+                format!("failed to inspect runtime directory {}", path.display())
+            })?
         }
-        return Ok(root);
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect runtime directory {}", path.display())
+            });
+        }
+    };
+
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "runtime path is not a regular directory: {}",
+            path.display()
+        );
     }
 
-    Err(anyhow::anyhow!(
-        "no temporary directory is available outside workspace {}",
-        workspace_root.display()
-    )
-    .into())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let owner = unsafe { libc::getuid() };
+        if private && metadata.uid() != owner {
+            anyhow::bail!(
+                "private runtime directory {} is not owned by the invoking user",
+                path.display()
+            );
+        }
+        if private {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).with_context(|| {
+                format!(
+                    "failed to secure private runtime directory {}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 struct SignalWatcher {
@@ -698,19 +749,68 @@ mod tests {
     }
 
     #[test]
-    fn private_runtime_root_is_outside_the_source_workspace() {
+    fn private_runtime_root_is_under_project_state_and_separate_from_persistent_runtime() {
         let name = format!("cladding-run-{}", generate_uuid_v4().unwrap());
-        let workspace = std::env::temp_dir()
-            .join(format!("cladding-run-workspace-{}", std::process::id()))
-            .join(&name);
-        fs::create_dir_all(&workspace).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "cladding-run-project-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        let project_root = root.join(".cladding");
+        fs::create_dir_all(&project_root).unwrap();
 
-        let runtime_root = create_private_runtime_root(&name, &workspace).unwrap();
+        let runtime_root = create_private_runtime_root(&name, &project_root).unwrap();
 
-        assert!(!runtime_root.starts_with(&workspace));
+        assert_eq!(runtime_root, project_root.join("runtime/runs").join(&name));
+        assert!(!runtime_root.starts_with(project_root.join("runtime/sockets")));
         assert!(runtime_root.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(
+                fs::metadata(&runtime_root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(fs::metadata(&runtime_root).unwrap().uid(), unsafe {
+                libc::getuid()
+            });
+            assert_eq!(
+                fs::metadata(runtime_root.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
         let _ = fs::remove_dir_all(&runtime_root);
-        let _ = fs::remove_dir_all(workspace.parent().unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_runtime_root_rejects_a_symlinked_runs_directory() {
+        use std::os::unix::fs::symlink;
+
+        let name = format!("cladding-run-{}", generate_uuid_v4().unwrap());
+        let root = std::env::temp_dir().join(format!(
+            "cladding-run-symlink-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        let project_root = root.join(".cladding");
+        let external_dir = root.join("external-runs");
+        fs::create_dir_all(project_root.join("runtime")).unwrap();
+        fs::create_dir_all(&external_dir).unwrap();
+        symlink(&external_dir, project_root.join("runtime/runs")).unwrap();
+
+        let error = create_private_runtime_root(&name, &project_root)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not a regular directory"));
+        assert!(!external_dir.join(name).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -853,20 +953,23 @@ mod tests {
 
     #[test]
     fn run_secret_files_are_private_independent_and_removed_with_the_runtime() {
+        let test_root = std::env::temp_dir().join(format!(
+            "cladding-run-secret-roots-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        let project_root = test_root.join(".cladding");
+        fs::create_dir_all(&project_root).unwrap();
         let first_root = create_private_runtime_root(
             &format!("cladding-run-{}", generate_uuid_v4().unwrap()),
-            Path::new("/workspace"),
+            &project_root,
         )
         .unwrap();
         let second_root = create_private_runtime_root(
             &format!("cladding-run-{}", generate_uuid_v4().unwrap()),
-            Path::new("/workspace"),
+            &project_root,
         )
         .unwrap();
-        let project_root = first_root
-            .parent()
-            .unwrap()
-            .join(format!("project-{}", generate_uuid_v4().unwrap()));
         let project_secrets = project_root.join("credentials/baffle/secrets");
         fs::create_dir_all(&project_secrets).unwrap();
         fs::write(project_secrets.join("github-token"), b"persistent-token").unwrap();
@@ -967,6 +1070,6 @@ mod tests {
             fs::read(project_secrets.join("github-token")).unwrap(),
             b"persistent-token"
         );
-        fs::remove_dir_all(project_root).unwrap();
+        fs::remove_dir_all(test_root).unwrap();
     }
 }
