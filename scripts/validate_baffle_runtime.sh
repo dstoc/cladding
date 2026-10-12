@@ -1420,6 +1420,8 @@ if [ "$ca_after_run" != "$ca_before" ]; then
   echo "one-off run changed the persistent project CA" >&2
   exit 1
 fi
+phase="restore persistent Baffle session after run-only override"
+write_agent_policy test-token-new "/replacement/**"
 phase="verify one-off Podman resource cleanup"
 if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sandbox)(-instance)?$" >/dev/null; then
   echo "one-off runtime left a Podman resource behind" >&2

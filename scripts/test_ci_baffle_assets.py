@@ -122,6 +122,12 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "one-off run did not exit after its workload gates were released",
             cleanup,
         )
+        between_runs = validator.split(
+            'phase="verify persistent project CA is unchanged"', 1
+        )[1].split('phase="start one-off runtime for failure-trap cleanup check"', 1)[0]
+        self.assertIn(
+            'write_agent_policy test-token-new "/replacement/**"', between_runs
+        )
         self.assertIn('kill -0 "$run_pid" 2>/dev/null', reap)
         self.assertLess(
             reap.index('kill -0 "$run_pid"'), reap.index('wait "$run_pid"')
