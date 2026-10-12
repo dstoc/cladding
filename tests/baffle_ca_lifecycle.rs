@@ -59,6 +59,13 @@ fi
 if [ "$1" = "rm" ] && [ "$CLADDING_TEST_FAIL_CLEANUP" = "1" ]; then
   exit 43
 fi
+if [ "$1" = "rm" ] && [ -f "$CLADDING_LEGACY_PODS" ]; then
+  component_name=${3%-instance}
+  if awk -F '|' -v name="$component_name" '$1 == name { found = 1 } END { exit !found }' "$CLADDING_LEGACY_PODS"; then
+    echo "Error: container is part of pod $component_name" >&2
+    exit 125
+  fi
+fi
 state=$CLADDING_PODMAN_STATE
 volume_state=$CLADDING_PODMAN_VOLUMES
 if [ "$1" = "image" ] && [ "$2" = "exists" ]; then exit 0; fi
@@ -907,6 +914,7 @@ exit 0
     assert!(created_socket_volumes.contains("|demo|"));
     assert!(created_socket_volumes.contains("|inter-container-socket|"));
 
+    fs::write(&podman_log, "").unwrap();
     let mut down = cli(
         &root,
         &bin_dir,
@@ -926,6 +934,12 @@ exit 0
         !cleanup_log.lines().any(|line| line.starts_with("pod rm ")),
         "down must not remove pods for the standalone topology: {cleanup_log}"
     );
+    assert!(
+        !cleanup_log.lines().any(|line| line.contains(" exists ")
+            || line.contains(" inspect ")
+            || line.contains(" ps ")),
+        "normal shutdown must remove current-spec resources without inspection: {cleanup_log}"
+    );
     assert_eq!(
         fs::read_to_string(&socket_volume_state).unwrap(),
         "",
@@ -943,15 +957,11 @@ exit 0
         &private_key_source,
     );
     down_foreign_volume.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
-    assert!(!down_foreign_volume.output().unwrap().status.success());
-    assert_eq!(
-        fs::read_to_string(&socket_volume_state).unwrap(),
-        foreign_socket_volume,
-        "shutdown must leave a foreign socket volume untouched"
-    );
+    assert_success(down_foreign_volume.output().unwrap());
+    assert!(fs::read_to_string(&socket_volume_state).unwrap().is_empty());
     assert!(
-        !read_log(&podman_log).contains("volume rm cladding-demo-socket-baffle-agent"),
-        "shutdown tried to remove a foreign socket volume"
+        read_log(&podman_log).contains("volume rm cladding-demo-socket-baffle-agent"),
+        "normal shutdown should remove the exact socket volume from its runtime spec"
     );
     fs::write(&socket_volume_state, "").unwrap();
 
@@ -1014,8 +1024,11 @@ exit 0
     assert!(!down_foreign_pod.output().unwrap().status.success());
     let foreign_pod_log = read_log(&podman_log);
     assert!(!foreign_pod_log.contains("pod rm -f demo-agent"));
-    assert!(!foreign_pod_log.contains("rm -f demo-agent-instance"));
-    assert!(!fs::read_to_string(&legacy_pods).unwrap().is_empty());
+    assert!(foreign_pod_log.contains("rm -f demo-agent-instance"));
+    assert_eq!(
+        fs::read_to_string(&legacy_pods).unwrap(),
+        format!("demo-agent|unrelated|demo|{}\n", project_root.display())
+    );
 
     fs::write(&legacy_pods, "").unwrap();
     fs::write(
@@ -1032,11 +1045,11 @@ exit 0
         &private_key_source,
     );
     down_foreign_container.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
-    assert!(!down_foreign_container.output().unwrap().status.success());
-    assert!(!read_log(&podman_log).contains("rm -f demo-agent-instance"));
-    assert_eq!(
-        fs::read_to_string(&container_state).unwrap(),
-        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n"
+    assert_success(down_foreign_container.output().unwrap());
+    assert!(read_log(&podman_log).contains("rm -f demo-agent-instance"));
+    assert!(
+        fs::read_to_string(&container_state).unwrap().is_empty(),
+        "normal shutdown should remove the exact container name from its runtime spec"
     );
 
     fs::remove_dir_all(root).unwrap();

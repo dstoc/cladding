@@ -29,6 +29,12 @@ pub struct RuntimeInventory {
     pub resources: Vec<RuntimeResource>,
 }
 
+#[derive(Debug)]
+pub struct RuntimeCleanupReport {
+    pub result: Result<()>,
+    pub runtime_root_safe_to_remove: bool,
+}
+
 impl RuntimeInventory {
     pub fn is_empty(&self) -> bool {
         self.resources.is_empty()
@@ -249,13 +255,155 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
     }
 }
 
-/// Clean up resources only when their Podman labels identify this runtime.
-/// This is used by one-off startup and teardown paths so a name collision
-/// cannot cause cleanup to remove another project's resources.
+/// Remove resources named by the active runtime spec without discovery.
+pub fn runtime_cleanup_normal(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    runtime_cleanup_normal_report(spec, verbose, quiet_helpers).result
+}
+
+/// Remove resources named by a one-off runtime spec and report whether its
+/// private bind sources can be removed after Podman cleanup.
+pub fn runtime_cleanup_owned_report(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> RuntimeCleanupReport {
+    runtime_cleanup_normal_report(spec, verbose, quiet_helpers)
+}
+
+/// Clean up a one-off runtime by its unique resource names.
 pub fn runtime_cleanup_owned(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
-    // runtime_cleanup checks the component labels on every existing resource,
-    // including legacy pods, before it removes anything.
-    runtime_cleanup(spec, verbose, quiet_helpers)
+    runtime_cleanup_owned_report(spec, verbose, quiet_helpers).result
+}
+
+fn runtime_cleanup_normal_report(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> RuntimeCleanupReport {
+    let mut errors = CleanupErrors::default();
+    let mut runtime_root_safe_to_remove = true;
+
+    for component in runtime_components(spec) {
+        let mut legacy_pod_removed = false;
+        for container in &component.containers {
+            if let Err(container_error) = container_rm(&container.name, verbose, quiet_helpers) {
+                match remove_legacy_pod_after_container_error(component, verbose, quiet_helpers) {
+                    Ok(true) => {
+                        legacy_pod_removed = true;
+                        break;
+                    }
+                    Ok(false) => {
+                        errors.record(Err(container_error));
+                        runtime_root_safe_to_remove = false;
+                    }
+                    Err(pod_error) => {
+                        errors.record(Err(Error::message(format!(
+                            "{container_error}; legacy pod cleanup also failed: {pod_error}"
+                        ))));
+                        runtime_root_safe_to_remove = false;
+                    }
+                }
+            }
+        }
+        if legacy_pod_removed {
+            continue;
+        }
+    }
+
+    for name in socket_volume_names(spec) {
+        if let Err(err) = volume_rm(&name, "Cladding socket volume", verbose, quiet_helpers) {
+            errors.record(Err(err));
+        }
+    }
+
+    for (name, kind) in managed_mount_volumes(spec) {
+        if matches!(kind, ManagedVolumeKind::Copy { .. }) {
+            let helper_name = managed_mount_seed_helper_name(&name);
+            if let Err(err) = container_rm(&helper_name, verbose, quiet_helpers) {
+                errors.record(Err(err));
+            }
+        }
+    }
+
+    for name in managed_mount_volumes(spec).into_keys() {
+        match volume_rm(&name, "managed mount volume", verbose, quiet_helpers) {
+            Ok(()) => errors.record(remove_managed_copy_seed_marker(spec, &name)),
+            Err(err) => errors.record(Err(err)),
+        }
+    }
+
+    RuntimeCleanupReport {
+        result: errors.finish(),
+        runtime_root_safe_to_remove,
+    }
+}
+
+fn remove_legacy_pod_after_container_error(
+    component: &RuntimeComponent,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<bool> {
+    let mut cmd = build_resource_exists_command("pod", &component.name);
+    trace_command(&cmd, verbose);
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed to check whether legacy pod exists: {}",
+            component.name
+        )
+    })?;
+    match output.status.code() {
+        Some(1) => return Ok(false),
+        Some(0) => {}
+        _ => {
+            if quiet_helpers {
+                ensure_success_output_with_diagnostics(&output, "podman pod exists")?;
+            }
+            if verbose {
+                forward_output(&output)?;
+            }
+            ensure_success_output(&output, "podman pod exists")?;
+        }
+    }
+
+    if !resource_labels_match_component("pod", &component.name, component, verbose, quiet_helpers)?
+    {
+        return Err(Error::message(format!(
+            "refusing to remove pod '{}' because it is not owned by this Cladding component",
+            component.name
+        )));
+    }
+    legacy_pod_rm(&component.name, verbose, quiet_helpers)?;
+    Ok(true)
+}
+
+#[derive(Default)]
+struct CleanupErrors(Vec<String>);
+
+impl CleanupErrors {
+    fn record(&mut self, result: Result<()>) {
+        if let Err(err) = result {
+            self.0.push(err.to_string());
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::message(format!(
+                "runtime cleanup failed:\n{}",
+                self.0
+                    .into_iter()
+                    .map(|error| format!("- {error}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )))
+        }
+    }
 }
 
 fn socket_volume_names(spec: &RuntimeSpec) -> Vec<String> {
@@ -930,6 +1078,27 @@ fn build_volume_rm_command(name: &str) -> Command {
     let mut cmd = Command::new("podman");
     cmd.args(["volume", "rm", name]);
     cmd
+}
+
+fn volume_rm(name: &str, context: &'static str, verbose: bool, quiet_helpers: bool) -> Result<()> {
+    let mut cmd = build_volume_rm_command(name);
+    trace_command(&cmd, verbose);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to remove {context} '{name}'"))?;
+    if output.status.success() || remove_output_is_missing_volume(&output) {
+        if verbose {
+            forward_output(&output)?;
+        }
+        return Ok(());
+    }
+    if quiet_helpers {
+        ensure_success_output_with_diagnostics(&output, "podman volume rm")?;
+    }
+    if verbose {
+        forward_output(&output)?;
+    }
+    ensure_success_output(&output, "podman volume rm")
 }
 
 fn remove_output_is_missing_volume(output: &Output) -> bool {
@@ -1961,6 +2130,37 @@ mod tests {
             stderr: b"Error: no such container".to_vec(),
         };
         assert!(remove_output_is_missing_container(&output));
+    }
+
+    #[test]
+    fn known_resource_cleanup_uses_single_idempotent_remove_commands() {
+        assert_eq!(
+            command_args(&build_container_rm_command("demo-agent-instance")),
+            vec!["rm", "-f", "demo-agent-instance"]
+        );
+        assert_eq!(
+            command_args(&build_volume_rm_command("demo-socket-agent")),
+            vec!["volume", "rm", "demo-socket-agent"]
+        );
+        assert_eq!(
+            managed_mount_seed_helper_name("demo-cache"),
+            "demo-cache-seed"
+        );
+    }
+
+    #[test]
+    fn cleanup_errors_report_every_failed_stage() {
+        let mut errors = CleanupErrors::default();
+        errors.record(Err(Error::message("container removal failed")));
+        errors.record(Err(Error::message("volume removal failed")));
+
+        let error = errors
+            .finish()
+            .expect_err("cleanup errors should be returned");
+        assert_eq!(
+            error.to_string(),
+            "runtime cleanup failed:\n- container removal failed\n- volume removal failed"
+        );
     }
 
     #[test]

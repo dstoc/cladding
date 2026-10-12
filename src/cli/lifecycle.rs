@@ -10,7 +10,8 @@ use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::podman::{
     initialize_baffle_ca, list_running_projects, podman_build_image, podman_build_proxy_image,
-    podman_required, runtime_cleanup, runtime_cleanup_owned, runtime_create, runtime_inventory,
+    podman_required, runtime_cleanup, runtime_cleanup_normal, runtime_cleanup_owned,
+    runtime_cleanup_owned_report, runtime_create, runtime_inventory,
 };
 #[cfg(test)]
 use cladding::runtime::RuntimeSpec;
@@ -405,19 +406,19 @@ fn prepare_baffle_runtime(project_root: &std::path::Path) -> Result<()> {
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     let config = context.load_config()?;
     let spec = context.runtime_spec(&config)?;
-    let mut cleanup_error = None;
-    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, verbose, false));
-
-    match cleanup_error {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
+    runtime_cleanup_normal(&spec, verbose, false)
 }
 
-pub(super) fn cmd_down_ephemeral(context: &Context, verbose: bool) -> Result<()> {
-    let config = context.load_config()?;
-    let spec = context.runtime_spec(&config)?;
-    runtime_cleanup_owned(&spec, verbose, !verbose)
+pub(super) fn cmd_down_ephemeral(context: &Context, verbose: bool) -> (Result<()>, bool) {
+    let result = (|| {
+        let config = context.load_config()?;
+        let spec = context.runtime_spec(&config)?;
+        Ok(runtime_cleanup_owned_report(&spec, verbose, !verbose))
+    })();
+    match result {
+        Ok(report) => (report.result, report.runtime_root_safe_to_remove),
+        Err(err) => (Err(err), false),
+    }
 }
 
 pub(super) fn cmd_destroy(context: &Context) -> Result<()> {
