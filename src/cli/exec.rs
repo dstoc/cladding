@@ -767,6 +767,7 @@ mod tests {
             use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "agent:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
@@ -774,6 +775,7 @@ mod tests {
             nw_sandbox: None,
             fs_sandbox: fs_sandbox_enabled.then_some(ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "fs-sandbox:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),

@@ -185,6 +185,14 @@ fn parse_component_object(
     validate_component_keys(object, key, config_path)?;
 
     let build = parse_build_config(object.get("build"), key, config_path)?;
+    let init = match object.get("init") {
+        Some(value) => value.as_bool().ok_or_else(|| {
+            eprintln!("error: cladding.json invalid field '{key}.init' (expected boolean)");
+            eprintln!("file: {}", config_path.display());
+            Error::message("invalid cladding.json")
+        })?,
+        None => true,
+    };
     let security_opts = parse_security_opts(object.get("security_opts"), key, config_path)?;
     let image = match object.get("image") {
         Some(value) => value
@@ -217,6 +225,7 @@ fn parse_component_object(
 
         return Ok(Some(ExecutionComponentConfig {
             enabled: true,
+            init,
             image: image.to_string(),
             build,
             security_opts,
@@ -234,6 +243,7 @@ fn parse_component_object(
 
     Ok(Some(ExecutionComponentConfig {
         enabled,
+        init,
         image,
         build,
         security_opts,
@@ -279,7 +289,7 @@ fn validate_component_keys(
     component_key: &str,
     config_path: &Path,
 ) -> Result<()> {
-    let allowed = ["image", "enabled", "build", "security_opts"];
+    let allowed = ["image", "enabled", "init", "build", "security_opts"];
 
     let mut invalid = false;
     for key in object.keys() {
@@ -597,6 +607,68 @@ mod tests {
         );
         assert!(config.agent.build.is_none());
         assert!(config.agent.security_opts.is_empty());
+        assert!(config.agent.init);
+        assert!(config.nw_sandbox.as_ref().unwrap().init);
+        assert!(config.fs_sandbox.as_ref().unwrap().init);
+    }
+
+    #[test]
+    fn load_cladding_config_parses_independent_component_init_settings() {
+        let temp = create_temp_dir("component-init-settings");
+        fs::write(
+            temp.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "agent": { "init": false },
+  "nw_sandbox": { "init": true },
+  "fs_sandbox": { "init": false }
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cladding_config_v2(&temp).unwrap();
+
+        assert!(!config.agent.init);
+        assert!(config.nw_sandbox.as_ref().unwrap().init);
+        assert!(!config.fs_sandbox.as_ref().unwrap().init);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn load_cladding_config_rejects_non_boolean_component_init() {
+        let temp = create_temp_dir("invalid-component-init");
+        for init in ["null", "0", "\"false\"", "[]", "{}"] {
+            let raw = format!(r#"{{"name":"demo","agent":{{"init":{init}}}}}"#);
+            fs::write(temp.join("cladding.json"), raw).unwrap();
+            assert!(
+                load_cladding_config_v2(&temp).is_err(),
+                "accepted invalid init {init}"
+            );
+        }
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn load_cladding_config_rejects_unknown_component_keys_and_proxy_init() {
+        let temp = create_temp_dir("invalid-init-scope");
+        let valid_proxy_config = r#"{"name":"demo","agent":{},"proxy":{}}"#;
+        fs::write(temp.join("cladding.json"), valid_proxy_config).unwrap();
+        assert!(
+            load_cladding_config_v2(&temp).is_ok(),
+            "rejected proxy config without init: {valid_proxy_config}"
+        );
+
+        for raw in [
+            r#"{"name":"demo","agent":{"unknown":true}}"#,
+            r#"{"name":"demo","agent":{},"proxy":{"init":false}}"#,
+        ] {
+            fs::write(temp.join("cladding.json"), raw).unwrap();
+            assert!(
+                load_cladding_config_v2(&temp).is_err(),
+                "accepted invalid component config {raw}"
+            );
+        }
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

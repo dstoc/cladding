@@ -427,18 +427,21 @@ mod tests {
             use_runsc,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "agent:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
             },
             nw_sandbox: nw_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "nw:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
             }),
             fs_sandbox: fs_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "fs:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),

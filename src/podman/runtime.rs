@@ -1495,7 +1495,9 @@ fn build_container_run_command(
         cmd.arg(security_opt);
     }
     cmd.arg("-d");
-    cmd.arg("--init");
+    if component.init {
+        cmd.arg("--init");
+    }
     append_label_args(&mut cmd, &component.labels);
     cmd.arg("--network");
     cmd.arg(&component.network_name);
@@ -1597,6 +1599,7 @@ mod tests {
                 use_runsc: false,
                 agent: ExecutionComponentConfig {
                     enabled: true,
+                    init: true,
                     image: "agent:image".to_string(),
                     build: None,
                     security_opts: Vec::new(),
@@ -1616,18 +1619,21 @@ mod tests {
             use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "agent:image".to_string(),
                 build: None,
                 security_opts: vec!["unmask=/proc/*".to_string(), "label=disable".to_string()],
             },
             nw_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "nw:image".to_string(),
                 build: None,
                 security_opts: vec!["no-new-privileges".to_string()],
             }),
             fs_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "fs:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
@@ -1775,6 +1781,7 @@ mod tests {
             use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "agent:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
@@ -1830,6 +1837,7 @@ mod tests {
         let proxy = RuntimeComponent {
             name: "demo-proxy".to_string(),
             use_runsc: false,
+            init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: vec![RuntimeContainer {
@@ -1849,6 +1857,7 @@ mod tests {
         let empty_component = |name: &str| RuntimeComponent {
             name: name.to_string(),
             use_runsc: false,
+            init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             containers: Vec::new(),
@@ -1899,6 +1908,7 @@ mod tests {
         let component = |name: &str| RuntimeComponent {
             name: name.to_string(),
             use_runsc: false,
+            init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             containers: Vec::new(),
@@ -1935,18 +1945,21 @@ mod tests {
             use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "agent:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
             },
             nw_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "nw-sandbox:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
             }),
             fs_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "fs-sandbox:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
@@ -1980,24 +1993,78 @@ mod tests {
     }
 
     #[test]
-    fn runtime_commands_mount_socket_volumes_only_for_channel_participants() {
+    fn runtime_containers_apply_init_independently_and_keep_it_for_proxy() {
         let config = ExecutionConfig {
             name: "demo".to_string(),
             use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: false,
                 image: "agent:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
             },
             nw_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "nw-sandbox:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
             }),
             fs_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
+                init: false,
+                image: "fs-sandbox:image".to_string(),
+                build: None,
+                security_opts: Vec::new(),
+            }),
+            proxy: None,
+            mounts: Vec::new(),
+        };
+        let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
+        let init_args = |component: &RuntimeComponent| {
+            let container = component.containers.first().expect("runtime container");
+            command_args(&build_container_run_command(
+                component.use_runsc,
+                component,
+                container,
+            ))
+            .iter()
+            .any(|arg| arg == "--init")
+        };
+
+        assert!(!init_args(&spec.agent));
+        assert!(init_args(
+            spec.nw_sandbox.as_ref().expect("network sandbox")
+        ));
+        assert!(!init_args(
+            spec.fs_sandbox.as_ref().expect("filesystem sandbox")
+        ));
+        assert!(init_args(&spec.proxy));
+    }
+
+    #[test]
+    fn runtime_commands_mount_socket_volumes_only_for_channel_participants() {
+        let config = ExecutionConfig {
+            name: "demo".to_string(),
+            use_runsc: false,
+            agent: ExecutionComponentConfig {
+                enabled: true,
+                init: true,
+                image: "agent:image".to_string(),
+                build: None,
+                security_opts: Vec::new(),
+            },
+            nw_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                init: true,
+                image: "nw-sandbox:image".to_string(),
+                build: None,
+                security_opts: Vec::new(),
+            }),
+            fs_sandbox: Some(ExecutionComponentConfig {
+                enabled: true,
+                init: true,
                 image: "fs-sandbox:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
@@ -2299,6 +2366,7 @@ mod tests {
             use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "agent:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
@@ -2328,6 +2396,7 @@ mod tests {
         let component = RuntimeComponent {
             name: "demo-agent".to_string(),
             use_runsc: false,
+            init: true,
             labels: std::collections::BTreeMap::from([
                 ("app".to_string(), "agent".to_string()),
                 ("cladding".to_string(), "demo".to_string()),
@@ -2444,6 +2513,7 @@ mod tests {
         let component = RuntimeComponent {
             name: "demo-agent".to_string(),
             use_runsc: false,
+            init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
@@ -2514,6 +2584,7 @@ mod tests {
         let component = RuntimeComponent {
             name: "demo-agent".to_string(),
             use_runsc: false,
+            init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             containers: Vec::new(),
@@ -2553,6 +2624,7 @@ mod tests {
         let component = RuntimeComponent {
             name: "demo-agent".to_string(),
             use_runsc: false,
+            init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             containers: Vec::new(),

@@ -475,12 +475,14 @@ mod tests {
             use_runsc: false,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: DEFAULT_CLADDING_BUILD_IMAGE.to_string(),
                 build: None,
                 security_opts: Vec::new(),
             },
             nw_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: DEFAULT_CLADDING_BUILD_IMAGE.to_string(),
                 build: None,
                 security_opts: Vec::new(),
