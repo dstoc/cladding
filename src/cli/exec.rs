@@ -2,7 +2,7 @@ use super::CONTAINER_HOME_DIR;
 use super::args::{ExecTarget, LogsTarget};
 use super::context::{Context, project_runtime_status};
 use anyhow::Context as _;
-use cladding::config::{ExecutionConfig, MountTarget};
+use cladding::config::{ExecutionConfig, MountTarget, MountType, ResolvedMountConfig};
 use cladding::error::{Error, Result};
 use cladding::podman::podman_required;
 use cladding::runtime::{
@@ -176,8 +176,10 @@ fn run_podman_exec(
                 mount_target_name(mount_target)
             ))
         })?;
-    let container_workdir = resolve_container_workdir(
+    let container_workdir = resolve_target_workdir(
         &runtime_container.mounts,
+        &config.mounts,
+        mount_target,
         runtime_container.workdir.as_deref(),
         &cwd,
     )?;
@@ -379,6 +381,57 @@ fn mount_target_name(target: MountTarget) -> &'static str {
     }
 }
 
+fn resolve_target_workdir(
+    runtime_mounts: &[RuntimeMount],
+    configured_mounts: &[ResolvedMountConfig],
+    target: MountTarget,
+    target_workdir: Option<&str>,
+    cwd: &Path,
+) -> Result<PathBuf> {
+    let mounts = active_explicit_host_mounts(runtime_mounts, configured_mounts, target);
+    resolve_container_workdir(&mounts, target_workdir, cwd)
+}
+
+fn active_explicit_host_mounts(
+    runtime_mounts: &[RuntimeMount],
+    configured_mounts: &[ResolvedMountConfig],
+    target: MountTarget,
+) -> Vec<RuntimeMount> {
+    runtime_mounts
+        .iter()
+        .filter(|runtime_mount| {
+            configured_mounts.iter().any(|configured_mount| {
+                if configured_mount.ignore
+                    || !configured_mount.targets.contains(&target)
+                    || configured_mount.mount_path != runtime_mount.mount_path
+                {
+                    return false;
+                }
+
+                let Some(host_path) = configured_mount.host_path.as_deref() else {
+                    return false;
+                };
+
+                match (configured_mount.mount_type, &runtime_mount.source) {
+                    (
+                        MountType::Bind | MountType::Readonly,
+                        RuntimeMountSource::HostPath { path },
+                    ) => path == host_path,
+                    (
+                        MountType::Copy,
+                        RuntimeMountSource::ManagedVolume {
+                            kind: ManagedVolumeKind::Copy { source },
+                            ..
+                        },
+                    ) => source == host_path,
+                    _ => false,
+                }
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 fn resolve_container_workdir(
     mounts: &[RuntimeMount],
     target_workdir: Option<&str>,
@@ -494,7 +547,7 @@ fn safe_fallback_workdir(mounts: &[RuntimeMount], target_workdir: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cladding::config::{ExecutionComponentConfig, MountType, ResolvedMountConfig};
+    use cladding::config::{ExecutionComponentConfig, MountType};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -538,15 +591,20 @@ mod tests {
 
         let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
         let container = &runtime.agent.containers[0];
-        let resolved =
-            resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
-                .expect("workdir");
+        let resolved = resolve_target_workdir(
+            &container.mounts,
+            &[],
+            MountTarget::Agent,
+            container.workdir.as_deref(),
+            &cwd,
+        )
+        .expect("workdir");
 
         assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
     }
 
     #[test]
-    fn resolve_container_workdir_maps_the_default_home_mount() {
+    fn resolve_container_workdir_uses_home_for_a_cwd_in_the_default_home_mount() {
         let temp = create_temp_dir("default-home");
         let workspace = temp.join("workspace");
         let project_root = workspace.join(".cladding");
@@ -556,16 +614,21 @@ mod tests {
 
         let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
         let container = &runtime.agent.containers[0];
-        let resolved =
-            resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
-                .expect("workdir");
+        let resolved = resolve_target_workdir(
+            &container.mounts,
+            &[],
+            MountTarget::Agent,
+            container.workdir.as_deref(),
+            &cwd,
+        )
+        .expect("workdir");
 
-        assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR).join("packages"));
+        assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
     }
 
     #[cfg(unix)]
     #[test]
-    fn resolve_container_workdir_maps_a_symlinked_home_source_outside_the_workspace() {
+    fn resolve_container_workdir_uses_home_for_a_cwd_in_symlinked_home() {
         let temp = create_temp_dir("symlinked-home");
         let workspace = temp.join("workspace");
         let project_root = workspace.join(".cladding");
@@ -578,14 +641,16 @@ mod tests {
 
         let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
         let container = &runtime.agent.containers[0];
-        let resolved =
-            resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
-                .expect("workdir");
+        let resolved = resolve_target_workdir(
+            &container.mounts,
+            &[],
+            MountTarget::Agent,
+            container.workdir.as_deref(),
+            &cwd,
+        )
+        .expect("workdir");
 
-        assert_eq!(
-            resolved,
-            PathBuf::from(CONTAINER_HOME_DIR).join("projects/sample")
-        );
+        assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
     }
 
     #[test]
@@ -607,11 +672,21 @@ mod tests {
             targets: vec![MountTarget::Agent],
             ignore: true,
         };
-        let runtime = runtime_spec(&project_root, &workspace, vec![ignored_workspace], false);
+        let runtime = runtime_spec(
+            &project_root,
+            &workspace,
+            vec![ignored_workspace.clone()],
+            false,
+        );
         let container = &runtime.agent.containers[0];
-        let resolved =
-            resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
-                .expect("fallback workdir");
+        let resolved = resolve_target_workdir(
+            &container.mounts,
+            &[ignored_workspace],
+            MountTarget::Agent,
+            container.workdir.as_deref(),
+            &cwd,
+        )
+        .expect("fallback workdir");
 
         assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
     }
@@ -629,9 +704,14 @@ mod tests {
         let component = runtime_component_for_target(&runtime, MountTarget::FsSandbox)
             .expect("filesystem sandbox component");
         let container = &component.containers[0];
-        let resolved =
-            resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
-                .expect("fallback workdir");
+        let resolved = resolve_target_workdir(
+            &container.mounts,
+            &[],
+            MountTarget::FsSandbox,
+            container.workdir.as_deref(),
+            &cwd,
+        )
+        .expect("fallback workdir");
 
         assert_eq!(resolved, PathBuf::from(CONTAINER_HOME_DIR));
     }
@@ -655,12 +735,17 @@ mod tests {
             targets: vec![MountTarget::Agent],
             ignore: false,
         };
-        let runtime = runtime_spec(&project_root, &workspace, vec![custom_mount], false);
+        let runtime = runtime_spec(&project_root, &workspace, vec![custom_mount.clone()], false);
         let container = &runtime.agent.containers[0];
 
-        let resolved =
-            resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
-                .expect("workdir");
+        let resolved = resolve_target_workdir(
+            &container.mounts,
+            &[custom_mount],
+            MountTarget::Agent,
+            container.workdir.as_deref(),
+            &cwd,
+        )
+        .expect("workdir");
 
         assert_eq!(resolved, PathBuf::from("/data/reports/weekly"));
     }
@@ -683,14 +768,34 @@ mod tests {
             targets: vec![MountTarget::Agent],
             ignore: false,
         };
-        let runtime = runtime_spec(&project_root, &workspace, vec![explicit_mount], false);
+        let runtime = runtime_spec(
+            &project_root,
+            &workspace,
+            vec![explicit_mount.clone()],
+            false,
+        );
         let container = &runtime.agent.containers[0];
 
-        let resolved =
-            resolve_with_runtime_mounts(&container.mounts, container.workdir.as_deref(), &cwd)
-                .expect("workdir");
+        let resolved = resolve_target_workdir(
+            &container.mounts,
+            std::slice::from_ref(&explicit_mount),
+            MountTarget::Agent,
+            container.workdir.as_deref(),
+            &cwd,
+        )
+        .expect("workdir");
 
         assert_eq!(resolved, PathBuf::from("/host-workspace/src/module"));
+
+        let resolved_for_other_target = resolve_target_workdir(
+            &container.mounts,
+            std::slice::from_ref(&explicit_mount),
+            MountTarget::NwSandbox,
+            container.workdir.as_deref(),
+            &cwd,
+        )
+        .expect("fallback workdir for other target");
+        assert_eq!(resolved_for_other_target, PathBuf::from(CONTAINER_HOME_DIR));
     }
 
     #[test]
