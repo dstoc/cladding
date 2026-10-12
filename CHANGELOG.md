@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.3](https://github.com/dstoc/cladding/compare/v0.4.2...v0.4.3) (2026-10-12)
+
+
+### Features
+
+* make host workspace mounts explicit ([#101](https://github.com/dstoc/cladding/issues/101)) ([aa1b040](https://github.com/dstoc/cladding/commit/aa1b0405d4b44ec245ba4b9ea4133f05e5b6694e))
+* **runtime:** configure Podman init per execution component ([#100](https://github.com/dstoc/cladding/issues/100)) ([f912322](https://github.com/dstoc/cladding/commit/f9123226548b05d4c7065d8738b1a0dcc21b5915))
+
+
+### Bug Fixes
+
+* **runtime:** simplify normal teardown ([#98](https://github.com/dstoc/cladding/issues/98)) ([add6efb](https://github.com/dstoc/cladding/commit/add6efb1f0bb6d015f36fe05ce08d9bb87bbde67))
+
 ## [0.4.2](https://github.com/dstoc/cladding/compare/v0.4.1...v0.4.2) (2026-10-12)
 
 
