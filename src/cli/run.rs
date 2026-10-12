@@ -636,14 +636,26 @@ fn ensure_run_runtime_directory(path: &Path, private: bool) -> anyhow::Result<()
                 use std::os::unix::fs::DirBuilderExt as _;
                 let mut builder = fs::DirBuilder::new();
                 builder.mode(if private { 0o700 } else { 0o755 });
-                builder.create(path).with_context(|| {
-                    format!("failed to create runtime directory {}", path.display())
-                })?;
+                match builder.create(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("failed to create runtime directory {}", path.display())
+                        });
+                    }
+                }
             }
             #[cfg(not(unix))]
-            fs::create_dir(path).with_context(|| {
-                format!("failed to create runtime directory {}", path.display())
-            })?;
+            match fs::create_dir(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to create runtime directory {}", path.display())
+                    });
+                }
+            }
             fs::symlink_metadata(path).with_context(|| {
                 format!("failed to inspect runtime directory {}", path.display())
             })?
@@ -785,6 +797,70 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&runtime_root);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_first_runs_initialize_shared_runtime_directories() {
+        const RUNS: usize = 16;
+
+        let root = std::env::temp_dir().join(format!(
+            "cladding-run-concurrent-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        let project_root = root.join(".cladding");
+        fs::create_dir_all(&project_root).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(RUNS));
+
+        let runtime_roots = thread::scope(|scope| {
+            let workers = (0..RUNS)
+                .map(|run| {
+                    let barrier = Arc::clone(&barrier);
+                    let project_root = &project_root;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        create_private_runtime_root(&format!("cladding-run-{run}"), project_root)
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(runtime_roots.len(), RUNS);
+        assert!(runtime_roots.iter().all(|path| path.is_dir()));
+        assert!(
+            runtime_roots
+                .iter()
+                .all(|path| path.parent() == Some(project_root.join("runtime/runs").as_path()))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_runtime_root_rejects_an_existing_instance_directory() {
+        let name = format!("cladding-run-{}", generate_uuid_v4().unwrap());
+        let root = std::env::temp_dir().join(format!(
+            "cladding-run-collision-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        let project_root = root.join(".cladding");
+        let existing_root = project_root.join("runtime/runs").join(&name);
+        fs::create_dir_all(&existing_root).unwrap();
+        fs::write(existing_root.join("marker"), b"existing instance").unwrap();
+
+        let error = create_private_runtime_root(&name, &project_root).unwrap_err();
+
+        assert!(error.to_string().contains("name collisions are not reused"));
+        assert_eq!(
+            fs::read(existing_root.join("marker")).unwrap(),
+            b"existing instance"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
