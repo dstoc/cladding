@@ -651,9 +651,16 @@ mod tests {
     #[test]
     fn load_cladding_config_rejects_unknown_component_keys_and_proxy_init() {
         let temp = create_temp_dir("invalid-init-scope");
+        let valid_proxy_config = r#"{"name":"demo","agent":{},"proxy":{}}"#;
+        fs::write(temp.join("cladding.json"), valid_proxy_config).unwrap();
+        assert!(
+            load_cladding_config_v2(&temp).is_ok(),
+            "rejected proxy config without init: {valid_proxy_config}"
+        );
+
         for raw in [
             r#"{"name":"demo","agent":{"unknown":true}}"#,
-            r#"{"name":"demo","proxy":{"init":false}}"#,
+            r#"{"name":"demo","agent":{},"proxy":{"init":false}}"#,
         ] {
             fs::write(temp.join("cladding.json"), raw).unwrap();
             assert!(
