@@ -368,7 +368,7 @@ jq --arg image "$client_image" --arg runtime "$runtime" \
    | .fs_sandbox.enabled = true
    | .fs_sandbox.image = $image
    | .use_runsc = ($runtime == "runsc")
-   | .mounts = [{"mount":"/home/user/workspace", "hostPath":"..", "targets":["agent"]}]
+   | .mounts = [{"mount":"/workspace", "hostPath":"..", "targets":["agent"]}]
    | .proxy.agent.session_config = $agent_session_config
    | .proxy.nw_sandbox.session_config = $nw_sandbox_session_config' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
@@ -1218,12 +1218,12 @@ test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
   exec "$cladding_bin" --cladding-dir "$project_root" run -v \
     --secret "$run_secret_name=env:CLADDING_RUN_SECRET_OVERRIDE" -- \
     /bin/sh -ec 'test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
-      while [ ! -f /home/user/workspace/.run-origin-ready ]; do sleep 1; done
+      while [ ! -f /workspace/.run-origin-ready ]; do sleep 1; done
       curl --fail --silent --show-error --proxy http://127.0.0.1:3128 --noproxy "" \
         https://localhost:8443/replacement/run-secret \
-        > /home/user/workspace/.run-secret-response
-      touch /home/user/workspace/.run-request-done
-      while [ ! -f /home/user/workspace/.run-finish ]; do sleep 1; done
+        > /workspace/.run-secret-response
+      touch /workspace/.run-request-done
+      while [ ! -f /workspace/.run-finish ]; do sleep 1; done
       exit 7' \
     > "$temp_root/run.log" 2>&1
 ) &
@@ -1315,8 +1315,8 @@ assert_mount "$run_proxy" "$run_root/runtime/scripts/proxy_startup.sh" /opt/scri
 assert_mount "$run_proxy" "$run_root/runtime/sockets/proxy" /run/cladding/proxy
 assert_mount "$run_agent" "$project_root/config" /opt/config
 assert_mount "$run_agent" "$project_root/home" /home/user
-assert_mount "$run_agent" "$temp_root/workspace" /home/user/workspace
-assert_mount "$run_agent" "$run_root/runtime/empty-mask" /home/user/workspace/.cladding
+assert_mount "$run_agent" "$temp_root/workspace" /workspace
+assert_mount "$run_agent" "$run_root/runtime/empty-mask" /workspace/.cladding
 if podman inspect "$run_agent" | jq -e \
   --arg source "$run_secret_directory" \
   --arg destination "/opt/credentials/baffle/secrets" \
@@ -1436,7 +1436,7 @@ phase="start one-off runtime for failure-trap cleanup check"
   cd "$temp_root/workspace"
   export TMPDIR="$temp_root/run-tmp"
   exec "$cladding_bin" --cladding-dir "$project_root" run -v -- \
-    /bin/sh -ec 'while [ ! -f /home/user/workspace/.failure-run-finish ]; do sleep 1; done' \
+    /bin/sh -ec 'while [ ! -f /workspace/.failure-run-finish ]; do sleep 1; done' \
     > "$temp_root/failure-run.log" 2>&1
 ) &
 run_pid=$!
