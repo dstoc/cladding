@@ -298,6 +298,19 @@ Execution components can set `security_opts` to an array of Podman security opti
 }
 ```
 
+Execution components use Podman's `--init` by default. Set `init` to `false` on an individual `agent`, `nw_sandbox`, or `fs_sandbox` object to omit that component's `--init` flag:
+
+```json
+{
+  "name": "myproject",
+  "agent": {
+    "init": false
+  }
+}
+```
+
+This can help when an SELinux process type, such as `container_userns_t`, blocks Podman's injected `/run/podman-init` entrypoint. Without `--init`, the component also loses generic PID 1 zombie reaping and signal forwarding. Provide supervision in the component when it needs those behaviors. Proxy containers always use `--init`.
+
 `containerfile` and `context` paths are relative to `.cladding/cladding.json`. `context` defaults to the `.cladding` directory when omitted. Build `args` are string values passed to Podman as ordinary Containerfile build arguments.
 
 `cladding build` preserves the embedded default image build and its host `UID` and `GID` arguments. It builds each shared image once and reports an error if components specify different builds for the same image tag.

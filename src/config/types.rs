@@ -16,6 +16,7 @@ pub struct ImageBuildConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionComponentConfig {
     pub enabled: bool,
+    pub init: bool,
     pub image: String,
     pub build: Option<ImageBuildConfig>,
     pub security_opts: Vec<String>,

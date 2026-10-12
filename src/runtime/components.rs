@@ -145,6 +145,7 @@ fn build_proxy_component(
     RuntimeComponent {
         name: names.proxy_name.clone(),
         use_runsc: false,
+        init: true,
         security_opts: Vec::new(),
         labels: build_labels(&config.name, project_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
@@ -241,6 +242,7 @@ fn build_agent_component(
     RuntimeComponent {
         name: names.agent_name.clone(),
         use_runsc: config.use_runsc,
+        init: config.agent.init,
         security_opts: config.agent.security_opts.clone(),
         labels: build_labels(&config.name, project_root, "agent"),
         network_name: NETWORK_NONE.to_string(),
@@ -332,6 +334,11 @@ fn build_nw_sandbox_component(
     RuntimeComponent {
         name: component_name.to_string(),
         use_runsc: config.use_runsc,
+        init: config
+            .nw_sandbox
+            .as_ref()
+            .map(|component| component.init)
+            .unwrap_or(true),
         security_opts: config
             .nw_sandbox
             .as_ref()
@@ -380,6 +387,11 @@ fn build_fs_sandbox_component(
     RuntimeComponent {
         name: component_name.to_string(),
         use_runsc: config.use_runsc,
+        init: config
+            .fs_sandbox
+            .as_ref()
+            .map(|component| component.init)
+            .unwrap_or(true),
         security_opts: config
             .fs_sandbox
             .as_ref()
@@ -461,18 +473,21 @@ mod tests {
             use_runsc,
             agent: ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "agent:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
             },
             nw_sandbox: nw_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "nw:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
             }),
             fs_sandbox: fs_enabled.then(|| ExecutionComponentConfig {
                 enabled: true,
+                init: true,
                 image: "fs:image".to_string(),
                 build: None,
                 security_opts: Vec::new(),
