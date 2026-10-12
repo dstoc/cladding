@@ -233,7 +233,11 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('"$run_root/runtime/scripts/proxy_startup.sh"', validator)
         self.assertIn('"$run_root/runtime/empty-mask"', validator)
         self.assertIn('"$run_root/runtime/sockets/proxy"', validator)
-        self.assertIn("/(tmp|var/tmp|dev/shm)/[^ ,:]*$run_name", validator)
+        self.assertIn(
+            'for temp_run_root in "/tmp/$run_name" "/var/tmp/$run_name" "/dev/shm/$run_name"; do',
+            validator,
+        )
+        self.assertIn('grep -F "$temp_run_root" "$run_podman_log"', validator)
         self.assertIn("fail a one-off startup after the agent starts", validator)
         self.assertIn('"$project_root/runtime/runs/$failed_run_name"', validator)
 
