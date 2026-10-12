@@ -362,7 +362,7 @@ Mounts apply to the components named in `targets`. When `targets` is omitted, th
 
 `bind`, `readonly`, and `copy` require `hostPath`. `bind` shares a live host directory. Writes affect the host source unless the mount is read-only. `readonly` prevents container writes to the host source.
 
-Cladding does not mount the host workspace by default. Add a host-backed mount when a workflow needs host files. For example, `{ "mount": "/home/user/workspace", "hostPath": "..", "targets": ["agent"] }` exposes the project workspace to the agent. Cladding maps `exec` and `run` working directories through configured host-backed mounts that contain the invocation directory. If no such mount applies, commands start in `/home/user`.
+Cladding does not mount the host workspace by default. Add a host-backed mount when a workflow needs host files. For example, `{ "mount": "/workspace", "hostPath": "..", "targets": ["agent"] }` exposes the project workspace at `/workspace` in the agent. You can choose any absolute container path for a configured mount. Cladding maps `exec` and `run` working directories through configured host-backed mounts that contain the invocation directory. If no such mount applies, commands start in `/home/user`.
 
 `copy` snapshots the host directory once into a Cladding-managed disposable volume. The snapshot includes dotfiles and preserves symlinks and permission bits. Cladding seeds the volume as the user selected by Podman's `keep-id` mapping, so workloads can access private files under rootless Podman, including on Podman machine. Containers can change the snapshot without changing the host source. When one `copy` declaration targets multiple containers, they mount the same volume and see each other's writes. Later changes to the host source do not appear in the running runtime. Cladding removes the volume on `down` or after `run` completes. Seeding the snapshot takes time and uses disk space proportional to the source tree.
 
@@ -372,7 +372,7 @@ Cladding no longer supports `overlay`. Podman's normal `:O` mount gives each con
 
 `volume` keeps normal named-volume persistence semantics. Cladding does not remove these user-managed volumes on `down` or after `run`.
 
-For `bind`, `readonly`, and `copy` mounts whose host source contains the private `.cladding` directory, Cladding adds a generated empty mask at the matching container path. This protects `.cladding` even when the mount uses a destination other than `/home/user/workspace`. A `readonly` or `copy` mount cannot use a path inside `.cladding` as its host source. A bind cannot use the `.cladding` directory itself as its source.
+For `bind`, `readonly`, and `copy` mounts whose host source contains the private `.cladding` directory, Cladding adds a generated empty mask at the matching container path. This protects `.cladding` at any configured container path. A `readonly` or `copy` mount cannot use a path inside `.cladding` as its host source. A bind cannot use the `.cladding` directory itself as its source.
 
 Example:
 
@@ -386,9 +386,9 @@ Example:
     "image": "cladding-sandbox:local"
   },
   "mounts": [
-    { "mount": "/home/user/workspace/.cache/npm", "volume": "npm-cache" },
+    { "mount": "/workspace/.cache/npm", "volume": "npm-cache" },
     { "mount": "/opt/data", "hostPath": "../data", "type": "readonly" },
-    { "mount": "/home/user/workspace", "hostPath": "..", "type": "copy", "targets": ["agent", "nw-sandbox"] },
+    { "mount": "/workspace", "hostPath": "..", "type": "copy", "targets": ["agent", "nw-sandbox"] },
     { "mount": "/tmp/cache", "type": "tmpfs", "size": "1GiB", "targets": ["agent", "nw-sandbox"] },
     { "mount": "/tmp/isolated" },
     { "mount": "/opt/nw-sandbox-only", "hostPath": "../nw-sandbox-data", "targets": ["nw-sandbox"] },

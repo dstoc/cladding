@@ -182,7 +182,7 @@ project_root="$temp_root/workspace/.cladding"
 current_phase="configure Baffle fixture"
 jq '.agent.image = "docker.io/library/debian:trixie-slim"
    | .nw_sandbox.image = "docker.io/library/debian:trixie-slim"
-   | .mounts = [{"mount":"/home/user/workspace", "hostPath":"..", "targets":["agent"]}]' \
+   | .mounts = [{"mount":"/workspace", "hostPath":"..", "targets":["agent"]}]' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 for session_file in agent.toml nw-sandbox.toml; do
@@ -552,7 +552,7 @@ mkdir -m 0700 "$temp_root/run-tmp"
   if TMPDIR="$temp_root/run-tmp" "$cladding_bin" --cladding-dir "$project_root" run -v \
     --secret "$run_secret_name=env:CLADDING_RUN_SECRET_PROBE" -- \
     /bin/sh -ec 'test -z "${CLADDING_RUN_SECRET_PROBE+x}"
-      while [ ! -f /home/user/workspace/.run-secret-mount-finish ]; do sleep 1; done'; then
+      while [ ! -f /workspace/.run-secret-mount-finish ]; do sleep 1; done'; then
     run_status=0
   else
     run_status=$?
