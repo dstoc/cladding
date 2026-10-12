@@ -489,9 +489,27 @@ fn cleanup_ephemeral_runtime(
     if verbose {
         eprintln!("cleaning up one-off instance: {instance_name}");
     }
-    lifecycle::cmd_down_ephemeral(context, verbose)?;
-    remove_private_runtime_root(runtime_root)?;
-    Ok(())
+    let (runtime_cleanup, runtime_root_safe_to_remove) =
+        lifecycle::cmd_down_ephemeral(context, verbose);
+    let local_cleanup = if runtime_root_safe_to_remove {
+        remove_private_runtime_root(runtime_root)
+            .with_context(|| {
+                format!(
+                    "failed to remove private runtime root {}",
+                    runtime_root.display()
+                )
+            })
+            .map_err(Error::from)
+    } else {
+        Ok(())
+    };
+    match (runtime_cleanup, local_cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(err), Ok(())) | (Ok(()), Err(err)) => Err(err),
+        (Err(runtime_err), Err(local_err)) => Err(Error::message(format!(
+            "{runtime_err}\nprivate runtime cleanup also failed: {local_err}"
+        ))),
+    }
 }
 
 fn remove_private_runtime_root(runtime_root: &Path) -> anyhow::Result<()> {

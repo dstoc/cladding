@@ -13,6 +13,7 @@ pub use discovery::{
     runsc_available,
 };
 pub use runtime::{
-    RuntimeInventory, RuntimeResource, container_rm, container_run, initialize_baffle_ca,
-    runtime_cleanup, runtime_cleanup_owned, runtime_create, runtime_inventory,
+    RuntimeCleanupReport, RuntimeInventory, RuntimeResource, container_rm, container_run,
+    initialize_baffle_ca, runtime_cleanup, runtime_cleanup_normal, runtime_cleanup_owned,
+    runtime_cleanup_owned_report, runtime_create, runtime_inventory,
 };
