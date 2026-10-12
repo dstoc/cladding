@@ -94,22 +94,17 @@ fn exec_runs_directly_in_the_selected_container_with_target_cwd() {
     let fixture = Fixture::new();
 
     for (target_args, container_name, workdir, command) in [
-        (
-            &[][..],
-            "demo-agent-instance",
-            "/home/user/workspace",
-            "agent",
-        ),
+        (&[][..], "demo-agent-instance", "/home/user", "agent"),
         (
             &["--target", "agent"][..],
             "demo-agent-instance",
-            "/home/user/workspace",
+            "/home/user",
             "explicit-agent",
         ),
         (
             &["--target", "nw-sandbox"][..],
             "demo-nw-sandbox-instance",
-            "/home/user/workspace",
+            "/home/user",
             "network-sandbox",
         ),
         (

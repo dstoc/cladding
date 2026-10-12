@@ -368,6 +368,7 @@ jq --arg image "$client_image" --arg runtime "$runtime" \
    | .fs_sandbox.enabled = true
    | .fs_sandbox.image = $image
    | .use_runsc = ($runtime == "runsc")
+   | .mounts = [{"mount":"/home/user/workspace", "hostPath":"..", "targets":["agent"]}]
    | .proxy.agent.session_config = $agent_session_config
    | .proxy.nw_sandbox.session_config = $nw_sandbox_session_config' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"

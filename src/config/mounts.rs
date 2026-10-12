@@ -222,6 +222,9 @@ pub(super) fn parse_mounts_v2(
         let host_path_is_private = host_path
             .as_deref()
             .is_some_and(|path| path_is_inside_private_config(config_dir, path));
+        let host_path_is_private_root = host_path
+            .as_deref()
+            .is_some_and(|path| path_is_private_config_root(config_dir, path));
         let mount_path_is_inside_workspace_mask =
             normalized_mount_path.starts_with("/home/user/workspace/.cladding");
         let host_path_contains_private_config = mount_type == MountType::Bind
@@ -229,8 +232,9 @@ pub(super) fn parse_mounts_v2(
             && host_path
                 .as_deref()
                 .is_some_and(|path| path_contains_private_config(config_dir, path));
-        if (host_path_is_private || host_path_contains_private_config)
-            && (mount_type != MountType::Bind || mount_path_is_inside_workspace_mask)
+        if (host_path_is_private && mount_type != MountType::Bind)
+            || host_path_is_private_root
+            || host_path_contains_private_config
         {
             eprintln!(
                 "error: cladding.json invalid field 'mounts[{index}].hostPath' (cannot mount files from the private .cladding directory with type '{}')",
@@ -250,19 +254,6 @@ pub(super) fn parse_mounts_v2(
             })?,
             None => false,
         };
-
-        if ignore
-            && normalized_mount_path == Path::new("/home/user/workspace/.cladding")
-            && targets
-                .iter()
-                .any(|target| matches!(target, MountTarget::Agent | MountTarget::NwSandbox))
-        {
-            eprintln!(
-                "error: cladding.json invalid field 'mounts[{index}].ignore' (the workspace .cladding mask cannot be removed)"
-            );
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        }
 
         if volume.is_some() && legacy_read_only == Some(true) {
             eprintln!(
@@ -441,15 +432,21 @@ fn parse_tmpfs_size(value: &str) -> Option<u64> {
 }
 
 fn path_is_inside_private_config(config_dir: &Path, candidate: &Path) -> bool {
-    let config_dir = fs::canonicalize(config_dir).unwrap_or_else(|_| normalize_path(config_dir));
-    let candidate = fs::canonicalize(candidate).unwrap_or_else(|_| normalize_path(candidate));
+    let config_dir = canonical_or_normalized(config_dir);
+    let candidate = canonical_or_normalized(candidate);
     candidate.starts_with(config_dir)
 }
 
+fn path_is_private_config_root(config_dir: &Path, candidate: &Path) -> bool {
+    canonical_or_normalized(config_dir) == canonical_or_normalized(candidate)
+}
+
 fn path_contains_private_config(config_dir: &Path, candidate: &Path) -> bool {
-    let config_dir = fs::canonicalize(config_dir).unwrap_or_else(|_| normalize_path(config_dir));
-    let candidate = fs::canonicalize(candidate).unwrap_or_else(|_| normalize_path(candidate));
-    config_dir.starts_with(candidate)
+    canonical_or_normalized(config_dir).starts_with(canonical_or_normalized(candidate))
+}
+
+fn canonical_or_normalized(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| normalize_path(path))
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -568,7 +565,6 @@ mod tests {
             serde_json::json!({ "mount": "/data", "type": "tmpfs", "readOnly": true }),
             serde_json::json!({ "mount": "/data", "hostPath": "../data", "type": "readonly", "readOnly": false }),
             serde_json::json!({ "mount": "/data", "hostPath": "../data", "mode": "overlay" }),
-            serde_json::json!({ "mount": "/home/user/workspace/.cladding", "ignore": true }),
         ] {
             assert!(
                 parse_mounts(&temp, &serde_json::json!({ "mounts": [mount] }), &config).is_err()
@@ -591,35 +587,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_mounts_rejects_private_cladding_files_for_implicit_and_explicit_binds() {
+    fn parse_mounts_rejects_direct_private_config_mounts_at_any_destination() {
         let temp = create_temp_dir("private-bind-mount");
         for mount in [
             serde_json::json!({
-                "mount": "/home/user/workspace/.cladding",
+                "mount": "/private",
                 "hostPath": "."
             }),
             serde_json::json!({
-                "mount": "/home/user/workspace/.cladding",
+                "mount": "/private",
                 "hostPath": ".",
                 "type": "bind"
             }),
             serde_json::json!({
-                "mount": "/home/user/workspace/.cladding",
-                "hostPath": ".."
-            }),
-            serde_json::json!({
-                "mount": "/home/user/workspace/.cladding",
-                "hostPath": "..",
-                "type": "bind"
-            }),
-            serde_json::json!({
-                "mount": "/home/user/workspace/../workspace/.cladding",
-                "hostPath": "."
-            }),
-            serde_json::json!({
-                "mount": "/home/user/workspace/../workspace/.cladding",
+                "mount": "/private",
                 "hostPath": ".",
-                "type": "bind"
+                "type": "readonly"
             }),
         ] {
             assert!(
@@ -631,6 +614,24 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn parse_mounts_allows_parent_sources_for_runtime_masking_at_arbitrary_destinations() {
+        let temp = create_temp_dir("private-parent-bind-mount");
+        let parsed = serde_json::json!({
+            "mounts": [{
+                "mount": "/host-workspace",
+                "hostPath": "..",
+                "type": "bind"
+            }]
+        });
+
+        let mounts = parse_mounts(&temp, &parsed, &execution_config(true, false))
+            .expect("parent source is protected by a generated runtime mask");
+
+        assert_eq!(mounts[0].mount_path, "/host-workspace");
+        assert_eq!(mounts[0].host_path, Some(temp.join("..")));
     }
 
     #[test]

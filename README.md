@@ -122,7 +122,7 @@ project.
   cladding run --secret github-token=file:/run/user/1000/token -- codex
   ```
 
-  `run` creates a UUID-named instance and stores its private runtime directory under the selected project's `.cladding/runtime/runs/<instance>`. The `.cladding` workspace mask keeps these files out of the agent workspace; Cladding exposes only the runtime paths needed by each container. It uses the selected project's `.cladding/config/`, `tools/`, `credentials/`, and `home/` directly, including selected Baffle session files and the persistent project CA. It creates only runtime files and sockets in the private runtime directory, then removes that directory when the command ends. Run requires a project initialized with `cladding init` and prepared with `cladding build`; it validates the project CA and does not create or rotate it. The command runs with the same agent working-directory and terminal behavior as `exec`. Use repeatable `--env KEY[=VALUE]` options before `--` to set environment variables for the command, as with `cladding exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
+  `run` creates a UUID-named instance and stores its private runtime directory under the selected project's `.cladding/runtime/runs/<instance>`. It exposes only the runtime paths needed by each container. When a configured host mount includes the project `.cladding` directory, Cladding adds an empty mask at the corresponding container path. The runtime uses the selected project's `.cladding/config/`, `tools/`, `credentials/`, and `home/` directly, including selected Baffle session files and the persistent project CA. It creates only runtime files and sockets in the private runtime directory, then removes that directory when the command ends. Run requires a project initialized with `cladding init` and prepared with `cladding build`; it validates the project CA and does not create or rotate it. The command runs with the same agent working-directory and terminal behavior as `exec`. Use repeatable `--env KEY[=VALUE]` options before `--` to set environment variables for the command, as with `cladding exec`. Without `--config -`, it forwards stdin to the command. With `--config -`, stdin is reserved for the JSON configuration. The agent command cannot read stdin or use interactive input in that mode.
 
   Use repeatable `--secret NAME=env:VARIABLE` or `--secret NAME=file:PATH` options before `--` to provide Baffle secret values for one run. The symbolic name must match the name in the session rule and daemon allowlist. Cladding writes each value to a private `0600` file in the run directory and mounts that file read-only into the proxy. It does not change the project secret file or pass the value to the user command. The override file is removed with the runtime. Literal secret values are not accepted as `--secret` arguments. `--secret` applies only to `run`; persistent runtimes and `exec` continue to use project credentials.
 
@@ -154,7 +154,7 @@ project.
 
 ### Selecting the Cladding directory and configuration
 
-Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without this option, Cladding searches the invocation directory and its parents as before. This option selects Cladding runtime and configuration files. The agent workspace uses the invocation project: Cladding mounts the parent of a `.cladding` directory discovered from the invocation directory. If discovery finds none, Cladding uses the Git checkout root when available, or the invocation directory otherwise. The agent's working directory follows the invocation directory within that workspace.
+Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without this option, Cladding searches the invocation directory and its parents as before. This option selects Cladding runtime and configuration files. Cladding identifies the invocation project from its `.cladding` directory, Git checkout root, or invocation directory. It does not mount that host directory by default. `exec` and `run` use the invocation directory only when a configured host-backed mount contains it; otherwise, they start in `/home/user`.
 
 Use `--config FILE` to load a specific JSON configuration file. Use `--config -` to read the JSON configuration from stdin. When omitted, Cladding loads `cladding.json` from the selected or discovered `.cladding` directory.
 
@@ -362,6 +362,8 @@ Mounts apply to the components named in `targets`. When `targets` is omitted, th
 
 `bind`, `readonly`, and `copy` require `hostPath`. `bind` shares a live host directory. Writes affect the host source unless the mount is read-only. `readonly` prevents container writes to the host source.
 
+Cladding does not mount the host workspace by default. Add a host-backed mount when a workflow needs host files. For example, `{ "mount": "/home/user/workspace", "hostPath": "..", "targets": ["agent"] }` exposes the project workspace to the agent. Cladding maps `exec` and `run` working directories through configured host-backed mounts that contain the invocation directory. If no such mount applies, commands start in `/home/user`.
+
 `copy` snapshots the host directory once into a Cladding-managed disposable volume. The snapshot includes dotfiles and preserves symlinks and permission bits. Cladding seeds the volume as the user selected by Podman's `keep-id` mapping, so workloads can access private files under rootless Podman, including on Podman machine. Containers can change the snapshot without changing the host source. When one `copy` declaration targets multiple containers, they mount the same volume and see each other's writes. Later changes to the host source do not appear in the running runtime. Cladding removes the volume on `down` or after `run` completes. Seeding the snapshot takes time and uses disk space proportional to the source tree.
 
 Cladding no longer supports `overlay`. Podman's normal `:O` mount gives each container a separate writable upper layer, so it cannot provide one shared filesystem to multiple targets. Cladding reports an error for existing `overlay` declarations and directs users to `copy`, which provides a host snapshot with shared writable state.
@@ -370,7 +372,7 @@ Cladding no longer supports `overlay`. Podman's normal `:O` mount gives each con
 
 `volume` keeps normal named-volume persistence semantics. Cladding does not remove these user-managed volumes on `down` or after `run`.
 
-Cladding keeps the `.cladding` mask beneath workspace copy and read-only mounts whose host source contains the private `.cladding` directory. A `readonly` or `copy` mount cannot use a path inside `.cladding` as its host source.
+For `bind`, `readonly`, and `copy` mounts whose host source contains the private `.cladding` directory, Cladding adds a generated empty mask at the matching container path. This protects `.cladding` even when the mount uses a destination other than `/home/user/workspace`. A `readonly` or `copy` mount cannot use a path inside `.cladding` as its host source. A bind cannot use the `.cladding` directory itself as its source.
 
 Example:
 
@@ -402,16 +404,14 @@ Default mounts for the agent and `nw-sandbox` (as if expressed via `mounts`):
   "mounts": [
     { "mount": "/opt/config", "hostPath": "config", "type": "readonly" },
     { "mount": "/opt/tools", "hostPath": "tools", "type": "readonly" },
-    { "mount": "/home/user", "hostPath": "home" },
-    { "mount": "/home/user/workspace", "hostPath": ".." },
-    { "mount": "/home/user/workspace/.cladding" }
+    { "mount": "/home/user", "hostPath": "home" }
   ]
 }
 ```
 
-The `fs-sandbox` default mount set is narrower: `/opt/config` and `/opt/tools` are mounted read-only, plus an internal run socket under `/run/cladding/run/fs-sandbox`. It does not receive `/home/user`, `/home/user/workspace`, or the `.cladding` workspace mask unless custom mounts explicitly target `fs-sandbox`.
+These default mounts do not expose the host workspace. The `fs-sandbox` default mount set is narrower: `/opt/config` and `/opt/tools` are mounted read-only, plus an internal run socket under `/run/cladding/run/fs-sandbox`. It does not receive `/home/user` or the host workspace unless custom mounts explicitly target `fs-sandbox`.
 
-Default mounts may be overridden by adding an entry with the same `mount` value, or removed by adding an entry with the same `mount` and `"ignore": true`. The `.cladding` workspace mask cannot be removed with `ignore` for the agent or `nw-sandbox`.
+Default mounts may be overridden by adding an entry with the same `mount` value, or removed by adding an entry with the same `mount` and `"ignore": true`. Cladding applies generated private-state masks after configured mounts, so `ignore` cannot disable a mask.
 
 ## Architecture + Network Controls
 

@@ -234,7 +234,13 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
     def test_shared_topology_validator_exercises_one_off_run_sources_and_cleanup(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
-        self.assertIn("run -v -- /bin/echo ok", validator)
+        self.assertIn("verify the default runtime does not mount the host workspace", validator)
+        self.assertIn("configure and verify an explicit host workspace mount", validator)
+        self.assertIn('test "$PWD" = /host-project', validator)
+        self.assertIn('test -f /host-project/.host-workspace-marker', validator)
+        self.assertIn('test ! -e /host-project/.cladding/config/proxy/daemon.toml', validator)
+        self.assertIn('"$project_root/..:/host-project"', validator)
+        self.assertIn('grep -F ":/home/user/workspace" "$run_podman_log"', validator)
         self.assertIn('run_root="$project_root/runtime/runs/$run_name"', validator)
         self.assertIn('"$run_root/runtime/scripts/proxy_startup.sh"', validator)
         self.assertIn('"$run_root/runtime/empty-mask"', validator)

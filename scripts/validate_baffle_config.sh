@@ -180,7 +180,9 @@ current_phase="initialize Baffle fixture"
 )
 project_root="$temp_root/workspace/.cladding"
 current_phase="configure Baffle fixture"
-jq '.agent.image = "docker.io/library/debian:trixie-slim" | .nw_sandbox.image = "docker.io/library/debian:trixie-slim"' \
+jq '.agent.image = "docker.io/library/debian:trixie-slim"
+   | .nw_sandbox.image = "docker.io/library/debian:trixie-slim"
+   | .mounts = [{"mount":"/home/user/workspace", "hostPath":"..", "targets":["agent"]}]' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 for session_file in agent.toml nw-sandbox.toml; do
