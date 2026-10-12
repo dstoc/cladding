@@ -341,10 +341,12 @@ for source in \
     exit 1
   fi
 done
-if grep -E "/(tmp|var/tmp|dev/shm)/[^ ,:]*$run_name" "$run_podman_log" >/dev/null; then
-  echo "cladding run passed a host temporary path to Podman for $run_name" >&2
-  exit 1
-fi
+for temp_run_root in "/tmp/$run_name" "/var/tmp/$run_name" "/dev/shm/$run_name"; do
+  if grep -F "$temp_run_root" "$run_podman_log" >/dev/null; then
+    echo "cladding run passed a host temporary path to Podman: $temp_run_root" >&2
+    exit 1
+  fi
+done
 if [ -e "$run_root" ]; then
   echo "cladding run left its private runtime root behind: $run_root" >&2
   exit 1
