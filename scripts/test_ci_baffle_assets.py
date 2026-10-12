@@ -226,6 +226,33 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("scripts/validate_baffle_runtime.sh", machine)
         self.assertNotIn("scripts/validate_managed_mounts.sh", machine)
 
+    def test_shared_topology_validator_exercises_one_off_run_sources_and_cleanup(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        self.assertIn("run -v -- /bin/echo ok", validator)
+        self.assertIn('run_root="$project_root/runtime/runs/$run_name"', validator)
+        self.assertIn('"$run_root/runtime/scripts/proxy_startup.sh"', validator)
+        self.assertIn('"$run_root/runtime/empty-mask"', validator)
+        self.assertIn('"$run_root/runtime/sockets/proxy"', validator)
+        self.assertIn(
+            'for temp_run_root in "/tmp/$run_name" "/var/tmp/$run_name" "/dev/shm/$run_name"; do',
+            validator,
+        )
+        self.assertIn('grep -F "$temp_run_root" "$run_podman_log"', validator)
+        self.assertIn("fail a one-off startup after the agent starts", validator)
+        self.assertIn('"$project_root/runtime/runs/$failed_run_name"', validator)
+
+    def test_baffle_runtime_uses_project_run_roots_even_with_tmpdir_override(self):
+        validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
+        self.assertEqual(validator.count('find "$project_root/runtime/runs"'), 2)
+        self.assertIn('export TMPDIR="$temp_root/run-tmp"', validator)
+        self.assertIn('stat_mode "$project_root/runtime/runs"', validator)
+        self.assertNotIn('find "$temp_root/run-tmp"', validator)
+
+        config_validator = BAFFLE_CONFIG_VALIDATOR.read_text()
+        self.assertIn('find "$project_root/runtime/runs"', config_validator)
+        self.assertIn('TMPDIR="$temp_root/run-tmp"', config_validator)
+        self.assertIn('require_mode "$project_root/runtime/runs" 700', config_validator)
+
     def test_linux_machine_job_uses_the_pinned_rootless_remote_engine(self):
         machine = job_block("baffle-podman-machine")
         self.assertIn("runs-on: ubuntu-24.04", machine)

@@ -1230,7 +1230,7 @@ run_pid=$!
 run_root=
 attempt=0
 while [ "$attempt" -lt 60 ]; do
-  run_root=$(find "$temp_root/run-tmp" -mindepth 2 -maxdepth 4 \
+  run_root=$(find "$project_root/runtime/runs" -mindepth 4 -maxdepth 4 \
     -path '*/runtime/scripts/proxy_startup.sh' -print -quit \
     | sed 's|/runtime/scripts/proxy_startup.sh$||')
   if [ -n "$run_root" ]; then
@@ -1247,8 +1247,11 @@ if [ -z "$run_root" ]; then
   echo "one-off runtime did not create its private startup script" >&2
   exit 1
 fi
+run_name=${run_root##*/}
 test -d "$run_root/runtime/empty-mask"
 test -d "$run_root/runtime/sockets/proxy"
+test "$(stat_mode "$project_root/runtime/runs")" = 700
+test "$(stat_mode "$run_root")" = 700
 test "$(stat_mode "$run_root/runtime/secrets")" = 700
 test "$(stat_mode "$run_root/runtime/secrets/$run_secret_name")" = 600
 for project_state in config tools credentials home; do
@@ -1257,7 +1260,6 @@ for project_state in config tools credentials home; do
     exit 1
   fi
 done
-run_name=$(sed -n 's/^starting one-off instance: //p' "$temp_root/run.log" | head -n 1)
 if [ -z "$run_name" ]; then
   echo "one-off command did not report its runtime name" >&2
   exit 1
@@ -1438,7 +1440,7 @@ run_pid=$!
 run_root=
 attempt=0
 while [ "$attempt" -lt 60 ]; do
-  run_root=$(find "$temp_root/run-tmp" -mindepth 2 -maxdepth 4 \
+  run_root=$(find "$project_root/runtime/runs" -mindepth 4 -maxdepth 4 \
     -path '*/runtime/scripts/proxy_startup.sh' -print -quit \
     | sed 's|/runtime/scripts/proxy_startup.sh$||')
   if [ -n "$run_root" ]; then
@@ -1455,7 +1457,7 @@ if [ -z "$run_root" ]; then
   echo "one-off failure-trap runtime did not create its private startup script" >&2
   exit 1
 fi
-run_name=$(sed -n 's/^starting one-off instance: //p' "$temp_root/failure-run.log" | head -n 1)
+run_name=${run_root##*/}
 if [ -z "$run_name" ]; then
   echo "one-off failure-trap runtime did not report its runtime name" >&2
   exit 1

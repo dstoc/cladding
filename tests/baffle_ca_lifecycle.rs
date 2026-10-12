@@ -753,7 +753,10 @@ exit 0
         runtime_sockets,
         runtime_root.join("runtime/sockets/proxy").to_str().unwrap()
     );
-    assert!(!runtime_root.starts_with(&project_root));
+    assert_eq!(
+        runtime_root.parent().unwrap(),
+        project_root.join("runtime/runs")
+    );
     assert!(
         !runtime_root.exists(),
         "run should remove its private runtime root"

@@ -562,7 +562,7 @@ run_pid=$!
 run_root=
 attempt=0
 while [ "$attempt" -lt 60 ]; do
-  run_root=$(find "$temp_root/run-tmp" -mindepth 2 -maxdepth 4 \
+  run_root=$(find "$project_root/runtime/runs" -mindepth 4 -maxdepth 4 \
     -path '*/runtime/scripts/proxy_startup.sh' -print -quit \
     | sed 's|/runtime/scripts/proxy_startup.sh$||')
   if [ -n "$run_root" ]; then
@@ -580,8 +580,7 @@ if [ -z "$run_root" ]; then
   echo "one-off secret mount runtime did not create its private runtime root" >&2
   exit 1
 fi
-run_name=$(sed -n 's/^starting one-off instance: //p' \
-  "$temp_root/run-secret-mount.log" | head -n 1)
+run_name=${run_root##*/}
 run_proxy="$run_name-proxy-instance"
 run_agent="$run_name-agent-instance"
 attempt=0
@@ -597,6 +596,8 @@ while ! podman container exists "$run_proxy" >/dev/null 2>&1 \
 done
 run_secret_directory="$run_root/runtime/secrets"
 run_secret_destination="/opt/credentials/baffle/secrets/$run_secret_name"
+require_mode "$project_root/runtime/runs" 700 "Run state directory mode mismatch"
+require_mode "$run_root" 700 "Run runtime root mode mismatch"
 require_mode "$run_secret_directory" 700 "Run secret directory mode mismatch"
 require_mode "$run_secret_directory/$run_secret_name" 600 "Run secret file mode mismatch"
 if ! podman inspect "$run_proxy" | jq -e \
