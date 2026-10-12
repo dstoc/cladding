@@ -369,7 +369,10 @@ run_status=0
     CLADDING_TOPOLOGY_REAL_PODMAN="$real_podman" \
     PATH="$run_podman_wrapper:$PATH" \
     "$cladding_bin" --cladding-dir "$project_root" run -v -- \
-      /bin/sh -ec 'test "$PWD" = /host-project; echo ok'
+      /bin/sh -ec 'test "$PWD" = /host-project
+                   test -f /host-project/.host-workspace-marker
+                   test ! -e /host-project/.cladding/config/proxy/daemon.toml
+                   echo ok'
 ) > "$run_log" 2>&1 || run_status=$?
 cat "$run_log"
 if [ "$run_status" -ne 0 ] || ! grep -Fx ok "$run_log" >/dev/null; then
@@ -397,11 +400,11 @@ for source in \
     exit 1
   fi
 done
-if ! grep -F "$workspace:/host-project" "$run_podman_log" >/dev/null; then
+if ! grep -F "$project_root/..:/host-project" "$run_podman_log" >/dev/null; then
   echo "cladding run did not apply the configured host workspace mount" >&2
   exit 1
 fi
-if grep -F "$workspace:/home/user/workspace" "$run_podman_log" >/dev/null; then
+if grep -F ":/home/user/workspace" "$run_podman_log" >/dev/null; then
   echo "cladding run added an implicit host workspace mount" >&2
   exit 1
 fi
