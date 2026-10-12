@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/dstoc/cladding/compare/v0.4.1...v0.4.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* place one-off runtime paths under project state ([#96](https://github.com/dstoc/cladding/issues/96)) ([854ce85](https://github.com/dstoc/cladding/commit/854ce85333640db9402c27343882d4bcce27c5cd))
+
 ## [0.4.1](https://github.com/dstoc/cladding/compare/v0.4.0...v0.4.1) (2026-10-11)
 
 
