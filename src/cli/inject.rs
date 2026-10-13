@@ -4,7 +4,7 @@ use super::exec::agent_runtime_names;
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
 use cladding::podman::{podman_container_exists, podman_required};
-use cladding_bridge::{HostTarget, run_host_session};
+use cladding_bridge::{BridgeError, HostTarget, run_host_session};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::process::ExitStatus;
@@ -165,9 +165,7 @@ async fn run_inject_bridge_async(
             }
             Ok(())
         }
-        SessionEnd::Transport(Err(error)) => Err(anyhow::Error::new(error)
-            .context("cladding inject bridge transport failed")
-            .into()),
+        SessionEnd::Transport(Err(error)) => Err(inject_transport_error(error)),
         SessionEnd::Transport(Ok(())) if forced => Err(Error::message(
             "podman exec did not exit after the bridge transport closed",
         )),
@@ -179,6 +177,15 @@ async fn run_inject_bridge_async(
             "inject bridge transport closed unexpectedly",
         )),
     }
+}
+
+fn inject_transport_error(error: BridgeError) -> Error {
+    let context = if matches!(&error, BridgeError::ListenerBindFailure) {
+        "cladding inject agent-side listener failed to bind"
+    } else {
+        "cladding inject bridge transport failed"
+    };
+    anyhow::Error::new(error).context(context).into()
 }
 
 async fn wait_for_inject_exec(child: &mut Child) -> Result<(ExitStatus, bool)> {
@@ -249,6 +256,21 @@ mod tests {
             }),
             HostTarget::tcp("db.internal", 5432)
         );
+    }
+
+    #[test]
+    fn inject_listener_bind_error_identifies_the_agent_side() {
+        let error = inject_transport_error(BridgeError::ListenerBindFailure);
+        assert_eq!(
+            error.to_string(),
+            "cladding inject agent-side listener failed to bind"
+        );
+    }
+
+    #[test]
+    fn other_inject_transport_errors_keep_the_generic_context() {
+        let error = inject_transport_error(BridgeError::StartupFailure);
+        assert_eq!(error.to_string(), "cladding inject bridge transport failed");
     }
 
     #[test]
