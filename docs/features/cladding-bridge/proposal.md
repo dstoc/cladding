@@ -1,22 +1,38 @@
-# Cladding Bridge: Multiplexed transport for `cladding inject`
+# Cladding Bridge: Multiplexed fixed-endpoint transport
 
 ## Summary
 
-Replace the current `cladding inject` host-shared Unix-domain-socket transport with a Cladding-owned multiplexed stream carried over a single `podman exec` stdin/stdout connection.
+Introduce a small Cladding-owned multiplexed transport for carrying connections between a container and a host-controlled fixed endpoint over one long-lived `podman exec` stdin/stdout stream.
 
-The change is intentionally narrow:
+The first implementation consumer remains `cladding inject`:
 
-- make `cladding inject` work cleanly with both local Podman and Podman Machine;
-- remove its dependence on host-shared Unix sockets;
+- replace its host-shared Unix-domain-socket transport;
 - remove its dependence on `socat`;
-- support multiple concurrent connections through one long-lived `podman exec`;
+- work identically with local Podman and Podman Machine;
+- support multiple concurrent connections over one long-lived exec transport;
 - preserve the existing user-facing `cladding inject` semantics.
 
-This project does **not** replace `socat` elsewhere in Cladding. In particular, the existing execution-container `127.0.0.1:3128 -> Baffle UDS` bridges remain unchanged.
+The transport should, however, be reusable by a second concrete consumer: a future migration of Baffle out of the Podman Machine and onto the physical host. That future migration needs the same container-to-host byte-stream transport, but with a host Unix-domain socket as the fixed destination rather than a host TCP endpoint.
 
-The bridge may later be reusable by `cladding expose`, but expose is not part of this proposal.
+This proposal therefore generalizes the bridge one level above `inject`:
+
+```text
+container-local fixed listener
+    ->
+multiplexed podman-exec transport
+    ->
+host Cladding
+    ->
+host-selected fixed endpoint
+```
+
+The host endpoint may be TCP or Unix-domain socket. The untrusted container side never selects or communicates the destination.
+
+Actual Baffle migration is explicitly outside this project and should be planned as a separate set of implementation tasks after the bridge has landed and been proven by `cladding inject`.
 
 ## Context
+
+### Current `cladding inject`
 
 Today `cladding inject` temporarily makes a host-reachable TCP endpoint available inside the agent container.
 
@@ -59,53 +75,84 @@ This is reasonable for local Podman, but the host-backed UDS becomes problematic
 
 The existing design also requires `socat` both on the host and inside the agent image, creates filesystem state for every injection, and requires process-pattern cleanup of the agent listener.
 
+### Future Baffle placement
+
+Baffle currently runs inside the same Podman environment as the execution containers, so Cladding can expose Baffle's Unix sockets through Podman-managed volumes and adapt them to local TCP with `socat`.
+
+A stronger isolation model is to move trusted Baffle outside the Podman Machine while keeping untrusted execution containers inside it. That removes Baffle's credentials and process from the VM, but also removes the shared Podman-volume transport.
+
+The desired future shape is approximately:
+
+```text
+agent / network sandbox
+       |
+       v
+127.0.0.1:3128
+       |
+       v
+cladding-bridge
+       |
+       | multiplexed podman exec
+       v
+host Cladding
+       |
+       v
+host Baffle UDS
+```
+
+This is structurally the same transport problem as `cladding inject`: multiple byte streams cross the Podman/VM boundary and terminate at one host-selected fixed destination.
+
+That gives the bridge a second concrete consumer and justifies making the core transport reusable now. It does **not** justify turning the bridge into a general tunnel or moving Baffle as part of this proposal.
+
 ## Goals
 
-The new design should:
+The bridge transport should:
 
 1. Work with both local Podman and Podman Machine using the same topology.
-2. Require no host-shared Unix socket.
-3. Require no `socat` for `cladding inject`.
-4. Support multiple simultaneous TCP connections during one inject command.
-5. Use one long-lived `podman exec` rather than one exec per connection.
-6. Keep the host endpoint fixed by the trusted host-side invocation.
-7. Preserve ordinary full-duplex TCP byte-stream behaviour.
-8. Shut down cleanly and predictably.
-9. Keep the implementation small and specific to this use case.
+2. Require no host-shared Unix socket or host bind mount for cross-boundary transport.
+3. Carry multiple simultaneous byte streams over one long-lived `podman exec` stdin/stdout connection.
+4. Keep the destination fixed and entirely selected by trusted host-side Cladding.
+5. Support host-side fixed destinations that are either TCP endpoints or Unix-domain sockets.
+6. Preserve ordinary full-duplex stream semantics, including half-close behaviour.
+7. Provide bounded buffering, bounded concurrency, deterministic startup, and bounded shutdown.
+8. Keep the agent-side helper small and unaware of host routing details.
+9. Let consumers own their own lifecycle and policy rather than embedding `inject` or Baffle semantics into the mux core.
+10. Use `cladding inject` as the first implementation consumer and validation path.
 
 ## Non-goals
 
 This project does not:
 
-- replace the agent or network-sandbox Baffle `socat` bridges;
-- replace Baffle data or control Unix sockets;
-- replace `mcp-run` / `run-remote` Unix sockets;
+- migrate Baffle out of the Podman Machine;
+- change Baffle process placement, credential storage, data sockets, or control sockets;
+- replace the current Baffle `socat` bridges yet;
 - change `cladding expose`;
-- provide generic TCP/Unix socket forwarding commands;
+- replace `mcp-run` / `run-remote` Unix sockets;
+- provide destinations selected by the agent or bridge helper;
+- provide SOCKS, HTTP CONNECT, arbitrary routing, port-forwarding configuration, or a generic tunnel protocol;
 - provide UDP forwarding;
 - provide TLS termination;
-- provide SOCKS or HTTP proxy functionality;
-- support arbitrary destinations chosen by the agent;
-- provide persistent/background inject tunnels;
-- introduce a general-purpose networking subsystem.
+- provide persistent VM-wide tunnels;
+- multiplex unrelated Cladding capabilities through one global transport;
+- require one always-running bridge daemon inside the Podman Machine.
 
-Future work may reuse the multiplexing implementation for `cladding expose`, but that should be justified separately.
+A later Baffle project may reuse the transport and host-UDS target support defined here. A later `cladding expose` project may reuse the mux core in the opposite direction. Neither is implemented here.
 
 ## Proposed architecture
 
-Introduce a small embedded Linux helper, tentatively named `cladding-bridge`.
+Introduce a small embedded Linux helper, tentatively named `cladding-bridge`, plus reusable host-side/core Rust code.
 
-The host-side Cladding process starts it inside the running agent with one interactive `podman exec`:
+For `cladding inject`, host Cladding starts the helper inside the already-running agent with one interactive `podman exec`:
 
 ```text
 podman exec -i <agent-container> \
-    /opt/tools/bin/cladding-bridge inject \
-    --listen 127.0.0.1:<container-port>
+    /opt/tools/bin/cladding-bridge listen \
+    --tcp 127.0.0.1:<container-port>
 ```
 
 stdin/stdout of that exec become a multiplexed binary transport between host Cladding and `cladding-bridge` inside the agent.
 
-The resulting data path is:
+The resulting inject data path is:
 
 ```text
 agent application A --\
@@ -119,20 +166,22 @@ agent application C --/              |
                               podman exec I/O
                                      |
                                      v
-                               host cladding
+                               host Cladding
                                      |
                   +------------------+------------------+
                   |                  |                  |
                   v                  v                  v
-          <host endpoint>    <host endpoint>    <host endpoint>
+          fixed host TCP     fixed host TCP     fixed host TCP
           connection A       connection B       connection C
 ```
 
-Every connection accepted by the agent-side listener creates a new logical stream. For each logical stream, host Cladding opens a fresh TCP connection to the one host endpoint selected by the user.
+Every connection accepted by the container-side listener creates a new logical stream. For each logical stream, trusted host Cladding opens a fresh connection to the one fixed endpoint configured for that bridge session.
 
-## Capability boundary
+The future Baffle consumer would use the same shape, but host Cladding would connect each stream to a fixed host-side Unix socket instead of TCP.
 
-The agent must **not** be able to choose the destination of an injected connection.
+## Fixed-endpoint capability boundary
+
+The bridge must **not** allow the untrusted side to choose a destination.
 
 For:
 
@@ -146,49 +195,132 @@ the capability granted to the agent is:
 connect repeatedly to exactly db.internal:5432
 ```
 
-The agent-side bridge therefore only communicates new streams, stream bytes, and stream close/reset state. It must never send arbitrary destination requests such as `CONNECT 10.0.0.5:22`.
+Similarly, a future Baffle bridge session might grant only:
 
-The destination belongs exclusively to the trusted host-side Cladding process. This keeps `cladding inject` a narrow endpoint capability rather than turning it into a general tunnel into the host network.
+```text
+connect repeatedly to exactly /run/cladding/baffle/agent/proxy.sock
+```
+
+The destination is not protocol data. It is configuration held by trusted host-side Cladding when the bridge session is created.
+
+The agent-side helper communicates only:
+
+- session startup/version state;
+- new logical streams;
+- stream bytes;
+- stream EOF/half-close/reset state.
+
+It must never send destination requests such as:
+
+```text
+CONNECT 10.0.0.5:22
+OPEN /some/arbitrary/socket
+```
+
+This keeps each bridge session a narrow capability to one preselected endpoint rather than turning it into a general tunnel into the host or host network.
+
+## Host target abstraction
+
+The reusable host side should support exactly the target types justified by known consumers:
+
+```text
+TCP host:port
+Unix-domain socket path
+```
+
+Conceptually:
+
+```rust
+HostTarget::Tcp(...)
+HostTarget::Unix(...)
+```
+
+The target object belongs to trusted host-side code and is never serialized into the mux protocol.
+
+`cladding inject` uses only `HostTarget::Tcp` in this project.
+
+Unix target support should be exercised by focused unit tests so that the bridge core is genuinely reusable, but no Baffle runtime code should be changed here.
+
+Do not generalize this into arbitrary target descriptors, target IDs supplied by the remote peer, dynamic routing tables, or a generic forwarding configuration language.
+
+## Session model
+
+One bridge session represents one fixed local listener and one fixed host destination.
+
+```text
+one container listener
+        |
+        v
+one cladding-bridge process
+        |
+        v
+one mux session
+        |
+        v
+one host-side fixed target
+```
+
+Multiple accepted connections become multiple logical streams within that session.
+
+This proposal deliberately does not introduce one persistent VM-wide mux carrying `inject`, Baffle, `expose`, and other future capabilities. Separate exec-backed sessions preserve simple lifecycle and capability boundaries:
+
+- the container is explicit;
+- the local listener is explicit;
+- the host target is explicit;
+- closing the exec transport revokes the whole session.
+
+If the number or cost of exec transports later becomes a demonstrated problem, a VM-level transport such as vsock or a persistent mux can be evaluated separately.
 
 ## Multiplexing
 
 Use an established Rust stream-multiplexing implementation rather than defining a custom framing protocol. Yamux is the preferred starting point unless implementation investigation identifies a materially better fit.
 
-One `cladding inject` invocation corresponds to one multiplexing session. The agent side opens logical streams and the host side accepts them. No routing metadata is required because all streams have the same fixed destination.
+The mux library should be reusable independently of `cladding inject` CLI concepts.
+
+No routing metadata is required in logical streams because every stream in a session has the same fixed destination.
 
 ## Transport establishment
 
-Host Cladding should:
+A consumer of the bridge transport should:
 
-1. Validate that the project and agent container are running.
-2. Determine the requested agent listener port and fixed host destination.
-3. Start one interactive `podman exec -i` running `cladding-bridge`.
-4. Wait for an explicit bridge readiness indication.
-5. Enter the mux session.
-6. For each incoming logical stream, connect to the configured host endpoint and relay bytes bidirectionally.
-7. Remain in the foreground until interrupted or either side fails.
+1. Select the execution container.
+2. Select the container-local listener.
+3. Select the fixed host destination.
+4. Start one interactive `podman exec -i` running `cladding-bridge`.
+5. Wait for an explicit bridge readiness indication.
+6. Enter the mux session.
+7. For each incoming logical stream, connect to the already-selected host target and relay bytes bidirectionally.
+8. Tie session shutdown to the consumer's lifecycle.
 
-The helper should not bind the agent listener until its configuration has been validated. The host command should not report inject as ready until the remote listener has successfully bound.
+For `cladding inject`, the host command performs these steps directly and remains in the foreground.
+
+The helper should not bind its listener until its configuration has been validated. The consumer should not report ready until the remote listener has successfully bound.
 
 This removes timing sleeps and gives deterministic errors for cases such as:
 
 - port already in use;
 - helper missing;
 - incompatible helper version;
-- agent container disappearing;
+- execution container disappearing;
 - `podman exec` failure.
 
 ## Protocol startup
 
-Before multiplexing begins, use a minimal version/readiness handshake. The exact encoding is an implementation detail, but it should provide at least protocol version and ready/startup-failure state.
+Before multiplexing begins, use a minimal version/readiness handshake. The exact encoding is an implementation detail, but it should provide at least:
+
+- protocol version;
+- bridge ready;
+- listener bind/startup failure.
 
 Once the mux begins, stdout becomes protocol data and must never contain logging or diagnostic text. Diagnostics from `cladding-bridge` must go to stderr.
 
 A protocol version mismatch should fail closed with a clear host-side error.
 
+The handshake must not introduce target negotiation. Host destination type and address/path remain entirely host-local configuration.
+
 ## Stream semantics
 
-Each logical stream represents one ordinary TCP connection.
+Each logical stream represents one ordinary connected byte stream.
 
 Required behaviour:
 
@@ -196,16 +328,16 @@ Required behaviour:
 - independent concurrent streams;
 - bounded buffering and backpressure;
 - no global blocking when one connection is slow;
-- propagate EOF and half-close correctly;
+- propagate EOF and half-close correctly where supported by the endpoint type;
 - one failed destination connection affects only that logical stream;
-- transport failure terminates the entire inject command;
+- transport failure terminates the entire bridge session;
 - idle connections may remain open indefinitely.
 
-When one side reaches EOF, the corresponding write side of the opposite socket should be shut down while allowing the reverse direction to continue until it also completes.
+When one side reaches EOF, the corresponding write side of the opposite stream/socket should be shut down while allowing the reverse direction to continue until it also completes.
 
 The implementation should place a reasonable upper bound on concurrent logical streams to prevent accidental unbounded host file-descriptor consumption. The exact default may be chosen during implementation; it should be comfortably above normal coding-agent workloads.
 
-## Host endpoint semantics
+## `cladding inject` integration
 
 Existing CLI behaviour should be preserved.
 
@@ -221,9 +353,7 @@ cladding inject db.internal:5432 15432
 
 continues to mean host `db.internal:5432` exposed as agent `127.0.0.1:15432`.
 
-Importantly, with Podman Machine, `localhost` continues to mean the physical host running `cladding`, not the Podman Machine VM. This is one of the principal reasons to terminate the injected connection in the host Cladding process.
-
-## Lifecycle
+With Podman Machine, host `localhost` must continue to mean the physical host process running `cladding`, not the Podman Machine VM. This is one of the principal reasons to terminate the host target connection in the physical-host Cladding process.
 
 `cladding inject` remains a blocking foreground command.
 
@@ -258,7 +388,7 @@ There should be no `pkill -f` cleanup.
 
 The bridge process exists only as the child of the interactive `podman exec`, so losing the transport should naturally terminate it. Host-side shutdown should still have bounded waits and a forced termination fallback for abnormal cases.
 
-## Runtime topology changes
+## `cladding inject` runtime topology changes
 
 The current inject-specific host socket topology can be removed:
 
@@ -279,7 +409,7 @@ inject socket-directory cleanup
 agent listener pkill cleanup
 ```
 
-This leaves Cladding's inter-container Unix sockets entirely managed inside Podman volumes rather than requiring a special host-backed socket path for inject.
+This leaves Cladding's normal inter-container Unix sockets managed inside Podman volumes rather than requiring a special host-backed socket path for inject.
 
 ## Helper packaging
 
@@ -292,15 +422,54 @@ x86_64-unknown-linux-gnu
 aarch64-unknown-linux-gnu
 ```
 
-It should be materialized into `/opt/tools/bin/cladding-bridge` and therefore become available in the agent through Cladding's existing `/opt/tools` mount. The helper should not need to exist in the custom agent image itself.
+It should be materialized into `/opt/tools/bin/cladding-bridge` and therefore become available in execution containers through Cladding's existing `/opt/tools` mount. The helper should not need to exist in custom agent images themselves.
 
 The CI embedded-tools artifact should contain it alongside the existing helper binaries.
 
+The helper naming and CLI should be transport-oriented rather than inject-specific so later consumers can reuse it without pretending to invoke `cladding inject` internals.
+
+## Relationship to Baffle
+
+Baffle is now a concrete future consumer of this transport, not merely hypothetical generalization.
+
+A later Baffle migration can use the reusable bridge roughly as:
+
+```text
+execution-container application
+    |
+    v
+127.0.0.1:3128
+    |
+    v
+cladding-bridge
+    |
+    v
+mux over podman exec
+    |
+    v
+physical-host Cladding
+    |
+    v
+fixed host Baffle Unix socket
+```
+
+This would allow Baffle and its credentials to live outside the Podman Machine while exposing only the intended proxy capability to each execution container.
+
+That migration has substantially different lifecycle and security requirements from `cladding inject`:
+
+- it is runtime infrastructure rather than a foreground user command;
+- sessions are created automatically with execution containers;
+- failures affect runtime startup/health;
+- Baffle socket ownership and per-component capability boundaries must be preserved;
+- old Podman socket volumes and local `socat` bridges need their own migration and cleanup plan.
+
+For those reasons, this proposal provides the reusable transport primitives but deliberately does **not** migrate Baffle. Baffle migration should be a separate proposal/task graph after this bridge project lands.
+
 ## Relationship to `socat`
 
-This proposal deliberately does not remove `socat` generally.
+This proposal removes `socat` only from `cladding inject`.
 
-The existing Baffle compatibility bridge remains:
+The current Baffle compatibility bridge remains unchanged for now:
 
 ```text
 127.0.0.1:3128
@@ -312,13 +481,11 @@ socat
 Baffle proxy.sock
 ```
 
-That is a simple local TCP-to-UDS adaptation and does not cross the host/VM boundary. There is currently insufficient benefit to replacing it with Cladding-owned code.
+That topology remains local to the current Podman environment until the separate Baffle migration project changes Baffle placement.
 
 The principle is:
 
-> Replace `socat` where the required topology exceeds what simple socket forwarding can cleanly provide, not merely because a new bridge helper exists.
-
-For this proposal that means `cladding inject` only.
+> Replace transport topology when a concrete boundary requires it; do not mechanically replace every `socat` use just because `cladding-bridge` exists.
 
 ## Relationship to `cladding expose`
 
@@ -331,17 +498,19 @@ host TCP listener
 mux over podman exec
     |
     v
-agent bridge
+container bridge
     |
     v
-agent localhost:<port>
+container localhost:<port>
 ```
 
 However, expose is explicitly outside this project.
 
-The implementation should avoid unnecessarily coupling the mux library to inject-specific concepts, but should not add APIs or abstractions solely for hypothetical expose reuse. Generalize when the second consumer exists.
+The mux/core implementation should avoid unnecessary coupling to inject-specific concepts, but should not add reverse-direction APIs or abstractions solely for hypothetical expose reuse. Generalize further when that consumer is actually implemented.
 
 ## Testing
+
+### Core transport tests
 
 Unit tests should cover:
 
@@ -353,7 +522,12 @@ Unit tests should cover:
 - half-close handling;
 - stream concurrency limits;
 - mux transport failure;
-- clean agent-side exit after transport EOF.
+- clean remote exit after transport EOF;
+- fixed TCP host target connection handling;
+- fixed Unix-socket host target connection handling;
+- proof that the remote protocol carries no destination selection.
+
+### `cladding inject` integration tests
 
 Integration testing should cover local rootless Podman and Podman Machine.
 
@@ -372,16 +546,22 @@ Failure coverage should include:
 
 All waits must be bounded so failed tunnel cleanup cannot hang CI.
 
+No Baffle integration test or runtime migration is required in this project. Unix-target behaviour should be covered at the reusable transport layer only.
+
 ## Documentation changes
 
-Update the runtime documentation to describe inject as:
+Update runtime documentation to describe inject as:
 
 ```text
 agent TCP
     ->
+cladding-bridge
+    ->
 multiplexed podman-exec transport
     ->
-host TCP
+host Cladding
+    ->
+fixed host TCP endpoint
 ```
 
 Remove references to:
@@ -393,19 +573,24 @@ inject host.sock
 inject socat processes
 ```
 
-Do not alter documentation describing the unrelated Baffle `socat` bridges.
+Document the bridge itself as a fixed-endpoint transport whose host target may be TCP or Unix socket, while noting that only TCP is used by production runtime code in this project.
+
+Keep existing Baffle runtime documentation unchanged except where useful to point to Baffle migration as separate future work.
 
 ## Completion criteria
 
 The project is complete when:
 
-1. `cladding inject` uses one long-lived multiplexed `podman exec` transport.
-2. Multiple simultaneous agent connections work correctly.
-3. The destination is fixed by the host invocation and cannot be selected by the agent.
-4. Local Podman and Podman Machine use the same inject architecture.
-5. `localhost` host targets resolve on the actual host under Podman Machine.
-6. The inject host-backed UDS mount and socket directories are removed.
-7. `cladding inject` no longer invokes or requires `socat`.
-8. No `pkill` or process-pattern cleanup is required.
-9. Normal and failure shutdown paths are bounded and covered by tests.
-10. Existing Baffle and sandbox UDS topology remains unchanged.
+1. A reusable fixed-endpoint bridge core exists and supports host-side TCP and Unix-socket targets.
+2. The remote bridge protocol contains no destination-selection capability.
+3. `cladding inject` uses one long-lived multiplexed `podman exec` transport.
+4. Multiple simultaneous agent connections work correctly.
+5. The inject destination is fixed by the host invocation and cannot be selected by the agent.
+6. Local Podman and Podman Machine use the same inject architecture.
+7. Host `localhost` targets resolve on the physical host under Podman Machine.
+8. The inject host-backed UDS mount and socket directories are removed.
+9. `cladding inject` no longer invokes or requires `socat`.
+10. No `pkill` or process-pattern cleanup is required.
+11. Normal and failure shutdown paths are bounded and covered by tests.
+12. Existing Baffle runtime topology remains unchanged.
+13. The design records Baffle host migration as the next concrete bridge consumer but leaves that migration to a separate task set.
