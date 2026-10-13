@@ -58,7 +58,7 @@ In short: the agent cannot freely access the network. From the host, `cladding e
 
   `cladding init` creates these TOML files when missing and preserves existing edits on later runs. These are the default session filenames. A disabled network sandbox does not require its selected session file.
 
-  Baffle 1.0 requires session files in version 2 format. Existing projects
+  Baffle session files must use version 2 format. Existing projects
   keep their current session files because `cladding init` preserves edits.
   Migrate any version 1 session files before starting or reloading the proxy.
   See the [Baffle session migration steps](docs/features/baffle-integration/embedded-baffle.md#session-file-migration).

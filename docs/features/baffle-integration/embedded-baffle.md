@@ -1,7 +1,7 @@
 # Embedded Baffle binary
 
 A normal local build without `CLADDING_BAFFLE_BIN` embeds `baffle-proxy`
-**1.0.0** from crates.io. The package publishes the `baffle` executable and
+**1.1.1** from crates.io. The package publishes the `baffle` executable and
 declares Rust 1.96 as its minimum supported version. Cladding pins that
 version in `build.rs` and invokes Cargo with `--locked`.
 
@@ -15,18 +15,19 @@ tools are needed to build Baffle and do not belong in the proxy runtime image.
 For Cladding builds on macOS or other cross-build hosts, set
 `CLADDING_BAFFLE_BIN` to a prebuilt 64-bit Linux GNU executable for the matching
 Podman guest architecture. The build checks the ELF format and architecture.
-CI runs Baffle in Cladding's default proxy image to check its loader and shared
-libraries. The integration suite also starts the executable that Cladding
-extracts during `cladding build`.
+CI runs `baffle --version` on native Linux x86_64 and aarch64 runners. The
+x86_64 integration suite also starts the executable that Cladding extracts
+during `cladding build` in Cladding's default proxy image.
 
 Published release archives are built for Linux x86_64, Linux aarch64, and
 Apple Silicon macOS. Each archive embeds the Linux GNU Baffle executable for
 the matching Podman guest architecture. The release workflow downloads the
-pinned Baffle v1.1.0 Linux archive and checks its checksum against that
+pinned Baffle v1.1.1 Linux archive and checks its checksum against that
 release's `SHA256SUMS` before extraction. It uses the x86_64 archive for the
 x86_64 Linux package and the aarch64 archive for the aarch64 Linux and Apple
-Silicon macOS packages. CI uses the same verified published binaries, checks
-them in the default proxy image, and runs the integration suite. The
+Silicon macOS packages. CI verifies the same published binaries and runs the
+native executable smoke check for both architectures. The x86_64 integration
+suite checks the binary in the default proxy image. The
 Linux-hosted Podman Machine job checks the x86_64 guest topology. The Apple
 Silicon build job checks the embedded aarch64 executable.
 

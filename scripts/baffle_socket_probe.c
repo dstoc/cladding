@@ -1,4 +1,4 @@
-/* Mirror Baffle 1.0.0's filesystem bind checks and report each failing errno. */
+/* Mirror Baffle's filesystem bind checks and report each failing errno. */
 #define _GNU_SOURCE
 
 #include <errno.h>
@@ -57,7 +57,7 @@ static int open_parent(const char *path, char *name, size_t name_size) {
     *last_slash = '\0';
     const char *parent_path = absolute[0] == '\0' ? "/" : absolute;
 
-    /* Match Baffle 1.0.0: its safe path walk opens every parent for reading. */
+    /* Match Baffle's safe path walk, which opens every parent for reading. */
     int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (current == -1) {
         fail("open root directory", "/");
