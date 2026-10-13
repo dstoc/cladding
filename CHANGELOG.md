@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.4](https://github.com/dstoc/cladding/compare/v0.4.3...v0.4.4) (2026-10-13)
+
+
+### Bug Fixes
+
+* pass explicit Podman volume names unchanged ([#105](https://github.com/dstoc/cladding/issues/105)) ([ff2ff76](https://github.com/dstoc/cladding/commit/ff2ff768eb12f936dd0bd226f8f350b509c65430))
+* remove generated workspace mountpoint ([#102](https://github.com/dstoc/cladding/issues/102)) ([5d361c4](https://github.com/dstoc/cladding/commit/5d361c4d5f519b1fb514c911a58696408341f605)), closes [#66](https://github.com/dstoc/cladding/issues/66)
+
 ## [0.4.3](https://github.com/dstoc/cladding/compare/v0.4.2...v0.4.3) (2026-10-12)
 
 
