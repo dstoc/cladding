@@ -1804,7 +1804,7 @@ mod tests {
                 path.display()
             );
         }
-        assert!(project_root.join("runtime/sockets/agent/inject").is_dir());
+        assert!(!project_root.join("runtime/sockets/agent/inject").exists());
         assert!(project_root.join("runtime/sockets/proxy/agent").is_dir());
         assert!(
             !project_root
@@ -2120,8 +2120,8 @@ mod tests {
             &spec.agent,
             &spec.agent.containers[0],
         ));
-        assert!(agent_args.iter().any(|arg| {
-            arg == "/tmp/project/.cladding/runtime/sockets/agent/inject:/run/cladding/agent/inject"
+        assert!(!agent_args.iter().any(|arg| {
+            arg.ends_with("/runtime/sockets/agent/inject:/run/cladding/agent/inject")
         }));
         for component in [&spec.proxy, nw, fs] {
             let args = command_args(&build_container_run_command(
