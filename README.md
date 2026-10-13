@@ -150,7 +150,9 @@ project.
   cladding inject db.internal:5432 15432
   ```
 
-  `cladding inject <host-endpoint> [containerport]` runs in the foreground and stops with Ctrl-C. A bare port such as `11434` maps agent `127.0.0.1:11434` to host `127.0.0.1:11434`. A second port changes only the agent-side listener, so `cladding inject 5432 15432` maps agent `127.0.0.1:15432` to host `127.0.0.1:5432`. An explicit `host:port` is resolved from the host and should be treated as a deliberate temporary exception for that one endpoint, not general host networking.
+  `cladding inject <host-endpoint> [containerport]` runs in the foreground and stops with Ctrl-C. A bare port such as `11434` maps agent `127.0.0.1:11434` to host `127.0.0.1:11434`. A second port changes only the agent-side listener, so `cladding inject 5432 15432` maps agent `127.0.0.1:15432` to host `127.0.0.1:5432`.
+
+  An explicit `host:port` is resolved from the host and should be treated as a deliberate temporary exception for that one endpoint, not general host networking. Cladding opens the host endpoint from the host process. A bare port therefore uses the physical host's loopback address, including when Podman runs in a Podman Machine. The agent can open multiple connections through one multiplexed bridge session, and it cannot choose another host destination.
 
 ### Selecting the Cladding directory and configuration
 
