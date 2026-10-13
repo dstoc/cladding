@@ -12,6 +12,7 @@ WORKFLOW = Path(__file__).parents[1] / ".github/workflows/ci.yml"
 TEXT = WORKFLOW.read_text()
 RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github/workflows/release-please.yml"
 RELEASE_TEXT = RELEASE_WORKFLOW.read_text()
+BUILD_SCRIPT = Path(__file__).parents[1] / "build.rs"
 EMBEDDED_BAFFLE_DOC = (
     Path(__file__).parents[1] / "docs/features/baffle-integration/embedded-baffle.md"
 )
@@ -363,18 +364,27 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("  build-baffle:\n", TEXT)
         self.assertNotRegex(TEXT, r"(?m)^\s*run: cargo install .*baffle-proxy")
 
+    def test_local_build_pins_locked_baffle_crate_and_matching_rust_requirement(self):
+        build = BUILD_SCRIPT.read_text()
+        self.assertIn('const BAFFLE_VERSION: &str = "1.1.1";', build)
+        self.assertIn('const BAFFLE_MIN_RUST_VERSION: (u32, u32) = (1, 96);', build)
+        install = build.split('.arg("install")', 1)[1].split('.status()', 1)[0]
+        self.assertIn('.arg("baffle-proxy")', install)
+        self.assertIn('.arg(format!("={BAFFLE_VERSION}"))', install)
+        self.assertIn('.arg("--locked")', install)
+
     def test_complete_embedded_linux_tools_are_built_once_per_architecture(self):
         cases = {
             "embedded-linux-tools-x86_64": (
                 "x86_64",
                 "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target-dir target/mcp-run",
-                "baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz",
+                "baffle-proxy-v1.1.1-x86_64-unknown-linux-gnu.tar.gz",
                 "x86-64",
             ),
             "embedded-linux-tools-aarch64": (
                 "aarch64",
                 "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/mcp-run",
-                "baffle-proxy-v1.1.0-aarch64-unknown-linux-gnu.tar.gz",
+                "baffle-proxy-v1.1.1-aarch64-unknown-linux-gnu.tar.gz",
                 "aarch64",
             ),
         }
@@ -388,12 +398,13 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 )
                 self.assertIn(f"BAFFLE_ARCHIVE: {archive}", block)
                 self.assertIn(
-                    'release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"',
+                    'release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"',
                     block,
                 )
                 self.assertIn('"$release_url/SHA256SUMS"', block)
                 self.assertIn('test "$actual" = "$expected"', block)
                 self.assertIn('tar -xzf "$archive_path"', block)
+                self.assertIn('"$RUNNER_TEMP/baffle/baffle" --version', block)
                 self.assertIn('cp "$RUNNER_TEMP/baffle/baffle"', block)
                 for name in (
                     "baffle",
@@ -538,14 +549,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('aarch64:"ELF 64-bit"*aarch64*) ;;', helpers)
 
         download = upload.split(
-            "- name: Download and verify pinned Baffle v1.1.0 release", 1
+            "- name: Download and verify pinned Baffle v1.1.1 release", 1
         )[1].split("- uses: dtolnay/rust-toolchain@stable", 1)[0]
         self.assertIn(
-            "BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-${{ matrix.baffle_arch }}-unknown-linux-gnu.tar.gz",
+            "BAFFLE_ARCHIVE: baffle-proxy-v1.1.1-${{ matrix.baffle_arch }}-unknown-linux-gnu.tar.gz",
             download,
         )
         self.assertIn(
-            'release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"',
+            'release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"',
             download,
         )
         self.assertIn('"$release_url/$BAFFLE_ARCHIVE"', download)
@@ -594,7 +605,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
     def test_baffle_docs_describe_source_builds_and_published_release_assets(self):
         guide = EMBEDDED_BAFFLE_DOC.read_text()
         prd = BAFFLE_PRD.read_text()
-        self.assertIn("pinned Baffle v1.1.0 Linux archive", guide)
+        self.assertIn("pinned Baffle v1.1.1 Linux archive", guide)
         self.assertIn("`SHA256SUMS` before extraction", guide)
         self.assertIn("under `licenses/baffle/`", guide)
         self.assertNotIn("Do not use Baffle's GitHub release assets", guide)
@@ -603,7 +614,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
             prd,
         )
         self.assertIn(
-            "The workflows use the explicit v1.1.0 release archives", prd
+            "The workflows use the explicit v1.1.1 release archives", prd
         )
 
     def test_required_test_path_waits_only_for_x86_64_asset_prep(self):

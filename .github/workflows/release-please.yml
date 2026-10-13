@@ -96,13 +96,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Download and verify pinned Baffle v1.1.0 release
+      - name: Download and verify pinned Baffle v1.1.1 release
         env:
           BAFFLE_ARCH: ${{ matrix.baffle_arch }}
-          BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-${{ matrix.baffle_arch }}-unknown-linux-gnu.tar.gz
+          BAFFLE_ARCHIVE: baffle-proxy-v1.1.1-${{ matrix.baffle_arch }}-unknown-linux-gnu.tar.gz
         run: |
           set -euo pipefail
-          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"
+          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"
           archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
           mkdir -p "$RUNNER_TEMP/baffle"
           curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"

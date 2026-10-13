@@ -147,7 +147,7 @@ The network-sandbox template uses `socket_name = "nw-sandbox/proxy.sock"`.
 In version 2 files, configure `paths` and `[[rules."hostname".inject]]`
 under hostname-keyed rule tables. Baffle infers interception from those fields.
 
-Baffle 1.0 accepts sessions with zero host rules. Cladding generates sessions
+Baffle accepts sessions with zero host rules. Cladding generates sessions
 with no rules and `unmatched = "deny"`. A fresh project therefore permits no
 proxy destinations. Users add exact host rules for destinations their
 components need. Document optional rules as user-added examples, not as
@@ -161,7 +161,7 @@ There is no backward compatibility requirement. Remove Squid's config template, 
 
 For normal local Cladding builds, pin a published `baffle-proxy` crate version and install its `baffle` executable using Cargo with `--locked`. Extend the current `build.rs`/embedded-tools approach used for `mcp-run` and `run-remote`, and extract the binary through `cladding build` to `.cladding/tools/bin/baffle`. Include it in the required-tool/version checks. Do not download GitHub release assets for this source-build path.
 
-For CI and Cladding release builds, set `CLADDING_BAFFLE_BIN` to the matching published Linux GNU Baffle binary, including for macOS host builds. The workflows use the explicit v1.1.0 release archives for x86_64 and aarch64 and verify each archive against that release's `SHA256SUMS` before extraction. Use x86_64 for x86_64 Linux releases and aarch64 for aarch64 Linux and Apple Silicon macOS releases. Include Baffle's `LICENSE`, `THIRD-PARTY-NOTICES.txt`, and required third-party license files in Cladding release archives. Baffle's Rust toolchain and CMake/libclang dependencies belong to the source-build environment, not the runtime image. Check target architecture and dynamic dependencies. Diagnose unsupported targets explicitly.
+For CI and Cladding release builds, set `CLADDING_BAFFLE_BIN` to the matching published Linux GNU Baffle binary, including for macOS host builds. The workflows use the explicit v1.1.1 release archives for x86_64 and aarch64 and verify each archive against that release's `SHA256SUMS` before extraction. Use x86_64 for x86_64 Linux releases and aarch64 for aarch64 Linux and Apple Silicon macOS releases. Include Baffle's `LICENSE`, `THIRD-PARTY-NOTICES.txt`, and required third-party license files in Cladding release archives. Baffle's Rust toolchain and CMake/libclang dependencies belong to the source-build environment, not the runtime image. Check target architecture and dynamic dependencies. Diagnose unsupported targets explicitly.
 
 Replace the Squid proxy image with a small compatible Linux image. It needs the embedded Baffle executable mounted read-only, a shell for `proxy_startup.sh`, runtime TLS libraries and any minimal utilities used by startup; it does **not** need Cargo or the full Rust toolchain. Preserve Cladding's ability to override the proxy image/build where compatible.
 

@@ -36,10 +36,10 @@ jobs:
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Download and verify pinned x86_64 Baffle release
         env:
-          BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
+          BAFFLE_ARCHIVE: baffle-proxy-v1.1.1-x86_64-unknown-linux-gnu.tar.gz
         run: |
           set -euo pipefail
-          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"
+          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"
           archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
           mkdir -p "$RUNNER_TEMP/baffle"
           curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
@@ -67,6 +67,7 @@ jobs:
             *) echo "Baffle is not the expected Linux x86_64 executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
+          "$RUNNER_TEMP/baffle/baffle" --version
       - name: Assemble and verify embedded Linux tools
         run: |
           set -euo pipefail
@@ -250,10 +251,10 @@ jobs:
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Download and verify pinned aarch64 Baffle release
         env:
-          BAFFLE_ARCHIVE: baffle-proxy-v1.1.0-aarch64-unknown-linux-gnu.tar.gz
+          BAFFLE_ARCHIVE: baffle-proxy-v1.1.1-aarch64-unknown-linux-gnu.tar.gz
         run: |
           set -euo pipefail
-          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.0"
+          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"
           archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
           mkdir -p "$RUNNER_TEMP/baffle"
           curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
@@ -281,6 +282,7 @@ jobs:
             *) echo "Baffle is not the expected Linux aarch64 executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
+          "$RUNNER_TEMP/baffle/baffle" --version
       - name: Assemble and verify embedded Linux tools
         run: |
           set -euo pipefail
