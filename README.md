@@ -154,6 +154,8 @@ project.
 
   An explicit `host:port` is resolved from the host and should be treated as a deliberate temporary exception for that one endpoint, not general host networking. Cladding opens the host endpoint from the host process. A bare port therefore uses the physical host's loopback address, including when Podman runs in a Podman Machine. The agent can open multiple connections through one multiplexed bridge session, and it cannot choose another host destination.
 
+  See the [bridge architecture](docs/features/cladding-bridge/proposal.md) for the fixed-endpoint transport and the separate future Baffle direction.
+
 ### Selecting the Cladding directory and configuration
 
 Use `--cladding-dir PATH` to select the `.cladding` directory itself. Without this option, Cladding searches the invocation directory and its parents as before. This option selects Cladding runtime and configuration files. Cladding identifies the invocation project from its `.cladding` directory, Git checkout root, or invocation directory. It does not mount that host directory by default. `exec` and `run` use the invocation directory only when a configured host-backed mount contains it; otherwise, they start in `/home/user`.
