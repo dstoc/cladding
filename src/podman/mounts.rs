@@ -105,7 +105,10 @@ fn sanitize_volume_fragment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::ManagedVolumeKind;
+    use crate::config::{
+        ExecutionComponentConfig, ExecutionConfig, MountTarget, MountType, ResolvedMountConfig,
+    };
+    use crate::runtime::{ManagedVolumeKind, RuntimeSpec};
 
     fn command_args(cmd: &Command) -> Vec<String> {
         cmd.get_args()
@@ -171,6 +174,58 @@ mod tests {
                 "/tmp/demo/runtime/empty-mask:/home/user/workspace/.cladding:ro",
             ]
         );
+    }
+
+    #[test]
+    fn explicit_volume_mount_args_are_verbatim_for_persistent_and_one_off_specs() {
+        let project_root = std::path::Path::new("/tmp/project/.cladding");
+        for (name, runtime_root) in [
+            ("demo", project_root),
+            (
+                "cladding-run-00000000-0000-4000-8000-000000000000",
+                std::path::Path::new("/tmp/project/.cladding/runtime/runs/instance"),
+            ),
+        ] {
+            let config = ExecutionConfig {
+                name: name.to_string(),
+                use_runsc: false,
+                agent: ExecutionComponentConfig {
+                    enabled: true,
+                    init: true,
+                    image: "agent:image".to_string(),
+                    build: None,
+                    security_opts: Vec::new(),
+                },
+                nw_sandbox: None,
+                fs_sandbox: None,
+                proxy: None,
+                mounts: vec![ResolvedMountConfig {
+                    mount_path: "/home/user/.cache/kache".to_string(),
+                    host_path: None,
+                    volume: Some("cladding-kache".to_string()),
+                    mount_type: MountType::Bind,
+                    tmpfs_size_bytes: None,
+                    read_only: false,
+                    targets: vec![MountTarget::Agent],
+                    ignore: false,
+                }],
+            };
+            let spec = RuntimeSpec::build_with_roots(
+                project_root,
+                &project_root.join(".."),
+                runtime_root,
+                &config,
+            );
+            let container = &spec.agent.containers[0];
+            let mut cmd = Command::new("podman");
+            append_mount_args(&mut cmd, &spec.agent.name, &container.mounts);
+
+            assert!(
+                command_args(&cmd)
+                    .windows(2)
+                    .any(|pair| { pair == ["--volume", "cladding-kache:/home/user/.cache/kache"] })
+            );
+        }
     }
 
     #[test]

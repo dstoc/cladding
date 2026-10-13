@@ -453,6 +453,13 @@ exit 0
         serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     project_config["proxy"]["agent"]["session_config"] = "custom/agent.toml".into();
     project_config["proxy"]["nw_sandbox"]["session_config"] = "restricted/network.toml".into();
+    project_config["mounts"] = serde_json::json!([
+        {
+            "mount": "/home/user/.cache/kache",
+            "volume": "cladding-kache",
+            "targets": ["agent"]
+        }
+    ]);
     fs::write(
         &config_path,
         serde_json::to_vec_pretty(&project_config).unwrap(),
@@ -639,6 +646,7 @@ exit 0
         &private_key,
     )
     .unwrap();
+    fs::write(&socket_volume_state, "cladding-kache||||\n").unwrap();
     let mut run = cli(
         &root,
         &bin_dir,
@@ -676,6 +684,24 @@ exit 0
     assert!(verbose_stderr.contains("user-error"));
 
     let run_log = read_log(&podman_log);
+    assert!(
+        run_log
+            .lines()
+            .any(|line| { line.contains("--volume cladding-kache:/home/user/.cache/kache") }),
+        "one-off run should mount the explicitly named Podman volume verbatim: {run_log}"
+    );
+    assert!(
+        !run_log
+            .lines()
+            .any(|line| line == "volume rm cladding-kache"),
+        "one-off cleanup must not remove an explicitly named volume: {run_log}"
+    );
+    assert_eq!(
+        fs::read_to_string(&socket_volume_state).unwrap(),
+        "cladding-kache||||\n",
+        "one-off cleanup must preserve the external volume"
+    );
+    fs::write(&socket_volume_state, "").unwrap();
     let command_env_calls = run_log
         .lines()
         .filter(|line| line.contains("LANG=run-value") || line.contains("RUN_ONLY=command-value"))
@@ -849,6 +875,7 @@ exit 0
         private_key
     );
 
+    fs::write(&socket_volume_state, "cladding-kache||||\n").unwrap();
     let mut up = cli(
         &root,
         &bin_dir,
@@ -900,7 +927,10 @@ exit 0
     );
     let created_socket_volumes = fs::read_to_string(&socket_volume_state).unwrap();
     assert_eq!(
-        created_socket_volumes.lines().count(),
+        created_socket_volumes
+            .lines()
+            .filter(|line| line.starts_with("cladding-demo-socket-"))
+            .count(),
         3,
         "{created_socket_volumes}"
     );
@@ -912,6 +942,14 @@ exit 0
     }
     assert!(created_socket_volumes.contains("|demo|"));
     assert!(created_socket_volumes.contains("|inter-container-socket|"));
+    let agent_start = startup_log
+        .lines()
+        .find(|line| line.contains("--name demo-agent-instance"))
+        .expect("up starts the named agent container");
+    assert!(
+        agent_start.contains("--volume cladding-kache:/home/user/.cache/kache"),
+        "persistent runtime should mount the explicitly named Podman volume verbatim: {agent_start}"
+    );
 
     fs::write(&podman_log, "").unwrap();
     let mut down = cli(
@@ -945,8 +983,14 @@ exit 0
     );
     assert_eq!(
         fs::read_to_string(&socket_volume_state).unwrap(),
-        "",
-        "normal shutdown must remove every owned socket volume"
+        "cladding-kache||||\n",
+        "normal shutdown must remove owned socket volumes and preserve the external volume"
+    );
+    assert!(
+        !cleanup_log
+            .lines()
+            .any(|line| line == "volume rm cladding-kache"),
+        "normal shutdown must not remove an explicitly named volume: {cleanup_log}"
     );
 
     let foreign_socket_volume = "cladding-demo-socket-baffle-agent|foreign|/tmp/foreign/.cladding|inter-container-socket|cladding-demo-socket-baffle-agent\n";

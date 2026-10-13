@@ -370,7 +370,7 @@ Cladding no longer supports `overlay`. Podman's normal `:O` mount gives each con
 
 `tmpfs` is a disposable, memory-backed mount and cannot use `hostPath` or `volume`. Cladding accepts byte values and `K`, `M`, `G`, `T`, `KiB`, `MiB`, `GiB`, and `TiB` size units; decimal `KB`, `MB`, `GB`, and `TB` units are also accepted. Podman receives the limit in bytes. Cladding sets mode `1777` and asks Podman to set ownership to the container's mapped user and group. One target uses a container tmpfs. Multiple targets share one Cladding-managed tmpfs-backed volume. Contents disappear when the runtime stops. The default limit is `64MiB` when `size` is omitted.
 
-`volume` keeps normal named-volume persistence semantics. Cladding does not remove these user-managed volumes on `down` or after `run`.
+`volume` names a Podman named volume. Cladding passes the configured name to Podman unchanged and does not remove explicitly named volumes on `down` or after `run`.
 
 For `bind`, `readonly`, and `copy` mounts whose host source contains the private `.cladding` directory, Cladding adds a generated empty mask at the matching container path. This protects `.cladding` at any configured container path. A `readonly` or `copy` mount cannot use a path inside `.cladding` as its host source. A bind cannot use the `.cladding` directory itself as its source.
 

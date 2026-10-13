@@ -2299,6 +2299,20 @@ mod tests {
     }
 
     #[test]
+    fn explicit_named_volumes_are_not_managed_cleanup_targets() {
+        let mut spec = test_runtime_spec();
+        spec.agent.containers[0].mounts.push(RuntimeMount {
+            mount_path: "/home/user/.cache/kache".to_string(),
+            read_only: false,
+            source: RuntimeMountSource::NamedVolume {
+                claim_name: "cladding-kache".to_string(),
+            },
+        });
+
+        assert!(!managed_mount_volumes(&spec).contains_key("cladding-kache"));
+    }
+
+    #[test]
     fn socket_volume_cleanup_requires_project_and_channel_labels() {
         let spec = test_runtime_spec();
         let name = "cladding-demo-socket-run-nw-sandbox";
