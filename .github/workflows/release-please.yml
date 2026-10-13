@@ -24,9 +24,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Cladding embeds Linux mcp-run/run-remote helpers for its sandbox containers.
-  # Build native helper artifacts for each Linux guest architecture and reuse
-  # them on host builds.
+  # Cladding embeds Linux execution helpers in its container tools directory.
+  # Build helper artifacts for each Linux guest architecture and reuse them on
+  # host builds, including Apple Silicon macOS.
   build-helpers:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -48,15 +48,26 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build Linux helpers
-        run: cargo build -p mcp-run --release --locked --target "${{ matrix.target }}" --bin mcp-run --bin run-remote
+        run: cargo build -p mcp-run -p cladding-bridge --release --locked --target "${{ matrix.target }}" --bin mcp-run --bin run-remote --bin cladding-bridge
       - name: Stage helpers
         run: |
           mkdir -p helpers
           cp "target/${{ matrix.target }}/release/mcp-run" helpers/
           cp "target/${{ matrix.target }}/release/run-remote" helpers/
+          cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/
+          for tool in helpers/*; do
+            chmod 0755 "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "${{ matrix.arch }}:$description" in
+              x86_64:"ELF 64-bit"*x86-64*) ;;
+              aarch64:"ELF 64-bit"*aarch64*) ;;
+              *) echo "Expected a Linux ${{ matrix.arch }} executable: $tool" >&2; exit 1 ;;
+            esac
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: mcp-run-helpers-${{ matrix.arch }}-linux
+          name: cladding-linux-helpers-${{ matrix.arch }}
           path: helpers/
 
   # Only runs on the push that merges the release PR (release_created == true).
@@ -131,13 +142,14 @@ jobs:
         if: matrix.target != 'x86_64-unknown-linux-gnu'
         uses: actions/download-artifact@v4
         with:
-          name: mcp-run-helpers-${{ matrix.helper_arch }}-linux
+          name: cladding-linux-helpers-${{ matrix.helper_arch }}
           path: helpers
       - name: Point build.rs at prebuilt helpers
         if: matrix.target != 'x86_64-unknown-linux-gnu'
         run: |
           echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/helpers/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/helpers/run-remote" >> "$GITHUB_ENV"
+          echo "CLADDING_BRIDGE_BIN=$GITHUB_WORKSPACE/helpers/cladding-bridge" >> "$GITHUB_ENV"
       - name: Point build.rs at the validated Linux Baffle binary
         run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
       # --locked is safe: the cargo-workspace plugin keeps the root Cargo.lock

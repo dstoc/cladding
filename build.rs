@@ -14,8 +14,11 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=crates/mcp-run/Cargo.toml");
     println!("cargo:rerun-if-changed=crates/mcp-run/src");
+    println!("cargo:rerun-if-changed=crates/cladding-bridge/Cargo.toml");
+    println!("cargo:rerun-if-changed=crates/cladding-bridge/src");
     println!("cargo:rerun-if-env-changed=CLADDING_MCP_RUN_BIN");
     println!("cargo:rerun-if-env-changed=CLADDING_RUN_REMOTE_BIN");
+    println!("cargo:rerun-if-env-changed=CLADDING_BRIDGE_BIN");
     println!("cargo:rerun-if-env-changed=CLADDING_BAFFLE_BIN");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -23,15 +26,36 @@ fn main() {
 
     // Escape hatch: when prebuilt Linux helpers are provided (e.g. a macOS
     // release build that cannot run a Linux container), copy them straight in
-    // and skip building mcp-run. Both must be set together.
-    if let (Ok(mcp_run), Ok(run_remote)) = (
-        env::var("CLADDING_MCP_RUN_BIN"),
-        env::var("CLADDING_RUN_REMOTE_BIN"),
-    ) {
-        println!("cargo:warning=Using prebuilt embedded helpers; skipping nested release build");
-        copy_bin(Path::new(&mcp_run), &out_dir.join("mcp-run"));
-        copy_bin(Path::new(&run_remote), &out_dir.join("run-remote"));
-        return;
+    // and skip the nested helper build. All three must be set together.
+    let prebuilt_helpers = [
+        env::var("CLADDING_MCP_RUN_BIN").ok(),
+        env::var("CLADDING_RUN_REMOTE_BIN").ok(),
+        env::var("CLADDING_BRIDGE_BIN").ok(),
+    ];
+    match prebuilt_helpers {
+        [Some(mcp_run), Some(run_remote), Some(bridge)] => {
+            println!(
+                "cargo:warning=Using prebuilt embedded helpers; skipping nested release build"
+            );
+            copy_bin(Path::new(&mcp_run), &out_dir.join("mcp-run"));
+            copy_bin(Path::new(&run_remote), &out_dir.join("run-remote"));
+            let bridge_path = PathBuf::from(bridge);
+            let expected_arch = target_arch().unwrap_or_else(|err| panic!("{err}"));
+            let bridge_bytes = fs::read(&bridge_path).unwrap_or_else(|err| {
+                panic!(
+                    "failed to read CLADDING_BRIDGE_BIN at {}: {err}",
+                    bridge_path.display()
+                )
+            });
+            validate_bridge_elf(&bridge_bytes, expected_arch, &bridge_path)
+                .unwrap_or_else(|err| panic!("{err}"));
+            copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
+            return;
+        }
+        [None, None, None] => {}
+        _ => panic!(
+            "CLADDING_MCP_RUN_BIN, CLADDING_RUN_REMOTE_BIN, and CLADDING_BRIDGE_BIN must be set together"
+        ),
     }
 
     let target_triple = env::var("TARGET").ok();
@@ -59,6 +83,41 @@ fn main() {
         &release_dir.join(bin_name("run-remote")),
         &out_dir.join("run-remote"),
     );
+    let bridge_path = release_dir.join(bin_name("cladding-bridge"));
+    let bridge_bytes = fs::read(&bridge_path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", bridge_path.display()));
+    let expected_arch = target_arch().unwrap_or_else(|err| panic!("{err}"));
+    validate_bridge_elf(&bridge_bytes, expected_arch, &bridge_path)
+        .unwrap_or_else(|err| panic!("{err}"));
+    copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
+}
+
+fn validate_bridge_elf(bytes: &[u8], expected_arch: &str, path: &Path) -> Result<(), String> {
+    if bytes.len() < 20
+        || &bytes[..4] != b"\x7fELF"
+        || bytes[4] != 2
+        || bytes[5] != 1
+        || !matches!(bytes[7], 0 | 3)
+    {
+        return Err(format!(
+            "{} is not a 64-bit little-endian Linux ELF executable",
+            path.display()
+        ));
+    }
+
+    let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+    let actual_arch = match machine {
+        62 => "x86_64",
+        183 => "aarch64",
+        _ => "unsupported",
+    };
+    if actual_arch != expected_arch {
+        return Err(format!(
+            "{} contains a {actual_arch} Linux executable, but Cladding target requires {expected_arch}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn build_baffle(out_dir: &Path) {
@@ -302,9 +361,17 @@ fn copy_bin(src: &Path, dst: &Path) {
 fn build_locally(workspace_root: &Path, target_dir: &Path, target: Option<&str>) {
     let mut cargo = Command::new("cargo");
     cargo.current_dir(workspace_root);
-    cargo.arg("build").arg("-p").arg("mcp-run").arg("--release");
+    cargo
+        .arg("build")
+        .arg("--locked")
+        .arg("--release")
+        .arg("-p")
+        .arg("mcp-run")
+        .arg("-p")
+        .arg("cladding-bridge");
     cargo.arg("--bin").arg("mcp-run");
     cargo.arg("--bin").arg("run-remote");
+    cargo.arg("--bin").arg("cladding-bridge");
     cargo.arg("--target-dir").arg(target_dir);
 
     if let Some(target) = target {
@@ -340,6 +407,8 @@ fn build_with_podman(workspace_root: &Path) {
         .arg("mcp-run")
         .arg("--bin")
         .arg("run-remote")
+        .arg("--bin")
+        .arg("cladding-bridge")
         .status()
         .expect("failed to run podman build for mcp-run");
 
