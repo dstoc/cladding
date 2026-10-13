@@ -267,6 +267,7 @@ class InjectValidator:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
         self.inject_clients.append(process)
         return process
@@ -277,7 +278,10 @@ class InjectValidator:
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as error:
-            process.kill()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             stdout, stderr = process.communicate(timeout=3)
             raise ValidationFailure(
                 f"{phase}: process timed out after {timeout:g}s; "
@@ -384,7 +388,10 @@ class InjectValidator:
     def cleanup(self) -> None:
         for client in self.inject_clients:
             if client.poll() is None:
-                client.kill()
+                try:
+                    os.killpg(client.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 try:
                     client.communicate(timeout=3)
                 except subprocess.TimeoutExpired:
@@ -640,7 +647,16 @@ class InjectValidator:
         phase = "podman exec mux transport closes unexpectedly"
         port, client = self.active_stream(server, host_port, phase)
         child = self.find_exec_child(phase)
-        os.kill(child, signal.SIGKILL)
+        process_group = os.getpgid(child)
+        if process_group != child:
+            raise ValidationFailure(
+                f"{phase}: podman exec transport child {child} is not its own process-group leader "
+                f"(process group {process_group})"
+            )
+        # The Podman Machine connection can run a local SSH transport below
+        # the podman CLI. Close the full process group so the remote exec
+        # session and its agent-side stream see the abrupt transport loss.
+        os.killpg(process_group, signal.SIGKILL)
         status, stdout, stderr = self.collect_inject(12, phase)
         if status == 0 or not any(
             marker in f"{stdout}\n{stderr}".lower()
@@ -650,7 +666,28 @@ class InjectValidator:
                 f"{phase}: expected an identified transport failure after podman exec exited; "
                 f"exit={status} stdout={stdout.strip()!r} stderr={stderr.strip()!r}"
             )
-        self.collect(client, 8, phase)
+        try:
+            self.collect(client, 8, phase)
+        except ValidationFailure as error:
+            listener = self.podman(
+                "exec", self.agent, "python3", "-c", CHECK_PORT_CLOSED, str(port), timeout=5
+            )
+            bridge = self.podman(
+                "exec", self.agent, "sh", "-c", CHECK_NO_BRIDGE, timeout=5
+            )
+            listener_state = (
+                "closed" if listener.returncode == 0 else
+                f"still accepting connections (exit {listener.returncode}; "
+                f"stderr={listener.stderr.strip()!r})"
+            )
+            bridge_state = (
+                "exited" if bridge.returncode == 0 else
+                f"still running (exit {bridge.returncode}; stderr={bridge.stderr.strip()!r})"
+            )
+            raise ValidationFailure(
+                f"{phase}: agent-side client did not observe host exec transport closure; "
+                f"agent listener is {listener_state}; agent bridge process {bridge_state}; {error}"
+            ) from error
         self.assert_listener_closed(port, phase)
         self.assert_no_bridge_process(phase)
 

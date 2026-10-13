@@ -243,6 +243,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('  --agent "$agent"', validator)
         self.assertIn('"localhost:{host_port}"', inject)
         self.assertIn('("127.0.0.1", 0)', inject)
+        self.assertIn("start_new_session=True", inject)
+        self.assertIn("os.killpg(process_group, signal.SIGKILL)", inject)
+        self.assertIn("agent-side client did not observe host exec transport closure", inject)
         self.assertIn('"/run/cladding/agent/inject"', inject)
         for phase in (
             "agent-side listener port already occupied",
