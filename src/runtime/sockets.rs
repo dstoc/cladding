@@ -3,11 +3,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub(super) const RUNTIME_SOCKET_DIR: &str = "runtime/sockets";
-pub(super) const RUNTIME_AGENT_INJECT_SOCKET_DIR: &str = "agent/inject";
 pub(super) const RUNTIME_PROXY_SOCKET_DIR: &str = "proxy";
 pub(super) const RUNTIME_PROXY_AGENT_SOCKET_DIR: &str = "proxy/agent";
 pub(super) const RUNTIME_PROXY_NW_SANDBOX_SOCKET_DIR: &str = "proxy/nw-sandbox";
-pub(super) const RUNTIME_AGENT_INJECT_MOUNT_PATH: &str = "/run/cladding/agent/inject";
 pub(super) const RUNTIME_PROXY_AGENT_MOUNT_PATH: &str = "/run/cladding/proxy/agent";
 pub(super) const RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/proxy/nw-sandbox";
 pub(super) const RUNTIME_PROXY_MOUNT_PATH: &str = "/run/cladding/proxy";
@@ -58,20 +56,6 @@ fn runtime_scoped_socket_dir(project_root: &Path, socket_dir: &str) -> PathBuf {
 
 pub(super) fn runtime_socket_mount_path(mount_dir: &str, socket_name: &str) -> String {
     format!("{mount_dir}/{socket_name}")
-}
-
-pub(super) fn build_scoped_socket_mount(
-    runtime_root: &Path,
-    socket_dir: &str,
-    mount_path: &str,
-) -> Vec<RuntimeMount> {
-    vec![RuntimeMount {
-        mount_path: mount_path.to_string(),
-        read_only: false,
-        source: RuntimeMountSource::HostPath {
-            path: runtime_scoped_socket_dir(runtime_root, socket_dir),
-        },
-    }]
 }
 
 pub(super) fn build_socket_volume_mount(
@@ -187,7 +171,6 @@ mod tests {
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/agent"),
                 PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy/nw-sandbox"),
-                PathBuf::from("/tmp/project/.cladding/runtime/sockets/agent/inject"),
             ]
             .into_iter()
             .collect()

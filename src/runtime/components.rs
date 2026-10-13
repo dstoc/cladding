@@ -4,10 +4,9 @@ use super::mounts::{
     build_proxy_mounts, build_sandbox_mounts,
 };
 use super::sockets::{
-    RUNTIME_AGENT_INJECT_MOUNT_PATH, RUNTIME_AGENT_INJECT_SOCKET_DIR,
     RUNTIME_PROXY_AGENT_MOUNT_PATH, RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
     RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH, RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH,
-    build_scoped_socket_mount, build_socket_volume_mount, runtime_socket_mount_path,
+    build_socket_volume_mount, runtime_socket_mount_path,
 };
 use super::types::{
     RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeNames,
@@ -49,8 +48,7 @@ impl RuntimeSpec {
 
         let proxy =
             build_proxy_component(&project_root, &runtime_root, config, &names, &custom_mounts);
-        let agent =
-            build_agent_component(&project_root, &runtime_root, config, &names, &custom_mounts);
+        let agent = build_agent_component(&project_root, config, &names, &custom_mounts);
         let nw_sandbox = names.nw_sandbox_name.as_ref().map(|component_name| {
             build_nw_sandbox_component(&project_root, config, component_name, &custom_mounts)
         });
@@ -142,7 +140,6 @@ fn build_proxy_component(
 
 fn build_agent_component(
     project_root: &Path,
-    runtime_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
     custom_mounts: &[RuntimeCustomMount],
@@ -152,11 +149,6 @@ fn build_agent_component(
         custom_mounts,
         MountTarget::Agent,
     );
-    mounts.extend(build_scoped_socket_mount(
-        runtime_root,
-        RUNTIME_AGENT_INJECT_SOCKET_DIR,
-        RUNTIME_AGENT_INJECT_MOUNT_PATH,
-    ));
     mounts.push(build_socket_volume_mount(
         &config.name,
         "baffle-agent",
@@ -700,7 +692,7 @@ mod tests {
         assert_eq!(env_value(fs, "MCP_BIND_ADDR"), None);
 
         assert!(mount_paths(agent).contains("/run/cladding/proxy/agent"));
-        assert!(mount_paths(agent).contains("/run/cladding/agent/inject"));
+        assert!(!mount_paths(agent).contains("/run/cladding/agent/inject"));
         assert!(mount_paths(agent).contains("/run/cladding/run/nw-sandbox"));
         assert!(mount_paths(agent).contains("/run/cladding/run/fs-sandbox"));
         assert!(mount_paths(nw).contains("/run/cladding/proxy/nw-sandbox"));
@@ -1018,12 +1010,7 @@ mod tests {
             true,
         );
 
-        assert_eq!(
-            host_mount_path(agent, "/run/cladding/agent/inject"),
-            Some(Path::new(
-                "/tmp/project/.cladding/runtime/sockets/agent/inject"
-            ))
-        );
+        assert_eq!(host_mount_path(agent, "/run/cladding/agent/inject"), None);
         for (component, container, own_socket, other_socket) in [
             (
                 &spec.agent,
