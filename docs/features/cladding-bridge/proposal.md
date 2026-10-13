@@ -16,14 +16,11 @@ The transport should, however, be reusable by a second concrete consumer: a futu
 
 This proposal therefore generalizes the bridge one level above `inject`:
 
-```text
-container-local fixed listener
-    ->
-multiplexed podman-exec transport
-    ->
-host Cladding
-    ->
-host-selected fixed endpoint
+```mermaid
+flowchart LR
+    Listener["Container-local fixed listener"] --> Mux["Multiplexed podman-exec transport"]
+    Mux --> Host["Host Cladding"]
+    Host --> Target["Host-selected fixed endpoint"]
 ```
 
 The host endpoint may be TCP or Unix-domain socket. The untrusted container side never selects or communicates the destination.
@@ -46,24 +43,13 @@ allows software in the agent to connect to `127.0.0.1:15432` and have that conne
 
 The current implementation uses two `socat` processes and a host-backed Unix socket:
 
-```text
-agent application
-       |
-       v
-127.0.0.1:<container-port>
-       |
-       v
-agent socat
-       |
-       v
-/run/cladding/agent/inject/<port>/host.sock
-       |
-       | host bind mount
-       v
-host socat
-       |
-       v
-<host>:<host-port>
+```mermaid
+flowchart LR
+    App["Agent application"] --> Listener["127.0.0.1:container-port"]
+    Listener --> AgentSocat["Agent socat"]
+    AgentSocat --> Socket["/run/cladding/agent/inject/port/host.sock"]
+    Socket -->|"host bind mount"| HostSocat["Host socat"]
+    HostSocat --> Target["host:host-port"]
 ```
 
 This is reasonable for local Podman, but the host-backed UDS becomes problematic with Podman Machine:
@@ -83,21 +69,12 @@ A stronger isolation model is to move trusted Baffle outside the Podman Machine 
 
 The desired future shape is approximately:
 
-```text
-agent / network sandbox
-       |
-       v
-127.0.0.1:3128
-       |
-       v
-cladding-bridge
-       |
-       | multiplexed podman exec
-       v
-host Cladding
-       |
-       v
-host Baffle UDS
+```mermaid
+flowchart LR
+    Consumer["Agent / network sandbox"] --> Listener["127.0.0.1:3128"]
+    Listener --> Bridge["cladding-bridge"]
+    Bridge -->|"multiplexed podman exec"| Host["Host Cladding"]
+    Host --> Baffle["Host Baffle UDS"]
 ```
 
 This is structurally the same transport problem as `cladding inject`: multiple byte streams cross the Podman/VM boundary and terminate at one host-selected fixed destination.
@@ -154,25 +131,16 @@ stdin/stdout of that exec become a multiplexed binary transport between host Cla
 
 The resulting inject data path is:
 
-```text
-agent application A --\
-agent application B ----> 127.0.0.1:<container-port>
-agent application C --/              |
-                                     v
-                              cladding-bridge
-                                     |
-                           logical mux streams
-                                     |
-                              podman exec I/O
-                                     |
-                                     v
-                               host Cladding
-                                     |
-                  +------------------+------------------+
-                  |                  |                  |
-                  v                  v                  v
-          fixed host TCP     fixed host TCP     fixed host TCP
-          connection A       connection B       connection C
+```mermaid
+flowchart LR
+    A["Agent application A"] --> Listener["127.0.0.1:container-port"]
+    B["Agent application B"] --> Listener
+    C["Agent application C"] --> Listener
+    Listener --> Bridge["cladding-bridge"]
+    Bridge -->|"logical mux streams over podman exec I/O"| Host["Host Cladding"]
+    Host --> TA["Fixed host TCP<br/>connection A"]
+    Host --> TB["Fixed host TCP<br/>connection B"]
+    Host --> TC["Fixed host TCP<br/>connection C"]
 ```
 
 Every connection accepted by the container-side listener creates a new logical stream. For each logical stream, trusted host Cladding opens a fresh connection to the one fixed endpoint configured for that bridge session.
@@ -247,17 +215,11 @@ Do not generalize this into arbitrary target descriptors, target IDs supplied by
 
 One bridge session represents one fixed local listener and one fixed host destination.
 
-```text
-one container listener
-        |
-        v
-one cladding-bridge process
-        |
-        v
-one mux session
-        |
-        v
-one host-side fixed target
+```mermaid
+flowchart LR
+    Listener["One container listener"] --> Bridge["One cladding-bridge process"]
+    Bridge --> Mux["One mux session"]
+    Mux --> Target["One host-side fixed target"]
 ```
 
 Multiple accepted connections become multiple logical streams within that session.
@@ -359,29 +321,15 @@ With Podman Machine, host `localhost` must continue to mean the physical host pr
 
 Normal shutdown should be:
 
-```text
-Ctrl-C / SIGTERM
-    |
-    v
-host stops accepting mux streams
-    |
-    v
-mux transport closes
-    |
-    v
-agent bridge observes transport EOF
-    |
-    v
-agent listener closes
-    |
-    v
-active streams close
-    |
-    v
-bridge exits
-    |
-    v
-podman exec exits
+```mermaid
+flowchart TD
+    Signal["Ctrl-C / SIGTERM"] --> Stop["Host stops accepting mux streams"]
+    Stop --> CloseMux["Mux transport closes"]
+    CloseMux --> EOF["Agent bridge observes transport EOF"]
+    EOF --> CloseListener["Agent listener closes"]
+    CloseListener --> CloseStreams["Active streams close"]
+    CloseStreams --> BridgeExit["Bridge exits"]
+    BridgeExit --> ExecExit["podman exec exits"]
 ```
 
 There should be no `pkill -f` cleanup.
@@ -434,23 +382,12 @@ Baffle is now a concrete future consumer of this transport, not merely hypotheti
 
 A later Baffle migration can use the reusable bridge roughly as:
 
-```text
-execution-container application
-    |
-    v
-127.0.0.1:3128
-    |
-    v
-cladding-bridge
-    |
-    v
-mux over podman exec
-    |
-    v
-physical-host Cladding
-    |
-    v
-fixed host Baffle Unix socket
+```mermaid
+flowchart LR
+    App["Execution-container application"] --> Listener["127.0.0.1:3128"]
+    Listener --> Bridge["cladding-bridge"]
+    Bridge -->|"mux over podman exec"| Host["Physical-host Cladding"]
+    Host --> Baffle["Fixed host Baffle Unix socket"]
 ```
 
 This would allow Baffle and its credentials to live outside the Podman Machine while exposing only the intended proxy capability to each execution container.
@@ -471,14 +408,9 @@ This proposal removes `socat` only from `cladding inject`.
 
 The current Baffle compatibility bridge remains unchanged for now:
 
-```text
-127.0.0.1:3128
-    |
-    v
-socat
-    |
-    v
-Baffle proxy.sock
+```mermaid
+flowchart LR
+    Listener["127.0.0.1:3128"] --> Socat["socat"] --> Baffle["Baffle proxy.sock"]
 ```
 
 That topology remains local to the current Podman environment until the separate Baffle migration project changes Baffle placement.
@@ -491,17 +423,11 @@ The principle is:
 
 `cladding expose` has a structurally similar inverse problem and could later reuse the mux implementation:
 
-```text
-host TCP listener
-    |
-    v
-mux over podman exec
-    |
-    v
-container bridge
-    |
-    v
-container localhost:<port>
+```mermaid
+flowchart LR
+    HostListener["Host TCP listener"] --> Mux["Mux over podman exec"]
+    Mux --> Bridge["Container bridge"]
+    Bridge --> Target["Container localhost:port"]
 ```
 
 However, expose is explicitly outside this project.
@@ -552,16 +478,11 @@ No Baffle integration test or runtime migration is required in this project. Uni
 
 Update runtime documentation to describe inject as:
 
-```text
-agent TCP
-    ->
-cladding-bridge
-    ->
-multiplexed podman-exec transport
-    ->
-host Cladding
-    ->
-fixed host TCP endpoint
+```mermaid
+flowchart LR
+    Agent["Agent TCP"] --> Bridge["cladding-bridge"]
+    Bridge -->|"multiplexed podman-exec transport"| Host["Host Cladding"]
+    Host --> Target["Fixed host TCP endpoint"]
 ```
 
 Remove references to:
