@@ -283,9 +283,10 @@ where
     T: futures_util::io::AsyncRead + futures_util::io::AsyncWrite + Unpin + Send + 'static,
 {
     let mut pending = VecDeque::new();
+    let mut opening: Option<(Stream, tokio::sync::oneshot::Sender<Stream>)> = None;
 
     loop {
-        if pending.is_empty() {
+        if pending.is_empty() && opening.is_none() {
             tokio::select! {
                 request = requests.recv() => match request {
                     Some(request) => pending.push_back(request),
@@ -301,15 +302,35 @@ where
             }
         } else {
             let event = poll_fn(|cx| {
-                if !pending.is_empty() {
+                if opening.is_none() && !pending.is_empty() {
                     match connection.poll_new_outbound(cx) {
                         std::task::Poll::Ready(Ok(stream)) => {
                             let request = pending.pop_front().expect("pending stream request");
+                            opening = Some((stream, request));
+                        }
+                        std::task::Poll::Ready(Err(error)) => {
+                            return std::task::Poll::Ready(Err(BridgeError::Mux(error)));
+                        }
+                        std::task::Poll::Pending => {}
+                    }
+                }
+
+                if let Some((stream, _)) = opening.as_mut() {
+                    // Yamux opens outbound streams lazily, on their first write.
+                    // An empty write sends only the SYN frame, so the fixed host
+                    // target can connect before the local client sends payload.
+                    match futures_util::io::AsyncWrite::poll_write(
+                        std::pin::Pin::new(stream),
+                        cx,
+                        &[],
+                    ) {
+                        std::task::Poll::Ready(Ok(_)) => {
+                            let (stream, request) = opening.take().expect("opening stream");
                             let _ = request.send(stream);
                             return std::task::Poll::Ready(Ok(()));
                         }
                         std::task::Poll::Ready(Err(error)) => {
-                            return std::task::Poll::Ready(Err(BridgeError::Mux(error)));
+                            return std::task::Poll::Ready(Err(BridgeError::Transport(error)));
                         }
                         std::task::Poll::Pending => {}
                     }
@@ -739,8 +760,25 @@ mod tests {
             MAX_CONCURRENT_STREAMS
         );
 
-        drop(extra);
         drop(clients);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while accepted.load(std::sync::atomic::Ordering::SeqCst)
+                < MAX_CONCURRENT_STREAMS + 1
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "stream capacity was not reused; connected {} targets, host_done={}, bridge_done={}",
+                accepted.load(std::sync::atomic::Ordering::SeqCst),
+                host.is_finished(),
+                bridge.is_finished(),
+            )
+        });
+
+        drop(extra);
         host.abort();
         bridge.abort();
         target_task.abort();
