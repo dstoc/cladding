@@ -327,13 +327,13 @@ class BaffleCiAssetsTests(unittest.TestCase):
         cases = {
             "embedded-linux-tools-x86_64": (
                 "x86_64",
-                "cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target-dir target/mcp-run",
+                "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target-dir target/mcp-run",
                 "baffle-proxy-v1.1.0-x86_64-unknown-linux-gnu.tar.gz",
                 "x86-64",
             ),
             "embedded-linux-tools-aarch64": (
                 "aarch64",
-                "cargo build --locked --release -p mcp-run --bin mcp-run --bin run-remote --target aarch64-unknown-linux-gnu --target-dir target/mcp-run",
+                "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/mcp-run",
                 "baffle-proxy-v1.1.0-aarch64-unknown-linux-gnu.tar.gz",
                 "aarch64",
             ),
@@ -359,6 +359,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
                     "baffle",
                     "mcp-run",
                     "run-remote",
+                    "cladding-bridge",
                     "baffle-socket-probe",
                 ):
                     self.assertIn(f'"$asset_dir/{name}"', block)
@@ -416,6 +417,17 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote",
             test,
         )
+        for job in (
+            "test",
+            "linux-integration",
+            "baffle-podman-machine",
+            "baffle-apple-silicon-build",
+        ):
+            with self.subTest(job=job):
+                self.assertIn(
+                    "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge",
+                    job_block(job),
+                )
         integration = job_block("linux-integration")
         self.assertIn(
             "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe",
@@ -445,6 +457,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         upload = job_block("upload-binaries", RELEASE_TEXT)
         self.assertIn("needs: [release-please, build-helpers]", upload)
         self.assertNotIn("embedded-linux-tools-", upload)
+        self.assertIn(
+            "CLADDING_BRIDGE_BIN=$GITHUB_WORKSPACE/helpers/cladding-bridge", upload
+        )
         release_platforms = re.findall(
             r"(?m)^          - os: ([^\s]+)\n            target: ([^\s]+)\n"
             r"            baffle_arch: ([^\s]+)\n            helper_arch: ([^\s]+)$",
@@ -473,6 +488,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 ),
             ],
         )
+
+        helpers = job_block("build-helpers", RELEASE_TEXT)
+        self.assertIn("-p mcp-run -p cladding-bridge", helpers)
+        self.assertIn('cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/', helpers)
+        self.assertIn('name: cladding-linux-helpers-${{ matrix.arch }}', helpers)
+        self.assertIn('name: cladding-linux-helpers-${{ matrix.helper_arch }}', upload)
+        self.assertIn('x86_64:"ELF 64-bit"*x86-64*) ;;', helpers)
+        self.assertIn('aarch64:"ELF 64-bit"*aarch64*) ;;', helpers)
 
         download = upload.split(
             "- name: Download and verify pinned Baffle v1.1.0 release", 1
@@ -568,6 +591,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('test -f "$tool"', apple_silicon)
         self.assertIn('test -x "$tool"', apple_silicon)
         self.assertIn('"ELF 64-bit"*aarch64*) ;;', apple_silicon)
+        self.assertIn(
+            "cargo test --locked --lib embedded_as_a_linux_binary", apple_silicon
+        )
 
     def test_ci_and_release_platforms_exclude_intel_macos(self):
         for reference in (

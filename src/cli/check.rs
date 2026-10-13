@@ -47,7 +47,7 @@ pub(super) fn check_required_binaries(context: &Context, config: &ExecutionConfi
     let mut missing = false;
     let bin_dir = context.project_root.join("tools/bin");
 
-    let mut required = vec!["mcp-run", "run-remote", "baffle"];
+    let mut required = vec!["mcp-run", "run-remote", "cladding-bridge", "baffle"];
     if config.nw_sandbox_enabled() {
         required.push("run-in-nw-sandbox");
     }
@@ -695,6 +695,10 @@ mod tests {
         let config = execution_config(true, true, Vec::new());
 
         assert!(check_required_binaries(&context, &config).is_ok());
+
+        fs::remove_file(bin_dir.join("cladding-bridge")).expect("remove bridge tool");
+        assert!(check_required_binaries(&context, &config).is_err());
+        write_embedded_tools(&bin_dir).expect("restore embedded tools");
 
         fs::write(bin_dir.join("baffle"), b"stale").expect("stale tool");
         assert!(check_required_binaries(&context, &config).is_err());

@@ -14,6 +14,7 @@ static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/config-template")
 
 static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
 static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
+static CLADDING_BRIDGE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cladding-bridge"));
 static BAFFLE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/baffle"));
 
 const RUN_IN_NW_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_NW_SANDBOX_SOCKET:?RUN_NW_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_NW_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
@@ -49,6 +50,7 @@ pub fn tool_files() -> Vec<(&'static str, &'static [u8])> {
     vec![
         ("mcp-run", MCP_RUN_BIN),
         ("run-remote", RUN_REMOTE_BIN),
+        ("cladding-bridge", CLADDING_BRIDGE_BIN),
         ("baffle", BAFFLE_BIN),
         ("run-in-nw-sandbox", RUN_IN_NW_SANDBOX),
         ("run-in-fs-sandbox", RUN_IN_FS_SANDBOX),
@@ -491,6 +493,48 @@ unmatched = "deny"
             arch => panic!("unsupported Cladding target architecture: {arch}"),
         };
         assert_eq!(machine, expected, "Baffle architecture must match Cladding");
+    }
+
+    #[test]
+    fn cladding_bridge_is_embedded_as_a_linux_binary() {
+        let (_, bridge) = tool_files()
+            .into_iter()
+            .find(|(name, _)| *name == "cladding-bridge")
+            .expect("embedded cladding-bridge tool");
+        assert!(bridge.len() >= 20);
+        assert_eq!(&bridge[..4], b"\x7fELF");
+        assert_eq!(bridge[4], 2, "cladding-bridge must be 64-bit");
+        assert_eq!(bridge[5], 1, "cladding-bridge must be little-endian");
+
+        let machine = u16::from_le_bytes([bridge[18], bridge[19]]);
+        let expected = match std::env::consts::ARCH {
+            "x86_64" => 62,
+            "aarch64" => 183,
+            arch => panic!("unsupported Cladding target architecture: {arch}"),
+        };
+        assert_eq!(
+            machine, expected,
+            "cladding-bridge architecture must match Cladding"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cladding_bridge_is_materialized_as_an_executable_tool() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = create_temp_dir("cladding-bridge");
+        write_embedded_tools(&temp).expect("write embedded tools");
+        let bridge = temp.join("cladding-bridge");
+        assert_eq!(
+            fs::read(&bridge).expect("read cladding-bridge"),
+            CLADDING_BRIDGE_BIN
+        );
+        assert_eq!(
+            fs::metadata(&bridge).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        fs::remove_dir_all(temp).expect("remove temporary directory");
     }
 
     #[cfg(unix)]
