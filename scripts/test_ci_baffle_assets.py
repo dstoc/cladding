@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Check pinned Baffle releases and architecture-specific CI helper artifacts."""
 
+import importlib.util
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,6 +23,12 @@ BAFFLE_RUNTIME_VALIDATOR = (
 RUNTIME_TOPOLOGY_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_runtime_topology.sh"
 )
+INJECT_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_inject.py"
+INJECT_SPEC = importlib.util.spec_from_file_location("validate_inject", INJECT_VALIDATOR)
+if INJECT_SPEC is None or INJECT_SPEC.loader is None:
+    raise RuntimeError(f"could not load inject validator from {INJECT_VALIDATOR}")
+INJECT_MODULE = importlib.util.module_from_spec(INJECT_SPEC)
+INJECT_SPEC.loader.exec_module(INJECT_MODULE)
 RUNTIME_TOPOLOGY_IMAGE = (
     Path(__file__).parents[1] / "scripts/runtime-topology-image/Containerfile"
 )
@@ -202,7 +210,11 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
         self.assertIn("FROM debian:trixie-slim", containerfile)
         self.assertIn(
-            "apt-get install -y --no-install-recommends ca-certificates coreutils curl grep socat",
+            "apt-get install -y --no-install-recommends ca-certificates coreutils curl grep python3 socat",
+            containerfile,
+        )
+        self.assertIn(
+            "Python provides the in-container client for the cladding inject integration check.",
             containerfile,
         )
         self.assertIn("USER ${UID}:${GID}", containerfile)
@@ -217,7 +229,6 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "gcc",
             "clang",
             "cargo",
-            "python3",
             "python3-pip",
             "python3-venv",
         ):
@@ -231,6 +242,35 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("scripts/validate_runtime_topology.sh default", machine)
         self.assertNotIn("scripts/validate_baffle_runtime.sh", machine)
         self.assertNotIn("scripts/validate_managed_mounts.sh", machine)
+
+    def test_shared_topology_validator_exercises_inject_without_a_host_socket_mount(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        inject = INJECT_VALIDATOR.read_text()
+        self.assertIn('"$script_dir/validate_inject.py"', validator)
+        self.assertIn('  --agent "$agent"', validator)
+        self.assertLess(
+            validator.index('test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)"'),
+            validator.index('phase="validate cladding inject transport and lifecycle"'),
+        )
+        self.assertIn('"localhost:{host_port}"', inject)
+        self.assertIn('("127.0.0.1", 0)', inject)
+        self.assertIn("start_new_session=True", inject)
+        self.assertIn("self.wait_for_agent_file(ready_file, 8, phase)", inject)
+        self.assertIn(
+            'self.checked_podman("exec", self.agent, "python3", "-c", KILL_BRIDGE', inject
+        )
+        self.assertIn("agent-side client did not observe bridge transport closure", inject)
+        self.assertIn('"/run/cladding/agent/inject"', inject)
+        for phase in (
+            "agent-side listener port already occupied",
+            "host destination refuses connections",
+            "agent container exits during an active stream",
+            "agent bridge exec/mux transport closes unexpectedly",
+        ):
+            with self.subTest(phase=phase):
+                self.assertIn(phase, inject)
+        self.assertIn("signal.SIGINT", inject)
+        self.assertIn("signal.SIGTERM", inject)
 
     def test_shared_topology_validator_exercises_one_off_run_sources_and_cleanup(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
@@ -662,6 +702,41 @@ class BaffleCiAssetsTests(unittest.TestCase):
         ):
             with self.subTest(validator=validator):
                 self.assertIn(validator, integration)
+
+
+class InjectProcessCleanupTests(unittest.TestCase):
+    def test_timeout_reaps_a_hanging_inject_and_keeps_cleanup_reference(self):
+        with tempfile.TemporaryDirectory(prefix="cladding-inject-timeout-test-") as temp:
+            fake_cladding = Path(temp) / "fake-cladding"
+            fake_cladding.write_text(
+                "#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n",
+                encoding="utf-8",
+            )
+            fake_cladding.chmod(0o755)
+            validator = INJECT_MODULE.InjectValidator(str(fake_cladding), temp, "agent")
+            process = validator.start_inject(12345, 12346)
+            try:
+                with self.assertRaisesRegex(
+                    INJECT_MODULE.ValidationFailure,
+                    "hanging inject test: process timed out",
+                ):
+                    validator.collect_inject(0.1, "hanging inject test")
+                self.assertIsNotNone(
+                    process.poll(), "timeout cleanup must reap the inject process"
+                )
+                self.assertIs(
+                    validator.inject,
+                    process,
+                    "the validator must retain the process until cleanup can finish",
+                )
+            finally:
+                validator.cleanup()
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=3)
+
+            self.assertIsNone(validator.inject)
+            self.assertIsNotNone(process.returncode)
 
 
 if __name__ == "__main__":

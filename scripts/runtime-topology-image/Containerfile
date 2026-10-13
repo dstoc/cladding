@@ -1,7 +1,8 @@
 FROM debian:trixie-slim
 
+# Python provides the in-container client for the cladding inject integration check.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates coreutils curl grep socat \
+    && apt-get install -y --no-install-recommends ca-certificates coreutils curl grep python3 socat \
     && rm -rf /var/lib/apt/lists/*
 
 ARG UID=1000

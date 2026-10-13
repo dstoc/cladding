@@ -17,7 +17,7 @@ case "$runtime" in
   *) echo "runtime must be default or runsc" >&2; exit 2 ;;
 esac
 
-for tool in podman jq; do
+for tool in podman jq python3; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required topology-test tool is missing: $tool" >&2
     exit 2
@@ -307,6 +307,14 @@ test "$nw_output" = nw-sandbox-uds-ok
 phase="verify shared managed mount communication"
 podman exec "$agent" sh -ec 'printf "agent-to-sandbox-ok\n" > /shared/topology-marker'
 test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)" = agent-to-sandbox-ok
+
+# The inject lifecycle check stops and restarts the agent. Run it after the
+# topology checks that validate mounts shared with the agent.
+phase="validate cladding inject transport and lifecycle"
+python3 "$script_dir/validate_inject.py" \
+  --cladding-bin "$cladding_bin" \
+  --cladding-dir "$project_root" \
+  --agent "$agent"
 
 phase="stop Cladding runtime and clean owned resources"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
