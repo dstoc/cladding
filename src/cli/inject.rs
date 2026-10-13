@@ -1,25 +1,23 @@
 use super::args::{InjectArgs, InjectHostEndpoint};
 use super::context::{Context, project_runtime_status};
 use super::exec::agent_runtime_names;
-use super::expose::socat_required;
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
 use cladding::podman::{podman_container_exists, podman_required};
+use cladding_bridge::{HostTarget, run_host_session};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::process::ExitStatus;
+use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
+use tokio::process::{Child, Command};
+
+const BRIDGE_BINARY: &str = "/opt/tools/bin/cladding-bridge";
+const EXEC_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 pub(super) fn cmd_inject(context: &Context, args: &InjectArgs) -> Result<()> {
     podman_required("podman (required for cladding inject)")?;
-    socat_required("inject")?;
 
     let config = context.load_config()?;
     let status = project_runtime_status(context, &config, false, false)?;
@@ -39,376 +37,264 @@ pub(super) fn cmd_inject(context: &Context, args: &InjectArgs) -> Result<()> {
         return Err(Error::message("missing agent container"));
     }
 
-    if !agent_inject_mount_available(&agent_container_name)? {
+    if !agent_bridge_available(&agent_container_name)? {
         eprintln!(
-            "error: target container '{}' is missing /run/cladding/agent/inject for project '{}'",
-            agent_container_name, config.name
+            "error: target container '{}' is missing {}",
+            agent_container_name, BRIDGE_BINARY
         );
-        eprintln!("hint: run 'cladding down' then 'cladding up'");
-        return Err(Error::message("missing inject mount"));
+        eprintln!("hint: run 'cladding build' then 'cladding up'");
+        return Err(Error::message("missing cladding-bridge helper"));
     }
 
     let container_port = args.container_port.unwrap_or(args.host_endpoint.port);
-    let host_socket_dir = inject_host_socket_dir(&context.project_root, container_port);
-    let host_socket = host_socket_path(&context.project_root, container_port);
-    ensure_inject_socket_path_available(&host_socket)?;
-    fs::create_dir_all(&host_socket_dir).with_context(|| {
-        format!(
-            "failed to create inject socket directory {}",
-            host_socket_dir.display()
-        )
-    })?;
-
-    let agent_socket = inject_agent_socket_path(container_port);
-    let mut host_cmd = build_inject_host_bridge_command(&host_socket, &args.host_endpoint);
-    let mut host_child = match host_cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            cleanup_inject_socket_artifacts(&host_socket_dir, &host_socket);
-            return Err(anyhow::Error::new(err)
-                .context("failed to run host socat for cladding inject")
-                .into());
-        }
-    };
-
-    let agent_listener_args = build_inject_agent_listener_args(&agent_socket, container_port);
-    let mut agent_cmd =
-        build_inject_agent_exec_command(&agent_container_name, &agent_listener_args);
-    let mut agent_child = match agent_cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            let _ = host_child.kill();
-            let _ = host_child.wait();
-            cleanup_inject_socket_artifacts(&host_socket_dir, &host_socket);
-            return Err(anyhow::Error::new(err)
-                .context("failed to run podman exec for cladding inject")
-                .into());
-        }
-    };
-
-    let result = supervise_inject_children(
-        &mut host_child,
-        &mut agent_child,
-        &agent_container_name,
-        container_port,
-    );
-
-    cleanup_inject_socket_artifacts(&host_socket_dir, &host_socket);
-    result
+    run_inject_bridge(&agent_container_name, &args.host_endpoint, container_port)
 }
 
-fn agent_inject_mount_available(agent_container_name: &str) -> Result<bool> {
-    let status = Command::new("podman")
-        .args([
-            "exec",
-            agent_container_name,
-            "test",
-            "-d",
-            "/run/cladding/agent/inject",
-        ])
+fn agent_bridge_available(agent_container_name: &str) -> Result<bool> {
+    let status = build_agent_bridge_check_command(agent_container_name)
         .status()
-        .with_context(|| "failed to check inject mount availability")?;
+        .with_context(|| "failed to check cladding-bridge availability")?;
 
     Ok(status.success())
 }
 
-fn inject_host_socket_dir(project_root: &Path, container_port: u16) -> PathBuf {
-    project_root
-        .join("runtime/sockets/agent/inject")
-        .join(container_port.to_string())
-}
-
-fn host_socket_path(project_root: &Path, container_port: u16) -> PathBuf {
-    inject_host_socket_dir(project_root, container_port).join("host.sock")
-}
-
-fn inject_agent_socket_path(container_port: u16) -> String {
-    format!("/run/cladding/agent/inject/{container_port}/host.sock")
-}
-
-fn ensure_inject_socket_path_available(host_socket: &Path) -> Result<()> {
-    if host_socket.exists() {
-        eprintln!(
-            "error: inject socket already exists at {}",
-            host_socket.display()
-        );
-        return Err(Error::message("inject socket already exists"));
-    }
-    Ok(())
-}
-
-fn build_inject_host_bridge_command(host_socket: &Path, endpoint: &InjectHostEndpoint) -> Command {
-    let mut cmd = Command::new("socat");
-    cmd.arg(format!(
-        "UNIX-LISTEN:{},fork,reuseaddr",
-        host_socket.display()
-    ));
-    cmd.arg(format!("TCP:{}:{}", endpoint.host, endpoint.port));
+fn build_agent_bridge_check_command(agent_container_name: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("podman");
+    cmd.args(["exec", agent_container_name, "test", "-x", BRIDGE_BINARY]);
     cmd
 }
 
-fn build_inject_agent_listener_args(agent_socket: &str, container_port: u16) -> Vec<String> {
-    vec![
-        "socat".to_string(),
-        format!("TCP-LISTEN:{container_port},bind=127.0.0.1,fork,reuseaddr"),
-        format!("UNIX-CONNECT:{agent_socket}"),
-    ]
-}
-
-fn build_inject_agent_exec_command(
-    agent_container_name: &str,
-    listener_args: &[String],
-) -> Command {
-    let mut cmd = Command::new("podman");
-    cmd.args(["exec", "-i", agent_container_name]);
-    for arg in listener_args {
-        cmd.arg(arg);
-    }
-    cmd
-}
-
-fn build_inject_agent_cleanup_command(
-    agent_container_name: &str,
-    listener_pattern: &str,
-) -> Command {
+fn build_inject_agent_exec_command(agent_container_name: &str, container_port: u16) -> Command {
     let mut cmd = Command::new("podman");
     cmd.args([
         "exec",
+        "-i",
         agent_container_name,
-        "pkill",
-        "-f",
-        listener_pattern,
-    ]);
+        BRIDGE_BINARY,
+        "listen",
+        "--tcp",
+    ])
+    .arg(format!("127.0.0.1:{container_port}"))
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.as_std_mut().process_group(0);
+    }
     cmd
 }
 
-fn supervise_inject_children(
-    host_child: &mut Child,
-    agent_child: &mut Child,
+fn host_target(endpoint: &InjectHostEndpoint) -> HostTarget {
+    HostTarget::tcp(endpoint.host.clone(), endpoint.port)
+}
+
+fn run_inject_bridge(
     agent_container_name: &str,
+    endpoint: &InjectHostEndpoint,
     container_port: u16,
 ) -> Result<()> {
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let mut signals =
-        Signals::new([SIGINT, SIGTERM]).with_context(|| "failed to install signal handlers")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .with_context(|| "failed to create inject bridge runtime")?;
+
+    runtime.block_on(run_inject_bridge_async(
+        agent_container_name,
+        endpoint,
+        container_port,
+    ))
+}
+
+async fn run_inject_bridge_async(
+    agent_container_name: &str,
+    endpoint: &InjectHostEndpoint,
+    container_port: u16,
+) -> Result<()> {
+    let signals = Signals::new([SIGINT, SIGTERM])
+        .with_context(|| "failed to install inject signal handlers")?;
+    let mut child = build_inject_agent_exec_command(agent_container_name, container_port)
+        .spawn()
+        .with_context(|| "failed to run podman exec for cladding inject")?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .context("podman exec did not provide a stdout pipe")?;
+    let stdin = child
+        .stdin
+        .take()
+        .context("podman exec did not provide a stdin pipe")?;
+    let transport = tokio::io::join(stdout, stdin);
+
+    let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
     let signal_handle = signals.handle();
-    let signal_flag = Arc::clone(&interrupted);
     let signal_thread = thread::spawn(move || {
+        let mut signals = signals;
         if signals.forever().next().is_some() {
-            signal_flag.store(true, Ordering::Relaxed);
+            let _ = signal_tx.send(());
         }
     });
 
-    enum ExitCause {
+    enum SessionEnd {
         Interrupted,
-        Host(std::process::ExitStatus),
-        Agent(std::process::ExitStatus),
+        Transport(std::result::Result<(), cladding_bridge::BridgeError>),
     }
 
-    let exit_cause = loop {
-        if interrupted.load(Ordering::Relaxed) {
-            break ExitCause::Interrupted;
+    let session_end = {
+        let session = run_host_session(transport, host_target(endpoint));
+        tokio::pin!(session);
+        tokio::select! {
+            result = &mut session => SessionEnd::Transport(result),
+            _ = signal_rx => SessionEnd::Interrupted,
         }
-
-        if let Some(status) = host_child
-            .try_wait()
-            .with_context(|| "failed to wait on host socat for cladding inject")?
-        {
-            break ExitCause::Host(status);
-        }
-
-        if let Some(status) = agent_child
-            .try_wait()
-            .with_context(|| "failed to wait on podman exec for cladding inject")?
-        {
-            break ExitCause::Agent(status);
-        }
-
-        thread::sleep(Duration::from_millis(100));
     };
 
-    let _ = host_child.kill();
-    let _ = agent_child.kill();
-    let host_status = host_child.wait();
-    let agent_status = agent_child.wait();
-
+    // Dropping the session closes podman exec stdin. The remote helper sees EOF
+    // and exits before the bounded child wait below completes.
     signal_handle.close();
     let _ = signal_thread.join();
 
-    let listener_args =
-        build_inject_agent_listener_args(&inject_agent_socket_path(container_port), container_port);
-    let listener_pattern = listener_args.join(" ");
-    let _cleanup_status =
-        build_inject_agent_cleanup_command(agent_container_name, &listener_pattern)
-            .status()
-            .ok();
-
-    let _ = host_status;
-    let _ = agent_status;
-
-    match exit_cause {
-        ExitCause::Interrupted => Ok(()),
-        ExitCause::Host(status) => {
-            if status.success() {
-                Err(Error::message("inject host bridge exited unexpectedly"))
-            } else {
-                Err(Error::CommandFailed {
-                    context: "inject host socat",
-                    code: status.code().unwrap_or(1),
-                })
+    let (status, forced) = wait_for_inject_exec(&mut child).await?;
+    match session_end {
+        SessionEnd::Interrupted => {
+            if forced {
+                eprintln!("warning: terminated podman exec after its grace period");
             }
+            Ok(())
         }
-        ExitCause::Agent(status) => {
-            if status.success() {
-                Err(Error::message("inject agent listener exited unexpectedly"))
-            } else {
-                Err(Error::CommandFailed {
-                    context: "podman exec",
-                    code: status.code().unwrap_or(1),
-                })
-            }
-        }
+        SessionEnd::Transport(Err(error)) => Err(anyhow::Error::new(error)
+            .context("cladding inject bridge transport failed")
+            .into()),
+        SessionEnd::Transport(Ok(())) if forced => Err(Error::message(
+            "podman exec did not exit after the bridge transport closed",
+        )),
+        SessionEnd::Transport(Ok(())) if !status.success() => Err(Error::CommandFailed {
+            context: "podman exec",
+            code: status.code().unwrap_or(1),
+        }),
+        SessionEnd::Transport(Ok(())) => Err(Error::message(
+            "inject bridge transport closed unexpectedly",
+        )),
     }
 }
 
-fn cleanup_inject_socket_artifacts(host_socket_dir: &Path, host_socket: &Path) {
-    let _ = fs::remove_file(host_socket);
-    let _ = fs::remove_dir_all(host_socket_dir);
+async fn wait_for_inject_exec(child: &mut Child) -> Result<(ExitStatus, bool)> {
+    wait_for_inject_exec_with_grace(child, EXEC_GRACE_PERIOD).await
+}
+
+async fn wait_for_inject_exec_with_grace(
+    child: &mut Child,
+    grace_period: Duration,
+) -> Result<(ExitStatus, bool)> {
+    match tokio::time::timeout(grace_period, child.wait()).await {
+        Ok(status) => Ok((
+            status.with_context(|| "failed to wait for podman exec")?,
+            false,
+        )),
+        Err(_) => {
+            child
+                .kill()
+                .await
+                .with_context(|| "failed to terminate podman exec after its grace period")?;
+            let status = child
+                .wait()
+                .await
+                .with_context(|| "failed to reap podman exec after termination")?;
+            Ok((status, true))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn command_args(cmd: &Command) -> Vec<String> {
-        cmd.get_args()
+        cmd.as_std()
+            .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
     }
 
     #[test]
-    fn inject_socket_helpers_build_expected_paths() {
-        let project_root = Path::new("/tmp/project/.cladding");
+    fn build_inject_exec_command_starts_one_interactive_bridge() {
+        let cmd = build_inject_agent_exec_command("demo-agent-instance", 15432);
+        let args = command_args(&cmd);
+
+        assert_eq!(cmd.as_std().get_program().to_string_lossy(), "podman");
         assert_eq!(
-            inject_host_socket_dir(project_root, 15432),
-            PathBuf::from("/tmp/project/.cladding/runtime/sockets/agent/inject/15432")
+            args,
+            vec![
+                "exec",
+                "-i",
+                "demo-agent-instance",
+                BRIDGE_BINARY,
+                "listen",
+                "--tcp",
+                "127.0.0.1:15432",
+            ]
         );
-        assert_eq!(
-            host_socket_path(project_root, 15432),
-            PathBuf::from("/tmp/project/.cladding/runtime/sockets/agent/inject/15432/host.sock")
-        );
-        assert_eq!(
-            inject_agent_socket_path(15432),
-            "/run/cladding/agent/inject/15432/host.sock"
-        );
+        assert!(!args.iter().any(|arg| arg == "socat" || arg == "-t"));
     }
 
     #[test]
-    fn ensure_inject_socket_path_available_detects_conflict() {
-        let temp = create_temp_dir("inject-socket-conflict");
-        let socket = host_socket_path(&temp, 15432);
-        if let Some(parent) = socket.parent() {
-            fs::create_dir_all(parent).expect("create socket parent");
-        }
-        fs::write(&socket, b"busy").expect("create conflicting socket path");
-
-        assert!(ensure_inject_socket_path_available(&socket).is_err());
-    }
-
-    #[test]
-    fn build_inject_host_bridge_command_uses_requested_endpoint() {
-        let cmd = build_inject_host_bridge_command(
-            Path::new("/tmp/project/.cladding/runtime/sockets/agent/inject/15432/host.sock"),
-            &InjectHostEndpoint {
+    fn inject_host_target_is_fixed_to_the_parsed_endpoint() {
+        assert_eq!(
+            host_target(&InjectHostEndpoint {
                 host: "db.internal".to_string(),
                 port: 5432,
-            },
-        );
-        let args = command_args(&cmd);
-
-        assert_eq!(cmd.get_program().to_string_lossy(), "socat");
-        assert_eq!(
-            args,
-            vec![
-                "UNIX-LISTEN:/tmp/project/.cladding/runtime/sockets/agent/inject/15432/host.sock,fork,reuseaddr",
-                "TCP:db.internal:5432"
-            ]
+            }),
+            HostTarget::tcp("db.internal", 5432)
         );
     }
 
     #[test]
-    fn build_inject_agent_listener_args_match_prd_shape() {
-        let args =
-            build_inject_agent_listener_args("/run/cladding/agent/inject/15432/host.sock", 15432);
+    fn helper_preflight_uses_the_mounted_bridge_path() {
+        let cmd = build_agent_bridge_check_command("demo-agent-instance");
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         assert_eq!(
             args,
-            vec![
-                "socat".to_string(),
-                "TCP-LISTEN:15432,bind=127.0.0.1,fork,reuseaddr".to_string(),
-                "UNIX-CONNECT:/run/cladding/agent/inject/15432/host.sock".to_string(),
-            ]
+            vec!["exec", "demo-agent-instance", "test", "-x", BRIDGE_BINARY]
         );
     }
 
-    #[test]
-    fn build_inject_agent_exec_command_has_no_runtime_flags() {
-        let cmd = build_inject_agent_exec_command(
-            "demo-agent-instance",
-            &build_inject_agent_listener_args("/run/cladding/agent/inject/15432/host.sock", 15432),
-        );
-        let args = command_args(&cmd);
+    #[tokio::test]
+    async fn inject_exec_exits_gracefully_after_transport_eof() {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("start stdin reader");
+        drop(child.stdin.take());
 
-        assert_eq!(
-            args,
-            vec![
-                "exec".to_string(),
-                "-i".to_string(),
-                "demo-agent-instance".to_string(),
-                "socat".to_string(),
-                "TCP-LISTEN:15432,bind=127.0.0.1,fork,reuseaddr".to_string(),
-                "UNIX-CONNECT:/run/cladding/agent/inject/15432/host.sock".to_string(),
-            ]
-        );
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "--runtime" || arg == "--runtime-flag")
-        );
+        let (status, forced) = wait_for_inject_exec_with_grace(&mut child, Duration::from_secs(1))
+            .await
+            .expect("wait for stdin reader");
+        assert!(status.success());
+        assert!(!forced);
     }
 
-    #[test]
-    fn build_inject_agent_cleanup_command_targets_exact_pattern() {
-        let cmd = build_inject_agent_cleanup_command(
-            "demo-agent-instance",
-            "socat TCP-LISTEN:15432,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/cladding/agent/inject/15432/host.sock",
-        );
-        let args = command_args(&cmd);
+    #[tokio::test]
+    async fn inject_exec_is_killed_after_grace_period() {
+        let mut child = Command::new("sleep")
+            .arg("10")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start long-running process");
 
-        assert_eq!(cmd.get_program().to_string_lossy(), "podman");
-        assert_eq!(
-            args,
-            vec![
-                "exec".to_string(),
-                "demo-agent-instance".to_string(),
-                "pkill".to_string(),
-                "-f".to_string(),
-                "socat TCP-LISTEN:15432,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/cladding/agent/inject/15432/host.sock".to_string(),
-            ]
-        );
-    }
-
-    fn create_temp_dir(name: &str) -> PathBuf {
-        let unique = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path =
-            env::temp_dir().join(format!("cladding-{name}-{}-{}", std::process::id(), unique));
-        if path.exists() {
-            fs::remove_dir_all(&path).expect("cleanup stale temp dir");
-        }
-        fs::create_dir_all(&path).expect("create temp dir");
-        path
+        let (status, forced) =
+            wait_for_inject_exec_with_grace(&mut child, Duration::from_millis(10))
+                .await
+                .expect("terminate long-running process");
+        assert!(!status.success());
+        assert!(forced);
     }
 }

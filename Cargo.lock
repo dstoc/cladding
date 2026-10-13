@@ -391,6 +391,7 @@ name = "cladding"
 version = "0.4.4"
 dependencies = [
  "anyhow",
+ "cladding-bridge",
  "clap",
  "include_dir",
  "jj-version",
@@ -401,6 +402,7 @@ dependencies = [
  "signal-hook",
  "thiserror 2.0.18",
  "time",
+ "tokio",
  "toml",
  "x509-parser",
 ]
