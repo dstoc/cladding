@@ -76,14 +76,12 @@ Cladding creates a private runtime socket root and per-component subdirectories:
 
 - `.cladding/runtime/sockets`
 - `.cladding/runtime/sockets/proxy`
-- `.cladding/runtime/sockets/agent/inject`
 - `.cladding/runtime/sockets/proxy/agent`
 - `.cladding/runtime/sockets/proxy/nw-sandbox`
 - `.cladding/runtime/sockets/run/nw-sandbox`
 - `.cladding/runtime/sockets/run/fs-sandbox`
 
 Cladding mounts `.cladding/runtime/sockets/proxy` as the parent path and mounts a separate managed volume at each enabled component directory. Baffle binds each session socket directly in its volume on both Linux rootless Podman and macOS Podman machine. Each volume is shared only with its matching execution container, which preserves the mode-`0600` socket and mode-`0700` parent. The proxy's control socket and runtime configuration stay inside the proxy container. The sticky-mode `1733` `/run/baffle` directory contains a proxy-owned mode-`0700` subdirectory with mode-`0600` config and socket files; a symlink preserves Baffle's default control-socket path. The agent uses its proxy socket for outbound HTTP proxying and the sandbox run sockets when the corresponding sandboxes are enabled. The nw-sandbox and fs-sandbox containers bind their own run sockets via `MCP_BIND_UDS`.
-`cladding inject` binds the agent inject socket under `/run/cladding/agent/inject` so a foreground command can reach one host endpoint for its duration.
 
 Each execution container keeps its `socat` listener on `127.0.0.1:3128` and forwards to its own Baffle `proxy.sock`. Baffle owns a mode-`0600` socket inside a mode-`0700` component directory. The proxy and execution containers use ordinary `keep-id` mappings, so each process uses the invoking host user's UID to access the socket without widening its permissions. Baffle's mode-`0600` control socket and runtime configuration stay in a mode-`0700` directory inside the proxy container. Startup writes a private daemon-config copy with the proxy process UID as Baffle's trusted operator. No separate proxy bridge container is used.
 
@@ -103,8 +101,19 @@ CI checks direct Baffle socket binds into managed volumes with rootless Podman a
 
 ## Blocking `cladding inject`
 - `cladding inject <host-endpoint> [container-port]` runs in the foreground on the host.
-- It mounts `/run/cladding/agent/inject` into the agent side and forwards the requested agent-local port to a host-reachable endpoint for the lifetime of that command.
-- Bare ports resolve to host `localhost`; explicit `host:port` targets are temporary exceptions for that command.
+- It starts `cladding-bridge` inside the agent over one long-lived multiplexed `podman exec` stream. Host Cladding opens each stream to the fixed TCP endpoint selected by the command.
+- The agent listens on `127.0.0.1:<container-port>`. The agent cannot select a different host destination.
+- Local Podman and Podman Machine use the same transport. A `localhost` destination resolves on the physical host where Cladding runs.
+- A bare port selects host `127.0.0.1` on the same port. An explicit `host:port` selects that host endpoint for the command.
+
+```mermaid
+flowchart LR
+    Agent["Agent TCP"] --> Bridge["cladding-bridge"]
+    Bridge -->|"multiplexed podman exec"| Host["Host Cladding"]
+    Host --> Target["Fixed host TCP endpoint"]
+```
+
+The reusable bridge and its future fixed Unix-socket target are described in the [Cladding bridge architecture](cladding-bridge/proposal.md). Moving Baffle to the physical host, changing its lifecycle, and removing its Podman socket volumes and local `socat` bridges require a separate proposal and task graph.
 
 ## Config and scripts materialization
 `cladding init` materializes the project layout under `.cladding`:
