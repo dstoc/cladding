@@ -308,7 +308,14 @@ class InjectValidator:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            stdout, stderr = process.communicate(timeout=3)
+            try:
+                stdout, stderr = process.communicate(timeout=3)
+            except subprocess.TimeoutExpired as cleanup_error:
+                raise ValidationFailure(
+                    f"{phase}: process timed out after {timeout:g}s and did not exit "
+                    f"after SIGKILL; pid={process.pid}; "
+                    f"stdout={cleanup_error.stdout!r} stderr={cleanup_error.stderr!r}"
+                ) from cleanup_error
             raise ValidationFailure(
                 f"{phase}: process timed out after {timeout:g}s; "
                 f"stdout={stdout!r} stderr={stderr!r}"
@@ -353,6 +360,7 @@ class InjectValidator:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
         return self.inject
 
@@ -360,8 +368,9 @@ class InjectValidator:
         if self.inject is None:
             raise ValidationFailure(f"{phase}: no inject command is running")
         process = self.inject
+        result = self.collect(process, timeout, phase)
         self.inject = None
-        return self.collect(process, timeout, phase)
+        return result
 
     def signal_inject(self, sig: signal.Signals, phase: str) -> tuple[int, str, str]:
         if self.inject is None or self.inject.poll() is not None:
@@ -442,13 +451,26 @@ class InjectValidator:
                     pass
         self.stop_occupier()
         if self.inject is not None:
-            if self.inject.poll() is None:
-                self.inject.send_signal(signal.SIGTERM)
+            process = self.inject
+            if process.poll() is None:
                 try:
-                    self.inject.communicate(timeout=10)
-                except subprocess.TimeoutExpired:
-                    self.inject.kill()
-                    self.inject.communicate(timeout=3)
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.communicate(timeout=3)
+                except subprocess.TimeoutExpired as error:
+                    raise ValidationFailure(
+                        f"{self.phase}: could not reap inject process group after SIGKILL; "
+                        f"pid={process.pid}; stdout={error.stdout!r} stderr={error.stderr!r}"
+                    ) from error
             self.inject = None
 
     def validate_occupied_listener(self, server: EchoServer) -> None:

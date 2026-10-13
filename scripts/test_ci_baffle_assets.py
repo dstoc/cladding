@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Check pinned Baffle releases and architecture-specific CI helper artifacts."""
 
+import importlib.util
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -22,6 +24,11 @@ RUNTIME_TOPOLOGY_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_runtime_topology.sh"
 )
 INJECT_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_inject.py"
+INJECT_SPEC = importlib.util.spec_from_file_location("validate_inject", INJECT_VALIDATOR)
+if INJECT_SPEC is None or INJECT_SPEC.loader is None:
+    raise RuntimeError(f"could not load inject validator from {INJECT_VALIDATOR}")
+INJECT_MODULE = importlib.util.module_from_spec(INJECT_SPEC)
+INJECT_SPEC.loader.exec_module(INJECT_MODULE)
 RUNTIME_TOPOLOGY_IMAGE = (
     Path(__file__).parents[1] / "scripts/runtime-topology-image/Containerfile"
 )
@@ -695,6 +702,41 @@ class BaffleCiAssetsTests(unittest.TestCase):
         ):
             with self.subTest(validator=validator):
                 self.assertIn(validator, integration)
+
+
+class InjectProcessCleanupTests(unittest.TestCase):
+    def test_timeout_reaps_a_hanging_inject_and_keeps_cleanup_reference(self):
+        with tempfile.TemporaryDirectory(prefix="cladding-inject-timeout-test-") as temp:
+            fake_cladding = Path(temp) / "fake-cladding"
+            fake_cladding.write_text(
+                "#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n",
+                encoding="utf-8",
+            )
+            fake_cladding.chmod(0o755)
+            validator = INJECT_MODULE.InjectValidator(str(fake_cladding), temp, "agent")
+            process = validator.start_inject(12345, 12346)
+            try:
+                with self.assertRaisesRegex(
+                    INJECT_MODULE.ValidationFailure,
+                    "hanging inject test: process timed out",
+                ):
+                    validator.collect_inject(0.1, "hanging inject test")
+                self.assertIsNotNone(
+                    process.poll(), "timeout cleanup must reap the inject process"
+                )
+                self.assertIs(
+                    validator.inject,
+                    process,
+                    "the validator must retain the process until cleanup can finish",
+                )
+            finally:
+                validator.cleanup()
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=3)
+
+            self.assertIsNone(validator.inject)
+            self.assertIsNotNone(process.returncode)
 
 
 if __name__ == "__main__":
