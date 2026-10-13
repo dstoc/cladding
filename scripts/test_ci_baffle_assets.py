@@ -21,6 +21,7 @@ BAFFLE_RUNTIME_VALIDATOR = (
 RUNTIME_TOPOLOGY_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_runtime_topology.sh"
 )
+INJECT_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_inject.py"
 RUNTIME_TOPOLOGY_IMAGE = (
     Path(__file__).parents[1] / "scripts/runtime-topology-image/Containerfile"
 )
@@ -202,7 +203,11 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
         self.assertIn("FROM debian:trixie-slim", containerfile)
         self.assertIn(
-            "apt-get install -y --no-install-recommends ca-certificates coreutils curl grep socat",
+            "apt-get install -y --no-install-recommends ca-certificates coreutils curl grep python3 socat",
+            containerfile,
+        )
+        self.assertIn(
+            "Python provides the in-container client for the cladding inject integration check.",
             containerfile,
         )
         self.assertIn("USER ${UID}:${GID}", containerfile)
@@ -217,7 +222,6 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "gcc",
             "clang",
             "cargo",
-            "python3",
             "python3-pip",
             "python3-venv",
         ):
@@ -231,6 +235,25 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("scripts/validate_runtime_topology.sh default", machine)
         self.assertNotIn("scripts/validate_baffle_runtime.sh", machine)
         self.assertNotIn("scripts/validate_managed_mounts.sh", machine)
+
+    def test_shared_topology_validator_exercises_inject_without_a_host_socket_mount(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        inject = INJECT_VALIDATOR.read_text()
+        self.assertIn('"$script_dir/validate_inject.py"', validator)
+        self.assertIn('  --agent "$agent"', validator)
+        self.assertIn('"localhost:{host_port}"', inject)
+        self.assertIn('("127.0.0.1", 0)', inject)
+        self.assertIn('"/run/cladding/agent/inject"', inject)
+        for phase in (
+            "agent-side listener port already occupied",
+            "host destination refuses connections",
+            "agent container exits during an active stream",
+            "podman exec mux transport closes unexpectedly",
+        ):
+            with self.subTest(phase=phase):
+                self.assertIn(phase, inject)
+        self.assertIn("signal.SIGINT", inject)
+        self.assertIn("signal.SIGTERM", inject)
 
     def test_shared_topology_validator_exercises_one_off_run_sources_and_cleanup(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()

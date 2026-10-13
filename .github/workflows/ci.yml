@@ -220,6 +220,7 @@ jobs:
             scripts/podman-build-timer; do
             sh -n "$script"
           done
+          python3 -m py_compile scripts/validate_inject.py
       - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/linux-tools/bin/baffle"
       - name: Validate shared runtime topology under rootless Podman

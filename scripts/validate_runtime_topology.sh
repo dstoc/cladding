@@ -17,7 +17,7 @@ case "$runtime" in
   *) echo "runtime must be default or runsc" >&2; exit 2 ;;
 esac
 
-for tool in podman jq; do
+for tool in podman jq python3; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required topology-test tool is missing: $tool" >&2
     exit 2
@@ -229,6 +229,12 @@ else
 fi
 require_volume_count inter-container-socket 3
 require_volume_count managed-mount 1
+
+phase="validate cladding inject transport and lifecycle"
+python3 "$script_dir/validate_inject.py" \
+  --cladding-bin "$cladding_bin" \
+  --cladding-dir "$project_root" \
+  --agent "$agent"
 
 phase="wait for Baffle control UDS and session sockets"
 ready=false
