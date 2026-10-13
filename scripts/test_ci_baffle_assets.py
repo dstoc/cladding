@@ -241,6 +241,10 @@ class BaffleCiAssetsTests(unittest.TestCase):
         inject = INJECT_VALIDATOR.read_text()
         self.assertIn('"$script_dir/validate_inject.py"', validator)
         self.assertIn('  --agent "$agent"', validator)
+        self.assertLess(
+            validator.index('test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)"'),
+            validator.index('phase="validate cladding inject transport and lifecycle"'),
+        )
         self.assertIn('"localhost:{host_port}"', inject)
         self.assertIn('("127.0.0.1", 0)', inject)
         self.assertIn("start_new_session=True", inject)

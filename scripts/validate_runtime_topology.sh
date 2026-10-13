@@ -230,12 +230,6 @@ fi
 require_volume_count inter-container-socket 3
 require_volume_count managed-mount 1
 
-phase="validate cladding inject transport and lifecycle"
-python3 "$script_dir/validate_inject.py" \
-  --cladding-bin "$cladding_bin" \
-  --cladding-dir "$project_root" \
-  --agent "$agent"
-
 phase="wait for Baffle control UDS and session sockets"
 ready=false
 attempt=0
@@ -313,6 +307,14 @@ test "$nw_output" = nw-sandbox-uds-ok
 phase="verify shared managed mount communication"
 podman exec "$agent" sh -ec 'printf "agent-to-sandbox-ok\n" > /shared/topology-marker'
 test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)" = agent-to-sandbox-ok
+
+# The inject lifecycle check stops and restarts the agent. Run it after the
+# topology checks that validate mounts shared with the agent.
+phase="validate cladding inject transport and lifecycle"
+python3 "$script_dir/validate_inject.py" \
+  --cladding-bin "$cladding_bin" \
+  --cladding-dir "$project_root" \
+  --agent "$agent"
 
 phase="stop Cladding runtime and clean owned resources"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
