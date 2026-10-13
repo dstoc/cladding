@@ -14,7 +14,6 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 
 AGENT_CLIENT = r"""
@@ -66,6 +65,9 @@ with connection:
         elif index + 1 < len(config["frames"]):
             time.sleep(config.get("delay", 0))
     if config.get("wait_eof", False):
+        if config.get("ready_file"):
+            with open(config["ready_file"], "w", encoding="ascii"):
+                pass
         if connection.recv(1) != b"":
             raise RuntimeError("listener sent data after the final response")
 """
@@ -109,6 +111,28 @@ for comm in /proc/[0-9]*/comm; do
         exit 1
     fi
 done
+"""
+
+
+KILL_BRIDGE = r"""
+import os
+import signal
+from pathlib import Path
+
+pids = []
+for comm in Path("/proc").glob("[0-9]*/comm"):
+    try:
+        if comm.read_text(encoding="ascii").strip() == "cladding-bridge":
+            pids.append(int(comm.parent.name))
+    except (FileNotFoundError, ProcessLookupError):
+        continue
+if len(pids) > 1:
+    raise SystemExit(f"expected one agent bridge process, found {pids!r}")
+if pids:
+    try:
+        os.kill(pids[0], signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 """
 
 
@@ -244,6 +268,7 @@ class InjectValidator:
         delay: float = 0,
         wait_eof: bool = False,
         wait_file: str | None = None,
+        ready_file: str | None = None,
     ) -> subprocess.Popen[str]:
         config = json.dumps(
             {
@@ -251,6 +276,7 @@ class InjectValidator:
                 "delay": delay,
                 "wait_eof": wait_eof,
                 "wait_file": wait_file,
+                "ready_file": ready_file,
             }
         )
         process = subprocess.Popen(
@@ -377,6 +403,24 @@ class InjectValidator:
         raise ValidationFailure(
             f"{phase}: agent-side bridge process remains after inject exit; "
             f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+        )
+
+    def wait_for_agent_file(self, path: str, timeout: float, phase: str) -> None:
+        deadline = time.monotonic() + timeout
+        result: subprocess.CompletedProcess[str] | None = None
+        while time.monotonic() < deadline:
+            result = self.podman("exec", self.agent, "test", "-f", path, timeout=4)
+            if result.returncode == 0:
+                return
+            time.sleep(0.1)
+        details = "no probe result"
+        if result is not None:
+            details = (
+                f"exit={result.returncode} stdout={result.stdout.strip()!r} "
+                f"stderr={result.stderr.strip()!r}"
+            )
+        raise ValidationFailure(
+            f"{phase}: agent-side client did not acknowledge its active stream; {details}"
         )
 
     def stop_occupier(self) -> None:
@@ -562,8 +606,13 @@ class InjectValidator:
         port = self.allocate_agent_port()
         self.start_inject(host_port, port)
         payload = f"active-{secrets.token_hex(8)}".encode("ascii") + b"\x00\xff"
-        client = self.agent_client(port, [payload], wait_eof=True)
+        ready_file = f"/tmp/cladding-inject-active-{secrets.token_hex(6)}"
+        client = self.agent_client(
+            port, [payload], wait_eof=True, ready_file=ready_file
+        )
         server.wait_for(collections.Counter([payload]), 12, phase)
+        self.wait_for_agent_file(ready_file, 8, phase)
+        self.checked_podman("exec", self.agent, "rm", "-f", ready_file)
         if client.poll() is not None:
             status, stdout, stderr = self.collect(client, 1, phase)
             raise ValidationFailure(
@@ -620,50 +669,20 @@ class InjectValidator:
         self.assert_listener_closed(port, phase)
         self.assert_no_bridge_process(phase)
 
-    def find_exec_child(self, phase: str) -> int:
-        if self.inject is None:
-            raise ValidationFailure(f"{phase}: inject command is not running")
-        parent = self.inject.pid
-        children_file = Path(f"/proc/{parent}/task/{parent}/children")
-        deadline = time.monotonic() + 12
-        while time.monotonic() < deadline:
-            try:
-                children = children_file.read_text(encoding="ascii").split()
-            except FileNotFoundError:
-                raise ValidationFailure(f"{phase}: inject exited before its exec transport")
-            for child in children:
-                try:
-                    command = Path(f"/proc/{child}/cmdline").read_bytes()
-                except FileNotFoundError:
-                    continue
-                if b"/opt/tools/bin/cladding-bridge" in command:
-                    return int(child)
-            if self.inject.poll() is not None:
-                break
-            time.sleep(0.1)
-        raise ValidationFailure(f"{phase}: could not identify the podman exec transport child")
-
     def validate_exec_transport_close(self, server: EchoServer, host_port: int) -> None:
-        phase = "podman exec mux transport closes unexpectedly"
+        phase = "agent bridge exec/mux transport closes unexpectedly"
         port, client = self.active_stream(server, host_port, phase)
-        child = self.find_exec_child(phase)
-        process_group = os.getpgid(child)
-        if process_group != child:
-            raise ValidationFailure(
-                f"{phase}: podman exec transport child {child} is not its own process-group leader "
-                f"(process group {process_group})"
-            )
-        # The Podman Machine connection can run a local SSH transport below
-        # the podman CLI. Close the full process group so the remote exec
-        # session and its agent-side stream see the abrupt transport loss.
-        os.killpg(process_group, signal.SIGKILL)
+        # Killing the remote helper closes its exec/mux transport on every
+        # Podman backend. Killing the local CLI can leave a remote exec alive
+        # on Podman Machine because the SSH connection is managed separately.
+        self.checked_podman("exec", self.agent, "python3", "-c", KILL_BRIDGE, timeout=8)
         status, stdout, stderr = self.collect_inject(12, phase)
         if status == 0 or not any(
             marker in f"{stdout}\n{stderr}".lower()
             for marker in ("bridge transport", "transport closed unexpectedly", "podman exec")
         ):
             raise ValidationFailure(
-                f"{phase}: expected an identified transport failure after podman exec exited; "
+                f"{phase}: expected an identified transport failure after the agent bridge exited; "
                 f"exit={status} stdout={stdout.strip()!r} stderr={stderr.strip()!r}"
             )
         try:
@@ -685,7 +704,7 @@ class InjectValidator:
                 f"still running (exit {bridge.returncode}; stderr={bridge.stderr.strip()!r})"
             )
             raise ValidationFailure(
-                f"{phase}: agent-side client did not observe host exec transport closure; "
+                f"{phase}: agent-side client did not observe bridge transport closure; "
                 f"agent listener is {listener_state}; agent bridge process {bridge_state}; {error}"
             ) from error
         self.assert_listener_closed(port, phase)

@@ -244,14 +244,17 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('"localhost:{host_port}"', inject)
         self.assertIn('("127.0.0.1", 0)', inject)
         self.assertIn("start_new_session=True", inject)
-        self.assertIn("os.killpg(process_group, signal.SIGKILL)", inject)
-        self.assertIn("agent-side client did not observe host exec transport closure", inject)
+        self.assertIn("self.wait_for_agent_file(ready_file, 8, phase)", inject)
+        self.assertIn(
+            'self.checked_podman("exec", self.agent, "python3", "-c", KILL_BRIDGE', inject
+        )
+        self.assertIn("agent-side client did not observe bridge transport closure", inject)
         self.assertIn('"/run/cladding/agent/inject"', inject)
         for phase in (
             "agent-side listener port already occupied",
             "host destination refuses connections",
             "agent container exits during an active stream",
-            "podman exec mux transport closes unexpectedly",
+            "agent bridge exec/mux transport closes unexpectedly",
         ):
             with self.subTest(phase=phase):
                 self.assertIn(phase, inject)
