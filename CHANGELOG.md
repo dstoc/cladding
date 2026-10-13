@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.5](https://github.com/dstoc/cladding/compare/v0.4.4...v0.4.5) (2026-10-13)
+
+
+### Features
+
+* **bridge:** add fixed-endpoint yamux core ([#104](https://github.com/dstoc/cladding/issues/104)) ([ea33791](https://github.com/dstoc/cladding/commit/ea337914e76d25a6a2ba4845b8c29dfa6e82785e))
+* **inject:** use multiplexed bridge transport ([#108](https://github.com/dstoc/cladding/issues/108)) ([5c6abc3](https://github.com/dstoc/cladding/commit/5c6abc31e7a213e90accfe229e9427b77aa302bf))
+* package cladding-bridge as a Linux helper ([#107](https://github.com/dstoc/cladding/issues/107)) ([a216300](https://github.com/dstoc/cladding/commit/a21630048617ec019dfec974101fca5859b9b446))
+
+
+### Bug Fixes
+
+* **inject:** remove legacy socket topology ([#109](https://github.com/dstoc/cladding/issues/109)) ([f9e0b96](https://github.com/dstoc/cladding/commit/f9e0b96ba565c7936985d0890606f79704739347))
+
 ## [0.4.4](https://github.com/dstoc/cladding/compare/v0.4.3...v0.4.4) (2026-10-13)
 
 
