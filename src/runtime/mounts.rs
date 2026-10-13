@@ -304,7 +304,7 @@ fn build_mount_source(
         },
         (_, Some(path), None) => RuntimeMountSource::HostPath { path: path.clone() },
         (_, None, Some(name)) => RuntimeMountSource::NamedVolume {
-            claim_name: format!("{project_name}-{name}"),
+            claim_name: name.clone(),
         },
         (_, None, None) => RuntimeMountSource::EmptyDir,
         (_, Some(_), Some(_)) => RuntimeMountSource::EmptyDir,
@@ -776,6 +776,48 @@ mod tests {
                 size_bytes: Some(67_108_864)
             }
         ));
+    }
+
+    #[test]
+    fn explicitly_named_volumes_are_stable_across_persistent_and_one_off_runtimes() {
+        let project_root = Path::new("/tmp/project/.cladding");
+        let volume_mount = ResolvedMountConfig {
+            mount_path: "/home/user/.cache/kache".to_string(),
+            host_path: None,
+            volume: Some("cladding-kache".to_string()),
+            mount_type: MountType::Bind,
+            tmpfs_size_bytes: None,
+            read_only: false,
+            targets: vec![MountTarget::Agent],
+            ignore: false,
+        };
+
+        for (name, runtime_root) in [
+            ("demo", project_root),
+            (
+                "cladding-run-00000000-0000-4000-8000-000000000000",
+                Path::new("/tmp/project/.cladding/runtime/runs/instance"),
+            ),
+        ] {
+            let mut config = execution_config(false, false, vec![volume_mount.clone()], false);
+            config.name = name.to_string();
+            let spec = RuntimeSpec::build_with_roots(
+                project_root,
+                &project_root.join(".."),
+                runtime_root,
+                &config,
+            );
+            let mount = spec.agent.containers[0]
+                .mounts
+                .iter()
+                .find(|mount| mount.mount_path == "/home/user/.cache/kache")
+                .expect("configured named volume mount");
+
+            assert!(matches!(
+                &mount.source,
+                RuntimeMountSource::NamedVolume { claim_name } if claim_name == "cladding-kache"
+            ));
+        }
     }
 
     #[test]
