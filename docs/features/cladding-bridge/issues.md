@@ -1,30 +1,13 @@
 # Cladding Bridge implementation issues
 
-```text
-cladding-bridge-1
-Reusable fixed-endpoint mux core
-        |
-        v
-cladding-bridge-2
-Package bridge as embedded Linux helper
-        |
-        v
-cladding-bridge-3
-Replace cladding inject transport
-        |
-        +-------------------+
-        |                   |
-        v                   v
-cladding-bridge-4     cladding-bridge-5
-Remove legacy        Podman Machine +
-inject UDS/socat     local integration
-        |                   |
-        +---------+---------+
-                  |
-                  v
-          cladding-bridge-6
-          Documentation and
-          final regression cleanup
+```mermaid
+flowchart TD
+    B1["cladding-bridge-1<br/>Reusable fixed-endpoint mux core"] --> B2["cladding-bridge-2<br/>Package bridge as embedded Linux helper"]
+    B2 --> B3["cladding-bridge-3<br/>Replace cladding inject transport"]
+    B3 --> B4["cladding-bridge-4<br/>Remove legacy inject UDS/socat"]
+    B3 --> B5["cladding-bridge-5<br/>Podman Machine + local integration"]
+    B4 --> B6["cladding-bridge-6<br/>Documentation and final regression cleanup"]
+    B5 --> B6
 ```
 
 The project intentionally stops after migrating `cladding inject`.
@@ -77,12 +60,9 @@ but the exact Rust API is an implementation choice.
 
 A bridge session represents:
 
-```text
-one container-local listener
-        ->
-one mux session
-        ->
-one host-selected fixed target
+```mermaid
+flowchart LR
+    Listener["Container-local listener"] --> Mux["Mux session"] --> Target["Host-selected fixed target"]
 ```
 
 Do not introduce a VM-wide daemon or one global mux carrying unrelated Cladding capabilities.
@@ -175,23 +155,12 @@ Use one long-lived interactive `podman exec` running the embedded bridge inside 
 
 Target topology:
 
-```text
-agent application
-    |
-    v
-127.0.0.1:<container-port>
-    |
-    v
-cladding-bridge
-    |
-    v
-multiplexed podman exec stdin/stdout
-    |
-    v
-host Cladding
-    |
-    v
-fixed <host>:<port>
+```mermaid
+flowchart LR
+    App["Agent application"] --> Listener["127.0.0.1:container-port"]
+    Listener --> Bridge["cladding-bridge"]
+    Bridge -->|"multiplexed podman exec stdin/stdout"| Host["Host Cladding"]
+    Host --> Target["Fixed host TCP endpoint"]
 ```
 
 Host Cladding must:
@@ -316,30 +285,20 @@ Update runtime and feature documentation to reflect both the reusable bridge bou
 
 Document the reusable primitive as:
 
-```text
-container-local TCP listener
-    ->
-cladding-bridge
-    ->
-multiplexed podman exec
-    ->
-host Cladding
-    ->
-fixed host TCP or Unix-socket target
+```mermaid
+flowchart LR
+    Listener["Container-local TCP listener"] --> Bridge["cladding-bridge"]
+    Bridge -->|"multiplexed podman exec"| Host["Host Cladding"]
+    Host --> Target["Fixed host TCP or Unix-socket target"]
 ```
 
 Document `cladding inject` specifically as:
 
-```text
-agent TCP
-    ->
-cladding-bridge
-    ->
-multiplexed podman exec
-    ->
-host Cladding
-    ->
-fixed host TCP endpoint
+```mermaid
+flowchart LR
+    Agent["Agent TCP"] --> Bridge["cladding-bridge"]
+    Bridge -->|"multiplexed podman exec"| Host["Host Cladding"]
+    Host --> Target["Fixed host TCP endpoint"]
 ```
 
 Remove documentation for the old inject topology:
@@ -359,12 +318,11 @@ Keep documentation of the current Baffle runtime and its local `socat` bridges a
 
 Record the future Baffle direction clearly:
 
-```text
-execution container 127.0.0.1:3128
-    -> cladding-bridge
-    -> exec mux
-    -> physical-host Cladding
-    -> fixed host-side Baffle UDS
+```mermaid
+flowchart LR
+    App["Execution container<br/>127.0.0.1:3128"] --> Bridge["cladding-bridge"]
+    Bridge -->|"exec mux"| Host["Physical-host Cladding"]
+    Host --> Baffle["Fixed host-side Baffle UDS"]
 ```
 
 but state that moving Baffle, changing its lifecycle, and removing its Podman socket volumes are separate future work.
