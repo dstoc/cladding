@@ -221,23 +221,24 @@ fn authorize_command_request(
         }
     };
 
-    let resolved_path = match resolve_executable_path(&input.executable) {
-        Ok(path) => path,
-        Err(details) => {
-            let validation_error = ValidationError::PathResolutionFailed {
-                command: input.executable.clone(),
-                details,
-            };
-            decision.reason = Some(validation_error.to_string());
-            return CommandAuthorization {
-                decision,
-                validation_error: Some(validation_error),
-                user_env,
-                input,
-                authorized_cwd: Some(authorized_cwd),
-            };
-        }
-    };
+    let resolved_path =
+        match resolve_executable_path(&input.executable, &authorized_cwd.effective_input) {
+            Ok(path) => path,
+            Err(details) => {
+                let validation_error = ValidationError::PathResolutionFailed {
+                    command: input.executable.clone(),
+                    details,
+                };
+                decision.reason = Some(validation_error.to_string());
+                return CommandAuthorization {
+                    decision,
+                    validation_error: Some(validation_error),
+                    user_env,
+                    input,
+                    authorized_cwd: Some(authorized_cwd),
+                };
+            }
+        };
     decision.resolved_path = Some(resolved_path.clone());
 
     let executable_hash = match compute_executable_sha256_hex(&resolved_path) {
@@ -460,15 +461,16 @@ fn set_authorized_cwd_for_spawn(command: &mut Command, authorized_cwd: &Authoriz
 #[cfg(not(unix))]
 fn set_authorized_cwd_for_spawn(_command: &mut Command, _authorized_cwd: &AuthorizedCwd) {}
 
-pub(crate) fn resolve_executable_path(command: &str) -> Result<String, String> {
+pub(crate) fn resolve_executable_path(
+    command: &str,
+    working_directory: &Path,
+) -> Result<String, String> {
     if command.contains('/') {
         let path = std::path::Path::new(command);
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            std::env::current_dir()
-                .map_err(|error| format!("failed resolving cwd: {error}"))?
-                .join(path)
+            working_directory.join(path)
         };
         if !candidate.is_file() {
             return Err(format!("'{}' is not a file", candidate.display()));
@@ -734,6 +736,81 @@ mod tests {
             resolve_executable_in_path("cargo", temp.path().as_os_str()).expect("resolve");
 
         assert_eq!(resolved, link_path.to_string_lossy());
+    }
+
+    #[cfg(all(target_os = "linux", unix))]
+    #[tokio::test]
+    async fn relative_executable_resolves_and_runs_from_requested_cwd() {
+        let temp = tempfile::tempdir_in(default_cwd_for_tests()).expect("tempdir");
+        let server_cwd = temp.path().join("server");
+        let requested_cwd = temp.path().join("requested");
+        std::fs::create_dir(&server_cwd).expect("create server cwd");
+        std::fs::create_dir(&requested_cwd).expect("create requested cwd");
+
+        let script_path = requested_cwd.join("hello");
+        write_executable_script(
+            &script_path,
+            b"#!/bin/sh\nprintf 'hello from request cwd\\n'\n",
+        );
+        let requested_label = requested_cwd.to_string_lossy().into_owned();
+        let resolved_path = requested_cwd.join("./hello").to_string_lossy().into_owned();
+        let policy_module = format!(
+            r#"package sandbox.main
+
+default allow = false
+
+allow if {{
+  input.command == "./hello"
+  input.path == {}
+  input.cwd == {}
+}}
+"#,
+            serde_json::to_string(&resolved_path).expect("resolved path string"),
+            serde_json::to_string(&requested_label).expect("cwd string"),
+        );
+        let policy_engine = PolicyEngine::from_rego_for_tests(&[("main.rego", &policy_module)]);
+        let input = || RunCommandInput {
+            executable: "./hello".to_string(),
+            args: vec![],
+            cwd: Some(requested_label.clone()),
+            env: None,
+        };
+
+        let decision = check_command(&policy_engine, &server_cwd, input());
+        assert!(decision.allowed, "{:?}", decision.reason);
+        assert_eq!(
+            decision.resolved_path.as_deref(),
+            Some(resolved_path.as_str())
+        );
+        assert_eq!(decision.cwd.as_deref(), Some(requested_label.as_str()));
+
+        let output = run_command_impl(&policy_engine, &server_cwd, input())
+            .await
+            .expect("relative executable should run from requested cwd");
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.stdout, "hello from request cwd\n");
+    }
+
+    #[cfg(all(target_os = "linux", unix))]
+    #[test]
+    fn relative_executable_resolution_reports_missing_and_non_executable_files() {
+        let temp = tempfile::tempdir_in(default_cwd_for_tests()).expect("tempdir");
+        let requested_cwd = temp.path().join("requested");
+        std::fs::create_dir(&requested_cwd).expect("create requested cwd");
+
+        let missing_error = resolve_executable_path("./missing", &requested_cwd)
+            .expect_err("missing relative executable should fail");
+        let missing_path = requested_cwd.join("./missing").display().to_string();
+        assert!(missing_error.contains(&missing_path));
+        assert!(missing_error.contains("is not a file"));
+
+        let non_executable = requested_cwd.join("not-executable");
+        std::fs::write(&non_executable, b"#!/bin/sh\nexit 0\n").expect("write file");
+        let non_executable_error = resolve_executable_path("./not-executable", &requested_cwd)
+            .expect_err("non-executable relative file should fail");
+        assert!(non_executable_error.contains("is not executable"));
+        let non_executable_path = requested_cwd.join("./not-executable").display().to_string();
+        assert!(non_executable_error.contains(&non_executable_path));
     }
 
     #[test]
