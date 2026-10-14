@@ -1,12 +1,27 @@
 use crate::runtime::{RuntimeMount, RuntimeMountSource, RuntimeSpec};
 use std::process::Command;
 
-pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts: &[RuntimeMount]) {
+pub(super) fn append_mount_args(cmd: &mut Command, mounts: &[RuntimeMount]) {
     for mount in mounts {
-        if let RuntimeMountSource::Tmpfs { size_bytes } = &mount.source {
+        if matches!(
+            &mount.source,
+            RuntimeMountSource::Tmpfs { .. } | RuntimeMountSource::EmptyDir
+        ) {
+            let empty_dir = matches!(&mount.source, RuntimeMountSource::EmptyDir);
+            let size_bytes = match &mount.source {
+                RuntimeMountSource::Tmpfs { size_bytes } => *size_bytes,
+                RuntimeMountSource::EmptyDir => None,
+                _ => unreachable!("tmpfs sources handled above"),
+            };
             let mut spec = format!("type=tmpfs,dst={},tmpfs-mode=1777,U=true", mount.mount_path);
             if let Some(size_bytes) = size_bytes {
                 spec.push_str(&format!(",tmpfs-size={size_bytes}"));
+            }
+            if empty_dir {
+                spec.push_str(",notmpcopyup");
+            }
+            if mount.read_only {
+                spec.push_str(",ro=true");
             }
             cmd.arg("--mount");
             cmd.arg(spec);
@@ -31,9 +46,8 @@ pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts:
                 unreachable!("managed volumes handled above")
             }
             RuntimeMountSource::GeneratedEmptyMask { path } => path.display().to_string(),
-            RuntimeMountSource::Tmpfs { .. } => unreachable!("tmpfs mounts handled above"),
-            RuntimeMountSource::EmptyDir => {
-                empty_dir_volume_name(component_name, &mount.mount_path)
+            RuntimeMountSource::Tmpfs { .. } | RuntimeMountSource::EmptyDir => {
+                unreachable!("tmpfs sources handled above")
             }
         };
 
@@ -47,13 +61,6 @@ pub(super) fn append_mount_args(cmd: &mut Command, component_name: &str, mounts:
         cmd.arg("--volume");
         cmd.arg(volume);
     }
-}
-
-fn empty_dir_volume_name(component_name: &str, mount_path: &str) -> String {
-    format!(
-        "cladding-{component_name}-empty-{}",
-        sanitize_volume_fragment(mount_path)
-    )
 }
 
 pub(super) fn generated_empty_mask_dirs(spec: &RuntimeSpec) -> Vec<std::path::PathBuf> {
@@ -83,25 +90,6 @@ fn runtime_components(spec: &RuntimeSpec) -> Vec<&crate::runtime::RuntimeCompone
     components
 }
 
-fn sanitize_volume_fragment(value: &str) -> String {
-    let fragment = value.trim_matches('/').replace('/', "-");
-    let fragment = fragment
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    if fragment.is_empty() {
-        "root".to_string()
-    } else {
-        fragment
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,7 +109,6 @@ mod tests {
         let mut cmd = Command::new("podman");
         append_mount_args(
             &mut cmd,
-            "demo-agent",
             &[
                 RuntimeMount {
                     mount_path: "/opt/config".to_string(),
@@ -146,7 +133,7 @@ mod tests {
                 },
                 RuntimeMount {
                     mount_path: "/workspace/tmp".to_string(),
-                    read_only: false,
+                    read_only: true,
                     source: RuntimeMountSource::EmptyDir,
                 },
                 RuntimeMount {
@@ -168,8 +155,8 @@ mod tests {
                 "demo-cache:/workspace/data",
                 "--volume",
                 "demo-socket-baffle-agent:/run/cladding/proxy/agent:U",
-                "--volume",
-                "cladding-demo-agent-empty-workspace-tmp:/workspace/tmp",
+                "--mount",
+                "type=tmpfs,dst=/workspace/tmp,tmpfs-mode=1777,U=true,notmpcopyup,ro=true",
                 "--volume",
                 "/tmp/demo/runtime/empty-mask:/home/user/workspace/.cladding:ro",
             ]
@@ -218,7 +205,7 @@ mod tests {
             );
             let container = &spec.agent.containers[0];
             let mut cmd = Command::new("podman");
-            append_mount_args(&mut cmd, &spec.agent.name, &container.mounts);
+            append_mount_args(&mut cmd, &container.mounts);
 
             assert!(
                 command_args(&cmd)
@@ -233,7 +220,6 @@ mod tests {
         let mut cmd = Command::new("podman");
         append_mount_args(
             &mut cmd,
-            "demo-agent",
             &[
                 RuntimeMount {
                     mount_path: "/workspace".to_string(),
@@ -294,22 +280,6 @@ mod tests {
                 "--mount",
                 "type=tmpfs,dst=/run,tmpfs-mode=1777,U=true",
             ]
-        );
-    }
-
-    #[test]
-    fn empty_dir_volume_name_sanitizes_mount_path() {
-        assert_eq!(
-            empty_dir_volume_name("demo-agent", "/workspace/tmp"),
-            "cladding-demo-agent-empty-workspace-tmp"
-        );
-        assert_eq!(
-            empty_dir_volume_name("demo-agent", "/"),
-            "cladding-demo-agent-empty-root"
-        );
-        assert_eq!(
-            empty_dir_volume_name("demo-agent", "/path/with spaces"),
-            "cladding-demo-agent-empty-path-with-spaces"
         );
     }
 }

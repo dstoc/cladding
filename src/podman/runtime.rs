@@ -132,7 +132,7 @@ fn build_baffle_ca_init_command(spec: &RuntimeSpec) -> Command {
 
     let mut cmd = Command::new("podman");
     cmd.args(["run", "--rm", "--network", "none", "--userns", "keep-id"]);
-    append_mount_args(&mut cmd, &spec.proxy.name, &mounts);
+    append_mount_args(&mut cmd, &mounts);
     cmd.args(["--entrypoint", "/opt/tools/bin/baffle"]);
     cmd.arg(proxy_image);
     cmd.args(["ca", "init", "--config", "/opt/config/proxy/daemon.toml"]);
@@ -1534,7 +1534,7 @@ fn build_container_run_command(
     }
 
     append_env_args(&mut cmd, &container.env);
-    append_mount_args(&mut cmd, &component.name, &container.mounts);
+    append_mount_args(&mut cmd, &container.mounts);
     append_port_args(&mut cmd, &container.ports);
     append_entrypoint_arg(&mut cmd, &container.command);
 
@@ -2542,7 +2542,7 @@ mod tests {
                 },
                 RuntimeMount {
                     mount_path: "/workspace/tmp".to_string(),
-                    read_only: false,
+                    read_only: true,
                     source: RuntimeMountSource::EmptyDir,
                 },
                 RuntimeMount {
@@ -2606,8 +2606,8 @@ mod tests {
                 "/tmp/demo/config:/opt/config:ro",
                 "--volume",
                 "demo-cache:/workspace/data",
-                "--volume",
-                "cladding-demo-agent-empty-workspace-tmp:/workspace/tmp",
+                "--mount",
+                "type=tmpfs,dst=/workspace/tmp,tmpfs-mode=1777,U=true,notmpcopyup,ro=true",
                 "--volume",
                 "demo-socket-baffle-agent:/run/cladding/proxy/agent",
                 "--volume",
