@@ -316,8 +316,37 @@ python3 "$script_dir/validate_inject.py" \
   --cladding-dir "$project_root" \
   --agent "$agent"
 
-phase="stop Cladding runtime and clean owned resources"
+phase="remove a managed mount after configuration drift"
+managed_before_drift=$(volume_names managed-mount)
+test -n "$managed_before_drift"
+unrelated_volume="cladding-unrelated-$project_name"
+foreign_runtime_volume="cladding-foreign-runtime-$project_name"
+podman volume create "$unrelated_volume" >/dev/null
+podman volume create --opt nocopy \
+  --label "cladding=$project_name" \
+  --label "project_root=$project_root" \
+  --label cladding_resource=managed-mount \
+  --label "cladding_runtime_root=$project_root/runtime/foreign" \
+  --label "cladding_mount_volume=$foreign_runtime_volume" \
+  "$foreign_runtime_volume" >/dev/null
+jq '.mounts = []' "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
+mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
+remaining_managed=$(volume_names managed-mount)
+if [ "$remaining_managed" != "$foreign_runtime_volume" ]; then
+  echo "down did not remove only the stale volume for this runtime: $remaining_managed" >&2
+  exit 1
+fi
+if ! podman volume exists "$unrelated_volume"; then
+  echo "down removed an unrelated external volume: $unrelated_volume" >&2
+  exit 1
+fi
+if ! podman volume exists "$foreign_runtime_volume"; then
+  echo "down removed a managed volume belonging to another runtime: $foreign_runtime_volume" >&2
+  exit 1
+fi
+podman volume rm "$foreign_runtime_volume" >/dev/null
+podman volume rm "$unrelated_volume" >/dev/null
 require_no_project_resources
 test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
 test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
