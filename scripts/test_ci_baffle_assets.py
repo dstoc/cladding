@@ -25,6 +25,7 @@ RUNTIME_TOPOLOGY_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_runtime_topology.sh"
 )
 INJECT_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_inject.py"
+EXPOSE_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_expose.py"
 INJECT_SPEC = importlib.util.spec_from_file_location("validate_inject", INJECT_VALIDATOR)
 if INJECT_SPEC is None or INJECT_SPEC.loader is None:
     raise RuntimeError(f"could not load inject validator from {INJECT_VALIDATOR}")
@@ -215,7 +216,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
             containerfile,
         )
         self.assertIn(
-            "Python provides the in-container client for the cladding inject integration check.",
+            "Python provides the in-container test services for expose and inject checks.",
             containerfile,
         )
         self.assertIn("USER ${UID}:${GID}", containerfile)
@@ -272,6 +273,20 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertIn(phase, inject)
         self.assertIn("signal.SIGINT", inject)
         self.assertIn("signal.SIGTERM", inject)
+
+    def test_shared_topology_validator_exercises_expose_with_selected_runtime(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        expose = EXPOSE_VALIDATOR.read_text()
+        self.assertIn('"$script_dir/validate_expose.py"', validator)
+        self.assertIn("phase=\"validate cladding expose forwarding and selection\"", validator)
+        self.assertIn('"--cladding-dir"', expose)
+        self.assertIn('"--config"', expose)
+        self.assertIn('default_config.write_text("not a valid Cladding config', expose)
+        self.assertIn('decoy_cladding_dir / "cladding.json"', expose)
+        self.assertIn('payload = b"cladding expose reaches the existing agent', expose)
+        self.assertIn("self.project_resources() != baseline_resources", expose)
+        self.assertIn("must not create a one-off runtime", expose)
+        self.assertIn("created no runtime resources", expose)
 
     def test_shared_topology_validator_exercises_one_off_run_sources_and_cleanup(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()

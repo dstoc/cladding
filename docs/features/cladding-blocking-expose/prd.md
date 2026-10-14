@@ -9,7 +9,7 @@ The new implementation should be intentionally simple:
 cladding expose <container-port> [host-port]
 ```
 
-starts a foreground listener on `127.0.0.1:<host-port>` and forwards each connection through `cladding exec` to `127.0.0.1:<container-port>` inside the agent container. The user stops the expose session with Ctrl-C.
+starts a foreground listener on `127.0.0.1:<host-port>` and forwards each connection with `podman exec` to `127.0.0.1:<container-port>` inside the selected agent container. The user stops the expose session with Ctrl-C.
 
 ## Motivation
 `cladding expose` was originally designed around persistent detached expose state:
@@ -85,7 +85,7 @@ should behave like:
 
 ```bash
 socat TCP-LISTEN:15432,bind=127.0.0.1,reuseaddr,fork \
-  EXEC:'cladding exec socat STDIO TCP:127.0.0.1:5432'
+  "EXEC:podman exec -i '<selected-agent-container>' socat STDIO TCP\\:127.0.0.1\\:5432"
 ```
 
 The previous `cladding expose 3000` case remains supported, but it now blocks and maps `127.0.0.1:3000` on the host to `127.0.0.1:3000` in the agent container.
@@ -116,26 +116,30 @@ Use host `socat` as the first implementation.
 
 The command should not create Podman containers.
 
-The host listener process should run a per-connection `cladding exec` command that starts `socat` inside the agent:
+The host listener process should run a per-connection `podman exec -i` command that starts `socat` inside the agent:
 
 ```text
 host client
   -> host socat TCP-LISTEN:<host-port>
-  -> cladding exec socat STDIO TCP:127.0.0.1:<container-port>
+  -> podman exec -i <selected-agent-container> socat STDIO TCP:127.0.0.1:<container-port>
   -> agent-local service
 ```
 
-`cladding exec` already uses non-interactive `podman exec -i` when stdin/stdout are not terminals, so it is suitable for raw byte forwarding. It must not allocate a TTY for expose connections.
+The project and agent are selected from the loaded Cladding directory and configuration before the listener starts. Each connection uses that agent container directly, so it does not re-resolve CLI options or create a one-off runtime. `podman exec -i` carries raw bytes without allocating a TTY.
 
 ### Command construction
-Avoid constructing the `EXEC:` command with unescaped user input beyond validated numeric ports.
+Quote the runtime-derived agent container name for the shell used by `socat EXEC:`. The port values come from validated `u16` arguments.
 
-The only dynamic values in the initial implementation should be validated `u16` ports. The generated command may be a string because `socat EXEC:` requires one, but it should be produced by a small helper with unit tests.
+Use a small tested helper to build the `socat EXEC:` string. It must quote the runtime-derived agent container name for the shell that `socat EXEC:` uses. The port values come from validated `u16` arguments.
 
 Recommended helper shape:
 
 ```rust
-fn build_blocking_expose_command(container_port: u16, host_port: u16) -> Command
+fn build_blocking_expose_command(
+    agent_container_name: &str,
+    container_port: u16,
+    host_port: u16,
+) -> Command
 ```
 
 It should produce:

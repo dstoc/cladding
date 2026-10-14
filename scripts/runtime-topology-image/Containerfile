@@ -1,6 +1,6 @@
 FROM debian:trixie-slim
 
-# Python provides the in-container client for the cladding inject integration check.
+# Python provides the in-container test services for expose and inject checks.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates coreutils curl grep python3 socat \
     && rm -rf /var/lib/apt/lists/*

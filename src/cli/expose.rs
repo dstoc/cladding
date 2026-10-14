@@ -7,7 +7,6 @@ use cladding::fs_utils::is_executable;
 use cladding::podman::{podman_container_exists, podman_required};
 use std::env;
 use std::net::IpAddr;
-use std::path::Path;
 use std::process::Command;
 
 pub(super) fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
@@ -33,10 +32,8 @@ pub(super) fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
     }
 
     let host_port = args.host_port.unwrap_or(args.container_port);
-    let current_exe =
-        env::current_exe().with_context(|| "failed to determine current executable")?;
     let status = build_blocking_expose_command(
-        &current_exe,
+        &agent_container_name,
         args.container_port,
         host_port,
         args.bind_address,
@@ -63,7 +60,7 @@ fn command_exists_on_path(command: &str) -> bool {
 }
 
 fn build_blocking_expose_command(
-    current_exe: &Path,
+    agent_container_name: &str,
     container_port: u16,
     host_port: u16,
     bind_address: IpAddr,
@@ -76,16 +73,15 @@ fn build_blocking_expose_command(
     cmd.arg(format!(
         "{listener}:{host_port},bind={bind_address},reuseaddr,fork"
     ));
-    let current_exe = shell_single_quote_path(current_exe);
+    let agent_container_name = shell_single_quote(agent_container_name);
     cmd.arg(format!(
-        "EXEC:{current_exe} run socat STDIO TCP\\:127.0.0.1\\:{container_port}"
+        "EXEC:podman exec -i {agent_container_name} socat STDIO TCP\\:127.0.0.1\\:{container_port}"
     ));
     cmd
 }
 
-fn shell_single_quote_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    let escaped = path.replace('\'', "'\\''");
+fn shell_single_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
     format!("'{escaped}'")
 }
 
@@ -100,9 +96,10 @@ mod tests {
     }
 
     #[test]
-    fn build_blocking_expose_command_places_ports_and_bind() {
+    fn build_blocking_expose_command_targets_the_selected_agent_without_starting_a_runtime() {
+        let (_, agent_container_name) = agent_runtime_names("selected-config");
         let cmd = build_blocking_expose_command(
-            Path::new("/tmp/cladding test/bin's/cladding"),
+            &agent_container_name,
             5432,
             15432,
             "127.0.0.1".parse::<IpAddr>().unwrap(),
@@ -114,15 +111,15 @@ mod tests {
         assert_eq!(args[0], "TCP4-LISTEN:15432,bind=127.0.0.1,reuseaddr,fork");
         assert_eq!(
             args[1],
-            "EXEC:'/tmp/cladding test/bin'\\''s/cladding' run socat STDIO TCP\\:127.0.0.1\\:5432"
+            "EXEC:podman exec -i 'selected-config-agent-instance' socat STDIO TCP\\:127.0.0.1\\:5432"
         );
-        assert!(!args.iter().any(|arg| arg.starts_with("--")));
+        assert!(!args.iter().any(|arg| arg.contains("cladding run")));
     }
 
     #[test]
     fn build_blocking_expose_command_uses_ipv6_listener_for_ipv6_bind() {
         let cmd = build_blocking_expose_command(
-            Path::new("/usr/local/bin/cladding"),
+            "demo-agent-instance",
             3000,
             9000,
             "::1".parse::<IpAddr>().unwrap(),
@@ -130,5 +127,13 @@ mod tests {
         let args = command_args(&cmd);
 
         assert_eq!(args[0], "TCP6-LISTEN:9000,bind=::1,reuseaddr,fork");
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_agent_names() {
+        assert_eq!(
+            shell_single_quote("agent's-container"),
+            "'agent'\\''s-container'"
+        );
     }
 }
