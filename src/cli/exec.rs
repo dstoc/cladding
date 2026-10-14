@@ -285,19 +285,12 @@ fn run_podman_exec(
             })
         }
     } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt as _;
-            let code = status.signal().map(|signal| 128 + signal).unwrap_or(1);
-            Err(Error::CommandFailed {
-                context: "podman exec",
-                code,
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            Err(Error::message("podman exec failed"))
-        }
+        use std::os::unix::process::ExitStatusExt as _;
+        let code = status.signal().map(|signal| 128 + signal).unwrap_or(1);
+        Err(Error::CommandFailed {
+            context: "podman exec",
+            code,
+        })
     }
 }
 

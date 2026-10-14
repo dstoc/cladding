@@ -142,11 +142,6 @@ fn is_unix_socket(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_socket()
 }
 
-#[cfg(not(unix))]
-fn is_unix_socket(_metadata: &fs::Metadata) -> bool {
-    false
-}
-
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("MCP_BIND_ADDR and MCP_BIND_UDS cannot both be set")]
@@ -166,8 +161,6 @@ pub enum ConfigError {
     BindUdsMetadata { source: std::io::Error },
     #[error("failed to remove stale MCP_BIND_UDS socket: {source}")]
     BindUdsRemove { source: std::io::Error },
-    #[error("MCP_BIND_UDS is not supported on this platform")]
-    BindUdsUnsupportedPlatform,
     #[error("failed to get current working directory: {source}")]
     CurrentDir { source: std::io::Error },
     #[error("default cwd must be absolute: {cwd:?}")]
@@ -293,18 +286,9 @@ pub async fn serve(config: AppConfig) -> Result<(), AppError> {
 
     let app = build_app(policy_engine, config.default_cwd.clone());
     if let Some(bind_uds) = config.bind_uds.as_deref() {
-        #[cfg(not(unix))]
-        {
-            let _ = bind_uds;
-            return Err(ConfigError::BindUdsUnsupportedPlatform.into());
-        }
-
-        #[cfg(unix)]
-        {
-            prepare_bind_uds_path(bind_uds)?;
-            let listener = tokio::net::UnixListener::bind(bind_uds)?;
-            axum::serve(listener, app).await?;
-        }
+        prepare_bind_uds_path(bind_uds)?;
+        let listener = tokio::net::UnixListener::bind(bind_uds)?;
+        axum::serve(listener, app).await?;
     } else {
         let bind_addr = config.bind_addr.unwrap_or_else(|| {
             DEFAULT_BIND_ADDR

@@ -347,22 +347,6 @@ fn materialize_run_secret_overrides(
             )?;
         }
     }
-    #[cfg(not(unix))]
-    {
-        fs::create_dir(runtime_dir).with_context(|| {
-            format!(
-                "failed to create private run runtime directory {}",
-                runtime_dir.display()
-            )
-        })?;
-        fs::create_dir(&secret_dir).with_context(|| {
-            format!(
-                "failed to create private run secret directory {}",
-                secret_dir.display()
-            )
-        })?;
-    }
-
     let mut overridden = HashSet::with_capacity(secrets.len());
     for secret in secrets {
         let path = secret_dir.join(&secret.name);
@@ -634,14 +618,6 @@ fn create_private_runtime_root(instance_name: &str, project_root: &Path) -> Resu
             )));
         }
     }
-    #[cfg(not(unix))]
-    fs::create_dir(&root).with_context(|| {
-        format!(
-            "failed to create private runtime root {} (name collisions are not reused)",
-            root.display()
-        )
-    })?;
-
     Ok(root)
 }
 
@@ -662,16 +638,6 @@ fn ensure_run_runtime_directory(path: &Path, private: bool) -> anyhow::Result<()
                             format!("failed to create runtime directory {}", path.display())
                         });
                     }
-                }
-            }
-            #[cfg(not(unix))]
-            match fs::create_dir(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to create runtime directory {}", path.display())
-                    });
                 }
             }
             fs::symlink_metadata(path).with_context(|| {

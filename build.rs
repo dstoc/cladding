@@ -7,6 +7,8 @@ const BAFFLE_VERSION: &str = "1.1.1";
 const BAFFLE_MIN_RUST_VERSION: (u32, u32) = (1, 96);
 
 fn main() {
+    ensure_supported_platforms();
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.as_path();
 
@@ -75,21 +77,34 @@ fn main() {
 
     let release_dir = release_dir(&target_dir, release_target);
 
-    copy_bin(
-        &release_dir.join(bin_name("mcp-run")),
-        &out_dir.join("mcp-run"),
-    );
-    copy_bin(
-        &release_dir.join(bin_name("run-remote")),
-        &out_dir.join("run-remote"),
-    );
-    let bridge_path = release_dir.join(bin_name("cladding-bridge"));
+    copy_bin(&release_dir.join("mcp-run"), &out_dir.join("mcp-run"));
+    copy_bin(&release_dir.join("run-remote"), &out_dir.join("run-remote"));
+    let bridge_path = release_dir.join("cladding-bridge");
     let bridge_bytes = fs::read(&bridge_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", bridge_path.display()));
     let expected_arch = target_arch().unwrap_or_else(|err| panic!("{err}"));
     validate_bridge_elf(&bridge_bytes, expected_arch, &bridge_path)
         .unwrap_or_else(|err| panic!("{err}"));
     copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
+}
+
+fn ensure_supported_platforms() {
+    let host = env::var("HOST").unwrap_or_default();
+    let target = env::var("TARGET").unwrap_or_default();
+    if !is_supported_platform(&host) || !is_supported_platform(&target) {
+        panic!(
+            "Cladding supports Linux and macOS hosts and targets on x86_64 and aarch64 only (build host '{host}', target '{target}')"
+        );
+    }
+}
+
+fn is_supported_platform(triple: &str) -> bool {
+    let Some((arch, _)) = triple.split_once('-') else {
+        return false;
+    };
+
+    matches!(arch, "x86_64" | "aarch64")
+        && (triple.contains("-linux-") || triple.ends_with("-apple-darwin"))
 }
 
 fn validate_bridge_elf(bytes: &[u8], expected_arch: &str, path: &Path) -> Result<(), String> {
@@ -174,7 +189,7 @@ fn build_baffle(out_dir: &Path) {
         );
     }
 
-    let installed = install_root.join("bin").join(bin_name("baffle"));
+    let installed = install_root.join("bin").join("baffle");
     let bytes = fs::read(&installed).unwrap_or_else(|err| {
         panic!(
             "cargo install completed but could not read {}: {err}",
@@ -417,10 +432,32 @@ fn build_with_podman(workspace_root: &Path) {
     }
 }
 
-fn bin_name(base: &str) -> String {
-    if cfg!(windows) {
-        format!("{base}.exe")
-    } else {
-        base.to_string()
+#[cfg(test)]
+mod tests {
+    use super::is_supported_platform;
+
+    #[test]
+    fn supports_linux_and_macos_architectures() {
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        ] {
+            assert!(is_supported_platform(triple), "{triple}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_operating_systems_and_architectures() {
+        for triple in [
+            "x86_64-pc-windows-gnu",
+            "aarch64-pc-windows-msvc",
+            "x86_64-unknown-freebsd",
+            "i686-unknown-linux-gnu",
+            "x86_64-apple-ios",
+        ] {
+            assert!(!is_supported_platform(triple), "{triple}");
+        }
     }
 }

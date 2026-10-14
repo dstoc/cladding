@@ -458,9 +458,6 @@ fn set_authorized_cwd_for_spawn(command: &mut Command, authorized_cwd: &Authoriz
     }
 }
 
-#[cfg(not(unix))]
-fn set_authorized_cwd_for_spawn(_command: &mut Command, _authorized_cwd: &AuthorizedCwd) {}
-
 pub(crate) fn resolve_executable_path(
     command: &str,
     working_directory: &Path,
