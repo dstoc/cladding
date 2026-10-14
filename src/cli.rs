@@ -41,16 +41,11 @@ pub fn run() -> Result<()> {
         return Err(Error::message("unsupported --cladding-dir option for ps"));
     }
 
-    let selected_root = cli.cladding_dir.as_ref().or(cli.project_root.as_ref());
+    let selected_root = cli.cladding_dir.as_ref();
     let project_root = resolve_project_root(&cwd, selected_root, &command)?;
     let workspace_root = resolve_workspace_root(&cwd);
 
     let config_source = match cli.config {
-        None if matches!(&command, CommandSpec::Run { .. }) && !project_root.is_dir() => {
-            ConfigSource::EphemeralDefault {
-                base_dir: cwd.clone(),
-            }
-        }
         None => ConfigSource::Default,
         Some(path) if path == std::path::Path::new("-") => {
             let base_dir = stdin_config_base_dir(&cwd, cli.cladding_dir.as_deref());

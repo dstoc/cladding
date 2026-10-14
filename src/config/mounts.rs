@@ -106,16 +106,6 @@ pub(super) fn parse_mounts_v2(
                     "readonly" => MountType::Readonly,
                     "copy" => MountType::Copy,
                     "tmpfs" => MountType::Tmpfs,
-                    "overlay" => {
-                        eprintln!(
-                            "error: cladding.json invalid field 'mounts[{index}].type' (overlay mounts are no longer supported)"
-                        );
-                        eprintln!(
-                            "hint: use type: \"copy\" to snapshot a host directory into disposable shared storage"
-                        );
-                        eprintln!("file: {}", config_path.display());
-                        return Err(Error::message("unsupported mount type 'overlay'"));
-                    }
                     _ => {
                         eprintln!(
                             "error: cladding.json invalid field 'mounts[{index}].type' (unknown type '{mount_type}')"
@@ -333,11 +323,9 @@ fn validate_mount_keys(
             continue;
         }
         eprintln!("error: cladding.json unknown key: mounts[{index}].{key}");
-        if key == "nwSandboxOnly" || key == "sandboxOnly" {
-            eprintln!(
-                "hint: replace 'mounts[{index}].{key}' with 'mounts[{index}].targets': [\"nw-sandbox\"]"
-            );
-        }
+        eprintln!(
+            "hint: valid mount keys are mount, hostPath, volume, type, size, readOnly, targets, and ignore"
+        );
         eprintln!("file: {}", config_path.display());
         invalid = true;
     }
@@ -660,18 +648,19 @@ mod tests {
     #[test]
     fn parse_mounts_rejects_legacy_mount_target_keys() {
         let temp = create_temp_dir("legacy-mount-target");
-        let parsed = serde_json::json!({
-            "mounts": [
-                {
-                    "mount": "/workspace",
-                    "hostPath": "./one",
-                    "nwSandboxOnly": true
-                }
-            ]
-        });
         let config = execution_config(false, false);
 
-        assert!(parse_mounts(&temp, &parsed, &config).is_err());
+        for legacy_key in ["nwSandboxOnly", "sandboxOnly"] {
+            let mut mount = serde_json::json!({
+                "mount": "/workspace",
+                "hostPath": "./one"
+            });
+            mount[legacy_key] = serde_json::Value::Bool(true);
+            assert!(
+                parse_mounts(&temp, &serde_json::json!({ "mounts": [mount] }), &config).is_err(),
+                "accepted legacy mount key {legacy_key}"
+            );
+        }
     }
 
     #[test]

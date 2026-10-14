@@ -1,7 +1,7 @@
 use super::args::CommandSpec;
 use cladding::config::{
     ExecutionConfig, load_cladding_config_v2, load_cladding_config_v2_from_path,
-    load_cladding_config_v2_from_str, write_default_cladding_config,
+    load_cladding_config_v2_from_str,
 };
 use cladding::error::{Error, Result};
 use cladding::fs_utils::canonicalize_path;
@@ -33,7 +33,6 @@ pub(super) struct RunSecretMounts {
 #[derive(Debug, Clone)]
 pub(super) enum ConfigSource {
     Default,
-    EphemeralDefault { base_dir: PathBuf },
     File(PathBuf),
     Stdin { raw: String, base_dir: PathBuf },
     Resolved(Box<ExecutionConfig>),
@@ -63,20 +62,25 @@ impl Context {
     pub(super) fn load_config(&self) -> Result<ExecutionConfig> {
         match &self.config_source {
             ConfigSource::Default => load_cladding_config_v2(&self.project_root),
-            ConfigSource::EphemeralDefault { base_dir } => {
-                let raw = write_default_cladding_config(
-                    Some("run"),
-                    super::DEFAULT_SANDBOX_BUILD_IMAGE,
-                    super::DEFAULT_CLI_BUILD_IMAGE,
-                )?;
-                load_cladding_config_v2_from_str(&base_dir.join("cladding.json"), &raw)
-            }
             ConfigSource::File(path) => load_cladding_config_v2_from_path(path),
             ConfigSource::Stdin { raw, base_dir } => {
                 load_cladding_config_v2_from_str(&base_dir.join("cladding.json"), raw)
             }
             ConfigSource::Resolved(config) => Ok(config.as_ref().clone()),
         }
+    }
+
+    pub(super) fn require_initialized_project(&self) -> Result<()> {
+        let config_path = self.project_root.join("cladding.json");
+        if !config_path.is_file() {
+            eprintln!(
+                "error: cladding run requires an initialized .cladding project ({})",
+                config_path.display()
+            );
+            eprintln!("hint: run 'cladding init' from the project directory first");
+            return Err(Error::message("missing initialized .cladding project"));
+        }
+        Ok(())
     }
 
     pub(super) fn with_resolved_config(
@@ -185,6 +189,13 @@ pub(super) fn resolve_project_root(
                 );
                 return Err(Error::message("invalid .cladding path"));
             }
+        } else if !root.is_dir() && matches!(command, CommandSpec::Run { .. }) {
+            eprintln!(
+                "error: selected .cladding directory is not initialized: {}",
+                root.display()
+            );
+            eprintln!("hint: initialize it with 'cladding --cladding-dir <PATH> init'");
+            return Err(Error::message("missing initialized .cladding project"));
         } else if !root.is_dir() {
             eprintln!(
                 "error: selected .cladding directory does not exist or is not a directory: {}",
@@ -199,7 +210,15 @@ pub(super) fn resolve_project_root(
     match find_project_root(cwd) {
         Some(root) => Ok(root),
         None => match command {
-            CommandSpec::Init { .. } | CommandSpec::Run { .. } => Ok(cwd.join(".cladding")),
+            CommandSpec::Init { .. } => Ok(cwd.join(".cladding")),
+            CommandSpec::Run { .. } => {
+                eprintln!(
+                    "error: cladding run requires an initialized .cladding project in {} or a parent directory",
+                    cwd.display()
+                );
+                eprintln!("hint: run 'cladding init' from the project directory first");
+                Err(Error::message("missing initialized .cladding project"))
+            }
             CommandSpec::Ps => Ok(cwd.join(".cladding")),
             _ => {
                 eprintln!(
@@ -353,11 +372,11 @@ mod tests {
     }
 
     #[test]
-    fn run_can_select_a_missing_default_directory_without_creating_it() {
+    fn run_requires_a_discovered_project_without_creating_it() {
         let temp = create_temp_dir("run-missing-directory");
         let project_root = temp.join("project");
         fs::create_dir_all(&project_root).unwrap();
-        let selected = resolve_project_root(
+        let error = resolve_project_root(
             &project_root,
             None,
             &CommandSpec::Run {
@@ -367,29 +386,15 @@ mod tests {
                 args: vec!["echo".to_string()],
             },
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(selected, project_root.join(".cladding"));
-        assert!(!selected.exists());
-    }
-
-    #[test]
-    fn run_default_config_uses_shared_config_loading_without_persistent_state() {
-        let temp = create_temp_dir("run-default-config");
-        let selected_root = temp.join(".cladding");
-        let context = Context::new(
-            selected_root.clone(),
-            temp.clone(),
-            ConfigSource::EphemeralDefault {
-                base_dir: temp.clone(),
-            },
+        assert!(
+            error
+                .to_string()
+                .contains("missing initialized .cladding project")
         );
-
-        let config = context.load_config().unwrap();
-
-        assert_eq!(config.name, "run");
-        assert!(config.nw_sandbox_enabled());
-        assert!(!selected_root.exists());
+        assert!(!project_root.join(".cladding").exists());
+        assert!(!project_root.join(".cladding/runtime/runs").exists());
     }
 
     #[test]
@@ -398,12 +403,15 @@ mod tests {
         let project_root = temp.join(".cladding");
         let workspace_root = temp.clone();
         fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(
+            project_root.join("cladding.json"),
+            r#"{"name":"demo","agent":{}}"#,
+        )
+        .unwrap();
         let source_context = Context::new(
             project_root.clone(),
             workspace_root.clone(),
-            ConfigSource::EphemeralDefault {
-                base_dir: workspace_root.clone(),
-            },
+            ConfigSource::Default,
         );
         let mut config = source_context.load_config().unwrap();
         config.name = "cladding-run-test".to_string();
