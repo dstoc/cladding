@@ -30,7 +30,7 @@ fn run_reuses_project_config_tools_credentials_and_persistent_ca() {
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$CLADDING_PODMAN_LOG"
 case "$1:$2" in
-  pod:rm|run:*|exec:--user|rm:-f)
+  run:*|exec:--user|rm:-f)
     if [ "$CLADDING_TEST_HELPER_NOISE" = "1" ]; then
       printf 'helper stdout: %s %s\n' "$1" "$2"
       printf 'helper stderr: %s %s\n' "$1" "$2" >&2
@@ -142,29 +142,6 @@ if [ "$1" = "container" ] && [ "$2" = "exists" ]; then
   fi
   exit 1
 fi
-if [ "$1" = "pod" ] && [ "$2" = "exists" ]; then
-  if [ -f "$CLADDING_LEGACY_PODS" ] && awk -F '|' -v name="$3" '$1 == name { found = 1 } END { exit !found }' "$CLADDING_LEGACY_PODS"; then
-    exit 0
-  fi
-  exit 1
-fi
-if [ "$1" = "pod" ] && [ "$2" = "inspect" ]; then
-  row=$(awk -F '|' -v name="$5" '$1 == name { print; exit }' "$CLADDING_LEGACY_PODS")
-  if [ -z "$row" ]; then
-    echo "Error: no such pod: $5" >&2
-    exit 1
-  fi
-  app=$(printf '%s\n' "$row" | cut -d '|' -f 2)
-  project_name=$(printf '%s\n' "$row" | cut -d '|' -f 3)
-  project_root=$(printf '%s\n' "$row" | cut -d '|' -f 4)
-  if [ "$4" = "{{json .Labels}}" ]; then
-    printf '{"app":"%s","cladding":"%s","project_root":"%s"}\n' \
-      "$app" "$project_name" "$project_root"
-  else
-    printf 'Running\n'
-  fi
-  exit 0
-fi
 if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
   row=$(awk -F '|' -v name="$5" '$1 == name { print; exit }' "$state")
   if [ -z "$row" ]; then exit 1; fi
@@ -189,14 +166,6 @@ if [ "$1" = "rm" ]; then
   fi
   echo "Error: no such container: $name" >&2
   exit 1
-fi
-if [ "$1" = "pod" ] && [ "$2" = "rm" ]; then
-  name=$4
-  awk -F '|' -v name="$name" '$1 != name' "$CLADDING_LEGACY_PODS" > "$CLADDING_LEGACY_PODS.tmp"
-  mv "$CLADDING_LEGACY_PODS.tmp" "$CLADDING_LEGACY_PODS"
-  awk -F '|' -v name="$name-instance" '$1 != name' "$state" > "$state.tmp"
-  mv "$state.tmp" "$state"
-  exit 0
 fi
 if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; then
   run_seen=
@@ -910,6 +879,10 @@ exit 0
         !startup_log.contains("pod create"),
         "cladding up must not create Podman pods: {startup_log}"
     );
+    assert!(
+        !startup_log.lines().any(|line| line.starts_with("pod ")),
+        "cladding up must not query Podman pods: {startup_log}"
+    );
     let proxy_start = startup_log
         .lines()
         .find(|line| line.contains("--name demo-proxy-instance"))
@@ -993,8 +966,8 @@ exit 0
     assert_success(down.output().unwrap());
     let cleanup_log = read_log(&podman_log);
     assert!(
-        !cleanup_log.lines().any(|line| line.starts_with("pod rm ")),
-        "down must not remove pods for the standalone topology: {cleanup_log}"
+        !cleanup_log.lines().any(|line| line.starts_with("pod ")),
+        "down must not query or remove pods: {cleanup_log}"
     );
     assert!(
         !cleanup_log.lines().any(|line| {
@@ -1037,103 +1010,7 @@ exit 0
     );
     fs::write(&socket_volume_state, "").unwrap();
 
-    let legacy_pods = podman_log.with_extension("legacy-pods");
     let container_state = podman_log.with_extension("state");
-    fs::write(
-        &legacy_pods,
-        format!("demo-proxy|proxy|demo|{}\n", project_root.display()),
-    )
-    .unwrap();
-    fs::write(
-        &container_state,
-        format!(
-            "demo-proxy-instance|demo|{}|proxy\n",
-            project_root.display()
-        ),
-    )
-    .unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut down_legacy = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    down_legacy.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
-    assert_success(down_legacy.output().unwrap());
-    let legacy_cleanup_log = read_log(&podman_log);
-    assert_eq!(
-        legacy_cleanup_log
-            .lines()
-            .filter(|line| line.starts_with("pod rm -f demo-proxy"))
-            .count(),
-        1,
-        "down should remove an owned legacy proxy pod: {legacy_cleanup_log}"
-    );
-    assert!(fs::read_to_string(&legacy_pods).unwrap().is_empty());
-    assert!(fs::read_to_string(&container_state).unwrap().is_empty());
-
-    // A legacy pod can outlive its member container. The missing-container
-    // remove is idempotent, but cleanup must still discover and remove the
-    // owned pod after checking its labels.
-    fs::write(
-        &legacy_pods,
-        format!("demo-proxy|proxy|demo|{}\n", project_root.display()),
-    )
-    .unwrap();
-    fs::write(&container_state, "").unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut down_legacy_without_container = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    down_legacy_without_container.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
-    assert_success(down_legacy_without_container.output().unwrap());
-    let missing_container_cleanup_log = read_log(&podman_log);
-    assert!(
-        missing_container_cleanup_log.contains("rm -f demo-proxy-instance"),
-        "down should attempt exact-name removal even when the legacy member is missing: {missing_container_cleanup_log}"
-    );
-    assert!(
-        missing_container_cleanup_log.contains("pod inspect --format {{json .Labels}} demo-proxy")
-            && missing_container_cleanup_log.contains("pod rm -f demo-proxy"),
-        "down should verify and remove the owned legacy pod: {missing_container_cleanup_log}"
-    );
-    assert!(fs::read_to_string(&legacy_pods).unwrap().is_empty());
-
-    fs::write(
-        &legacy_pods,
-        format!("demo-agent|unrelated|demo|{}\n", project_root.display()),
-    )
-    .unwrap();
-    fs::write(
-        &container_state,
-        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n",
-    )
-    .unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut down_foreign_pod = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    down_foreign_pod.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
-    assert!(!down_foreign_pod.output().unwrap().status.success());
-    let foreign_pod_log = read_log(&podman_log);
-    assert!(!foreign_pod_log.contains("pod rm -f demo-agent"));
-    assert!(foreign_pod_log.contains("rm -f demo-agent-instance"));
-    assert_eq!(
-        fs::read_to_string(&legacy_pods).unwrap(),
-        format!("demo-agent|unrelated|demo|{}\n", project_root.display())
-    );
-
-    fs::write(&legacy_pods, "").unwrap();
     fs::write(
         &container_state,
         "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n",
@@ -1153,6 +1030,64 @@ exit 0
     assert!(
         fs::read_to_string(&container_state).unwrap().is_empty(),
         "normal shutdown should remove the exact container name from its runtime spec"
+    );
+
+    fs::write(
+        &container_state,
+        format!(
+            "demo-agent-instance|demo|{}|agent\n",
+            project_root.display()
+        ),
+    )
+    .unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut destroy = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    destroy.args(["--cladding-dir", project_root.to_str().unwrap(), "destroy"]);
+    assert_success(destroy.output().unwrap());
+    let destroy_log = read_log(&podman_log);
+    assert!(
+        destroy_log.contains("container exists demo-agent-instance")
+            && destroy_log
+                .contains("container inspect --format {{json .Config.Labels}} demo-agent-instance")
+            && destroy_log.contains("rm -f demo-agent-instance"),
+        "destroy should verify and remove the owned standalone container: {destroy_log}"
+    );
+    assert!(
+        !destroy_log.lines().any(|line| line.starts_with("pod ")),
+        "destroy must not query or remove pods: {destroy_log}"
+    );
+    assert!(fs::read_to_string(&container_state).unwrap().is_empty());
+
+    fs::write(
+        &container_state,
+        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n",
+    )
+    .unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut destroy_foreign = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    destroy_foreign.args(["--cladding-dir", project_root.to_str().unwrap(), "destroy"]);
+    assert!(!destroy_foreign.output().unwrap().status.success());
+    let destroy_foreign_log = read_log(&podman_log);
+    assert!(
+        destroy_foreign_log
+            .contains("container inspect --format {{json .Config.Labels}} demo-agent-instance")
+    );
+    assert!(!destroy_foreign_log.contains("rm -f demo-agent-instance"));
+    assert_eq!(
+        fs::read_to_string(&container_state).unwrap(),
+        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n"
     );
 
     fs::remove_dir_all(root).unwrap();
@@ -1179,10 +1114,6 @@ fn cli(
         .env(
             "CLADDING_PODMAN_VOLUMES",
             podman_log.with_extension("volumes"),
-        )
-        .env(
-            "CLADDING_LEGACY_PODS",
-            podman_log.with_extension("legacy-pods"),
         )
         .env("CLADDING_TEST_CA_CERT", certificate_source)
         .env("CLADDING_TEST_CA_KEY", private_key_source);

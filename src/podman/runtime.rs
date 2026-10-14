@@ -42,9 +42,10 @@ impl RuntimeInventory {
 
     pub fn is_fully_running(&self) -> bool {
         self.resources.len() == self.expected_count
-            && self.resources.iter().all(|resource| {
-                resource.kind == "container" && resource.state.eq_ignore_ascii_case("running")
-            })
+            && self
+                .resources
+                .iter()
+                .all(|resource| resource.state.eq_ignore_ascii_case("running"))
     }
 }
 
@@ -160,17 +161,6 @@ pub fn runtime_inventory(
                 });
             }
         }
-
-        // Detect pods created by older Cladding versions so `up` does not
-        // mistake their proxy containers for the current standalone runtime.
-        if let Some(state) = inspect_resource_state("pod", &component.name, verbose, quiet_helpers)?
-        {
-            resources.push(RuntimeResource {
-                kind: "pod",
-                name: component.name.clone(),
-                state,
-            });
-        }
     }
 
     Ok(RuntimeInventory {
@@ -182,36 +172,16 @@ pub fn runtime_inventory(
 pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cleanup_errors = CleanupErrors::default();
     for component in runtime_components(spec) {
-        if inspect_resource_state("pod", &component.name, verbose, quiet_helpers)?.is_some() {
-            if resource_labels_match_component(
-                "pod",
-                &component.name,
-                component,
-                verbose,
-                quiet_helpers,
-            )? {
-                cleanup_errors.record(legacy_pod_rm(&component.name, verbose, quiet_helpers));
-            } else {
-                cleanup_errors.record(Err(Error::message(format!(
-                    "refusing to remove pod '{}' because it is not owned by this Cladding component",
-                    component.name
-                ))));
-            }
-            // The pod may own the legacy proxy container. Skip standalone
-            // container removal whenever a same-named pod exists.
-            continue;
-        }
-
         for container in &component.containers {
             if inspect_resource_state("container", &container.name, verbose, quiet_helpers)?
                 .is_none()
             {
                 continue;
             }
-            if resource_labels_match_component(
+            if resource_labels_match_expected(
                 "container",
                 &container.name,
-                component,
+                &component.labels,
                 verbose,
                 quiet_helpers,
             )? {
@@ -264,37 +234,10 @@ fn runtime_cleanup_normal_report(
     let mut runtime_root_safe_to_remove = true;
 
     for component in runtime_components(spec) {
-        let mut container_errors = Vec::new();
         for container in &component.containers {
             if let Err(err) = container_rm(&container.name, verbose, quiet_helpers) {
-                container_errors.push(err.to_string());
-            }
-        }
-
-        // A legacy pod can remain after its member container was removed or
-        // was already missing. Check it independently of the container rm
-        // result, and remove it only after verifying its ownership labels.
-        match remove_legacy_pod(component, verbose, quiet_helpers) {
-            Ok(true) => {}
-            Ok(false) => {
-                if !container_errors.is_empty() {
-                    runtime_root_safe_to_remove = false;
-                    for err in container_errors {
-                        errors.record(Err(Error::message(err)));
-                    }
-                }
-            }
-            Err(pod_error) => {
                 runtime_root_safe_to_remove = false;
-                let message = if container_errors.is_empty() {
-                    pod_error.to_string()
-                } else {
-                    format!(
-                        "{}; legacy pod cleanup also failed: {pod_error}",
-                        container_errors.join("; ")
-                    )
-                };
-                errors.record(Err(Error::message(message)));
+                errors.record(Err(err));
             }
         }
     }
@@ -327,48 +270,6 @@ fn runtime_cleanup_normal_report(
         result: errors.finish(),
         runtime_root_safe_to_remove,
     }
-}
-
-fn remove_legacy_pod(
-    component: &RuntimeComponent,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<bool> {
-    let mut cmd = Command::new("podman");
-    cmd.args([
-        "pod",
-        "inspect",
-        "--format",
-        "{{json .Labels}}",
-        &component.name,
-    ]);
-    trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to inspect legacy pod labels: {}", component.name))?;
-    if !output.status.success() {
-        if remove_output_is_missing_pod(&output) {
-            return Ok(false);
-        }
-        if quiet_helpers {
-            ensure_success_output_with_diagnostics(&output, "podman pod inspect")?;
-        }
-        if verbose {
-            forward_output(&output)?;
-        }
-        ensure_success_output(&output, "podman pod inspect")?;
-    }
-
-    let labels: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("failed to parse labels for pod {}", component.name))?;
-    if !labels_match_expected(&labels, &component.labels) {
-        return Err(Error::message(format!(
-            "refusing to remove pod '{}' because it is not owned by this Cladding component",
-            component.name
-        )));
-    }
-    legacy_pod_rm(&component.name, verbose, quiet_helpers)?;
-    Ok(true)
 }
 
 #[derive(Default)]
@@ -1148,24 +1049,6 @@ fn record_cleanup_result(target: &mut Option<crate::error::Error>, result: Resul
     }
 }
 
-fn resource_labels_match_component(
-    kind: &str,
-    name: &str,
-    component: &RuntimeComponent,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<bool> {
-    let format = match kind {
-        "container" => "{{json .Config.Labels}}",
-        _ => "{{json .Labels}}",
-    };
-    let labels = inspect_value(kind, name, format, verbose, quiet_helpers)?;
-    let labels: serde_json::Value = serde_json::from_str(&labels)
-        .with_context(|| format!("failed to parse labels for {kind} {name}"))?;
-
-    Ok(labels_match_expected(&labels, &component.labels))
-}
-
 fn resource_labels_match_expected(
     kind: &str,
     name: &str,
@@ -1277,38 +1160,11 @@ fn build_resource_exists_command(kind: &str, name: &str) -> Command {
 fn build_resource_inspect_command(kind: &str, name: &str) -> Command {
     let mut cmd = Command::new("podman");
     let format = match kind {
-        "pod" => "{{.State}}",
         "volume" => "{{.Name}}",
         _ => "{{.State.Status}}",
     };
     cmd.args([kind, "inspect", "--format", format, name]);
     cmd
-}
-
-fn legacy_pod_rm(pod_name: &str, verbose: bool, quiet_helpers: bool) -> Result<()> {
-    let mut cmd = build_pod_rm_command(pod_name);
-    trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to run podman pod rm for {pod_name}"))?;
-
-    if output.status.success() {
-        if verbose {
-            forward_output(&output)?;
-        }
-        return Ok(());
-    }
-    if remove_output_is_missing_pod(&output) {
-        return Ok(());
-    }
-
-    if quiet_helpers {
-        ensure_success_output_with_diagnostics(&output, "podman pod rm")?;
-    }
-    if verbose {
-        forward_output(&output)?;
-    }
-    ensure_success_output(&output, "podman pod rm")
 }
 
 pub fn container_run(
@@ -1403,11 +1259,6 @@ fn remove_output_is_missing_container(output: &Output) -> bool {
     stderr.contains("no such container") || stderr.contains("no container with name or id")
 }
 
-fn remove_output_is_missing_pod(output: &Output) -> bool {
-    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    stderr.contains("no such pod") || stderr.contains("no pod with name or id")
-}
-
 fn runtime_components(spec: &RuntimeSpec) -> Vec<&RuntimeComponent> {
     let mut components = vec![&spec.proxy, &spec.agent];
     if let Some(component) = &spec.nw_sandbox {
@@ -1489,12 +1340,6 @@ fn ensure_runtime_empty_mask_dir(spec: &RuntimeSpec) -> Result<()> {
         })?;
     }
     Ok(())
-}
-
-fn build_pod_rm_command(pod_name: &str) -> Command {
-    let mut cmd = Command::new("podman");
-    cmd.args(["pod", "rm", "-f", pod_name]);
-    cmd
 }
 
 fn build_container_run_command(
@@ -2181,27 +2026,16 @@ mod tests {
             }],
         };
         assert!(!stopped.is_fully_running());
-
-        let legacy_pod = RuntimeInventory {
-            expected_count: 1,
-            resources: vec![RuntimeResource {
-                kind: "pod",
-                name: "demo-proxy".to_string(),
-                state: "Running".to_string(),
-            }],
-        };
-        assert!(!legacy_pod.is_fully_running());
     }
 
     #[test]
-    fn resource_inspection_commands_target_legacy_pods_and_containers() {
+    fn resource_inspection_commands_target_containers_and_volumes() {
         assert_eq!(
-            command_args(&build_resource_exists_command("pod", "demo-proxy")),
-            vec!["pod", "exists", "demo-proxy"]
-        );
-        assert_eq!(
-            command_args(&build_resource_inspect_command("pod", "demo-proxy")),
-            vec!["pod", "inspect", "--format", "{{.State}}", "demo-proxy"]
+            command_args(&build_resource_exists_command(
+                "container",
+                "demo-agent-instance"
+            )),
+            vec!["container", "exists", "demo-agent-instance"]
         );
         assert_eq!(
             command_args(&build_resource_inspect_command(
@@ -2215,6 +2049,10 @@ mod tests {
                 "{{.State.Status}}",
                 "demo-agent-instance"
             ]
+        );
+        assert_eq!(
+            command_args(&build_resource_inspect_command("volume", "demo-cache")),
+            vec!["volume", "inspect", "--format", "{{.Name}}", "demo-cache"]
         );
     }
 
@@ -2736,15 +2574,5 @@ mod tests {
                 "infinity",
             ]
         );
-    }
-
-    #[test]
-    fn remove_output_is_missing_pod_matches_expected_errors() {
-        let output = Output {
-            status: std::process::Command::new("true").status().expect("status"),
-            stdout: Vec::new(),
-            stderr: b"Error: no such pod".to_vec(),
-        };
-        assert!(remove_output_is_missing_pod(&output));
     }
 }
