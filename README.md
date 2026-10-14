@@ -369,9 +369,10 @@ The default proxy image is built from Debian trixie slim. It includes GNU libc, 
 * `volume` (optional, named volume; mutually exclusive with `hostPath`)
 * `type` (optional: `bind`, `readonly`, `copy`, or `tmpfs`; omitted `type` defaults host paths to writable binds and preserves named-volume mounts)
 * `size` (optional size string for `type: "tmpfs"`, such as `1GiB`; the default limit is `64MiB`)
-* `readOnly` (deprecated; accepted for compatibility on existing mounts, but new read-only host mounts should use `type: "readonly"`)
 * `targets` (optional; explicit list of `agent`, `nw-sandbox`, `fs-sandbox`)
 * `ignore` (optional, default `false`; when true, removes an existing default mount at the same `mount` path instead of replacing it)
+
+`readOnly` is not supported. Use `type: "readonly"` for a read-only host path or `type: "bind"` for a writable host path.
 
 If `type` is omitted and neither `hostPath` nor `volume` is set, Cladding mounts an empty, read-only tmpfs at the path for each target. Cladding disables tmpfs copy-up, so the mount does not expose files from the image. The tmpfs disappears when its container stops and does not create a Podman volume.
 Mounts apply to the components named in `targets`. When `targets` is omitted, the mount applies to the agent and to `nw-sandbox` when it is enabled. `fs-sandbox` only receives custom mounts that explicitly target `fs-sandbox`.
