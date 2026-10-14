@@ -282,13 +282,6 @@ fn build_unix_socket_client(path: &Path) -> Result<reqwest::Client, RemoteClient
         .map_err(RemoteClientError::Request)
 }
 
-#[cfg(not(unix))]
-fn build_unix_socket_client(_path: &Path) -> Result<reqwest::Client, RemoteClientError> {
-    Err(RemoteClientError::InvalidSocketPath(
-        "unix socket support is unavailable on this platform".to_string(),
-    ))
-}
-
 async fn process_stream<WOut: Write, WErr: Write>(
     response: reqwest::Response,
     stdout: &mut WOut,

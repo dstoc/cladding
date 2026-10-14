@@ -1482,11 +1482,6 @@ fn set_restrictive_dir_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn set_restrictive_dir_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
 fn ensure_runtime_empty_mask_dir(spec: &RuntimeSpec) -> Result<()> {
     for empty_mask in generated_empty_mask_dirs(spec) {
         fs::create_dir_all(&empty_mask).with_context(|| {

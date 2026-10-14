@@ -21,6 +21,10 @@ jobs:
           components: rustfmt
       - name: Format
         run: cargo fmt --check
+      - name: Test supported platform triples
+        run: |
+          rustc --edition=2024 --test build.rs -o "$RUNNER_TEMP/test-build-platforms"
+          "$RUNNER_TEMP/test-build-platforms"
 
   embedded-linux-tools-x86_64:
     runs-on: ubuntu-latest

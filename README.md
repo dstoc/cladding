@@ -8,6 +8,18 @@ Cladding lets you run an agent in a constrained container environment where netw
 
 The proxy startup script validates its mounted inputs, starts Baffle, and creates persistent sessions for the agent and (when enabled) the network sandbox. Cladding does not wait for those sessions before it starts the execution containers, so early proxy requests can fail while Baffle starts. Startup errors appear in the proxy container logs and exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime.
 
+## Supported platforms
+
+Cladding supports Linux and macOS hosts and targets on `x86_64` and `aarch64`.
+The `cladding`, `mcp-run`, and `cladding-bridge` Rust crates reject other
+targets at build time. The build script also reports an error when either the
+build host or target is outside this list. Embedded sandbox helpers run in
+Linux containers and are Linux binaries, including on macOS hosts.
+
+For development, run Cargo builds and tests on a supported host and target.
+The CI checks are `cargo fmt --check`,
+`cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`.
+
 In short: the agent cannot freely access the network. From the host, `cladding exec --target nw-sandbox` or `cladding exec --target fs-sandbox` runs a command directly in an enabled sandbox. This host-initiated path bypasses the agent-side delegation and policy checks. Commands inside the agent can use `run-in-nw-sandbox` or `run-in-fs-sandbox` to delegate through those checks. `cladding run` creates an isolated, temporary runtime for one command and removes it when the command ends. `cladding exec` enters a runtime that is already running.
 
 ## Getting Started

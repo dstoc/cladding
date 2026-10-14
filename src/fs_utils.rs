@@ -3,7 +3,6 @@ use anyhow::Context as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 pub fn is_broken_symlink(path: &Path) -> Result<bool> {
@@ -17,14 +16,7 @@ pub fn is_broken_symlink(path: &Path) -> Result<bool> {
 
 pub fn is_executable(path: &Path) -> bool {
     if let Ok(meta) = fs::metadata(path) {
-        #[cfg(unix)]
-        {
-            return meta.permissions().mode() & 0o111 != 0;
-        }
-        #[cfg(not(unix))]
-        {
-            return meta.is_file();
-        }
+        return meta.permissions().mode() & 0o111 != 0;
     }
     false
 }
@@ -42,11 +34,8 @@ pub fn canonicalize_path(path: &Path) -> Result<PathBuf> {
 }
 
 pub fn set_permissions(path: &Path, mode: u32) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let perm = fs::Permissions::from_mode(mode);
-        fs::set_permissions(path, perm)
-            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
-    }
+    let perm = fs::Permissions::from_mode(mode);
+    fs::set_permissions(path, perm)
+        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
     Ok(())
 }

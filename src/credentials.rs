@@ -464,11 +464,6 @@ fn require_current_owner(path: &Path) -> anyhow::Result<()> {
     require_owner(path, owner, unsafe { libc::geteuid() })
 }
 
-#[cfg(not(unix))]
-fn require_current_owner(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn require_owner(path: &Path, owner: u32, expected: u32) -> anyhow::Result<()> {
     if owner != expected {
@@ -538,25 +533,17 @@ fn validate_ca_material(certificate_pem: &[u8], private_key_pem: &str) -> anyhow
 }
 
 fn create_directory(path: &Path, mode: u32) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(mode).create(path)?;
-    }
-    #[cfg(not(unix))]
-    fs::create_dir(path)?;
+    use std::os::unix::fs::DirBuilderExt as _;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(mode).create(path)?;
     set_mode(path, mode)
 }
 
 fn write_new_file(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(mode);
-    }
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.mode(mode);
     let mut file = options
         .open(path)
         .with_context(|| format!("failed to create {}", path.display()))?;
@@ -574,22 +561,12 @@ fn set_mode(path: &Path, mode: u32) -> anyhow::Result<()> {
         .with_context(|| format!("failed to set mode {mode:o} on {}", path.display()))
 }
 
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> anyhow::Result<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> anyhow::Result<()> {
     File::open(path)
         .with_context(|| format!("failed to open directory {} for sync", path.display()))?
         .sync_all()
         .with_context(|| format!("failed to sync directory {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
