@@ -309,23 +309,29 @@ fn parse_mount_targets(
     Ok(targets)
 }
 
+const VALID_MOUNT_KEYS: &[&str] = &[
+    "mount", "hostPath", "volume", "type", "size", "targets", "ignore",
+];
+
+fn valid_mount_keys_hint() -> String {
+    format!(
+        "hint: valid mount keys are: {}",
+        VALID_MOUNT_KEYS.join(", ")
+    )
+}
+
 fn validate_mount_keys(
     object: &serde_json::Map<String, serde_json::Value>,
     index: usize,
     config_path: &Path,
 ) -> Result<()> {
-    let allowed = [
-        "mount", "hostPath", "volume", "type", "size", "targets", "ignore",
-    ];
     let mut invalid = false;
     for key in object.keys() {
-        if allowed.contains(&key.as_str()) {
+        if VALID_MOUNT_KEYS.contains(&key.as_str()) {
             continue;
         }
         eprintln!("error: cladding.json unknown key: mounts[{index}].{key}");
-        eprintln!(
-            "hint: valid mount keys are mount, hostPath, volume, type, size, readOnly, targets, and ignore"
-        );
+        eprintln!("{}", valid_mount_keys_hint());
         eprintln!("file: {}", config_path.display());
         invalid = true;
     }
@@ -539,6 +545,15 @@ mod tests {
                 parse_mounts(&temp, &serde_json::json!({ "mounts": [mount] }), &config).is_err()
             );
         }
+    }
+
+    #[test]
+    fn mount_key_hint_lists_only_supported_keys() {
+        assert_eq!(
+            valid_mount_keys_hint(),
+            "hint: valid mount keys are: mount, hostPath, volume, type, size, targets, ignore"
+        );
+        assert!(!VALID_MOUNT_KEYS.contains(&"readOnly"));
     }
 
     #[test]
