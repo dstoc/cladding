@@ -198,7 +198,7 @@ jobs:
       - name: Install rootless Podman dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential podman uidmap slirp4netns fuse-overlayfs ca-certificates curl gnupg git jq openssl
+          sudo apt-get install -y build-essential podman uidmap slirp4netns fuse-overlayfs ca-certificates curl gnupg git jq openssl socat
           sudo install -d -m 0755 /usr/share/keyrings
           curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
@@ -225,7 +225,7 @@ jobs:
             scripts/podman-build-timer; do
             sh -n "$script"
           done
-          python3 -m py_compile scripts/validate_inject.py
+          python3 -m py_compile scripts/validate_expose.py scripts/validate_inject.py
       - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/linux-tools/bin/baffle"
       - name: Validate shared runtime topology under rootless Podman
@@ -360,6 +360,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             podman \
+            socat \
             qemu-system-x86 \
             qemu-utils \
             gvproxy \
