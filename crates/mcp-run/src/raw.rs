@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStderr, ChildStdout};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::executor::{
@@ -204,16 +205,18 @@ async fn stream_process_events(
     }
 
     let (reader_tx, mut reader_rx) = mpsc::channel::<ReaderEvent>(64);
-    tokio::spawn(read_output_stream(
-        stdout,
-        OutputStreamKind::Stdout,
-        reader_tx.clone(),
-    ));
-    tokio::spawn(read_output_stream(
-        stderr,
-        OutputStreamKind::Stderr,
-        reader_tx,
-    ));
+    let mut reader_tasks = vec![
+        tokio::spawn(read_output_stream(
+            stdout,
+            OutputStreamKind::Stdout,
+            reader_tx.clone(),
+        )),
+        tokio::spawn(read_output_stream(
+            stderr,
+            OutputStreamKind::Stderr,
+            reader_tx,
+        )),
+    ];
 
     let mut stdout_done = false;
     let mut stderr_done = false;
@@ -221,6 +224,12 @@ async fn stream_process_events(
 
     loop {
         tokio::select! {
+            _ = tx.closed() => {
+                tracing::info!(command = %executable, args = ?args, "raw client disconnected while waiting for command");
+                terminate_child(&mut child).await;
+                stop_output_readers(&mut reader_tasks).await;
+                return;
+            }
             status = child.wait(), if exit_code.is_none() => {
                 match status {
                     Ok(status) => {
@@ -229,6 +238,8 @@ async fn stream_process_events(
                     Err(error) => {
                         tracing::error!(command = %executable, args = ?args, error = %error, "raw runtime wait failure");
                         let _ = send_event(&tx, &RawStreamEvent::Error { message: format!("Runtime wait failure: {error}") }).await;
+                        terminate_child(&mut child).await;
+                        stop_output_readers(&mut reader_tasks).await;
                         return;
                     }
                 }
@@ -244,6 +255,7 @@ async fn stream_process_events(
                         if !send_event(&tx, &event).await {
                             tracing::info!(command = %executable, args = ?args, "raw client disconnected during stream");
                             terminate_child(&mut child).await;
+                            stop_output_readers(&mut reader_tasks).await;
                             return;
                         }
                     }
@@ -261,6 +273,7 @@ async fn stream_process_events(
                         )
                         .await;
                         terminate_child(&mut child).await;
+                        stop_output_readers(&mut reader_tasks).await;
                         return;
                     }
                     None => {
@@ -275,6 +288,8 @@ async fn stream_process_events(
             break;
         }
     }
+
+    join_output_readers(reader_tasks).await;
 
     let final_exit_code = exit_code.unwrap_or(None);
     if !send_event(
@@ -297,6 +312,19 @@ async fn stream_process_events(
         duration_ms = started.elapsed().as_millis() as u64,
         "raw request completed",
     );
+}
+
+async fn stop_output_readers(reader_tasks: &mut Vec<JoinHandle<()>>) {
+    for task in reader_tasks.iter() {
+        task.abort();
+    }
+    join_output_readers(std::mem::take(reader_tasks)).await;
+}
+
+async fn join_output_readers(reader_tasks: Vec<JoinHandle<()>>) {
+    for task in reader_tasks {
+        let _ = task.await;
+    }
 }
 
 async fn read_output_stream<R>(
@@ -362,6 +390,7 @@ fn error_response(status: StatusCode, message: String) -> Response {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::executor::{MAX_OUTPUT_BYTES, RunCommandCheckOutput, RunCommandInput};
@@ -502,6 +531,83 @@ mod tests {
         ));
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn raw_quiet_command_is_terminated_when_client_disconnects() {
+        let sh_path = match find_executable("sh") {
+            Some(path) => path,
+            None => return,
+        };
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let pid_path = temp.path().join("child.pid");
+        let marker_path = temp.path().join("completed");
+        let script = "printf '%s' \"$$\" > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; sleep 1.5; printf done > \"$2\"";
+        let (base_url, server_task) = start_server(rego_engine_allow_commands(&[&sh_path])).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base_url}/raw"))
+            .json(&RunCommandInput {
+                executable: sh_path,
+                args: vec![
+                    "-c".to_string(),
+                    script.to_string(),
+                    "raw-cancel-test".to_string(),
+                    pid_path.to_string_lossy().into_owned(),
+                    marker_path.to_string_lossy().into_owned(),
+                ],
+                cwd: None,
+                env: None,
+            })
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut response_body = response.bytes_stream();
+        let start_event = tokio::time::timeout(Duration::from_secs(2), response_body.next())
+            .await
+            .expect("start event timeout")
+            .expect("response stream ended before start event")
+            .expect("read start event");
+        assert!(String::from_utf8_lossy(&start_event).contains("\"event\":\"start\""));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !pid_path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child did not start");
+        let pid = std::fs::read_to_string(&pid_path)
+            .expect("read child pid")
+            .parse::<libc::pid_t>()
+            .expect("parse child pid");
+
+        drop(response_body);
+
+        let child_reaped = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if unsafe { libc::kill(pid, 0) } == -1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        let performed_later_side_effect = marker_path.exists();
+
+        server_task.abort();
+
+        assert!(
+            child_reaped,
+            "disconnected raw child was not reaped promptly"
+        );
+        assert!(
+            !performed_later_side_effect,
+            "disconnected raw child performed its delayed side effect"
+        );
     }
 
     #[tokio::test]
