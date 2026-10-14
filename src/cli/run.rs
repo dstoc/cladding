@@ -2,6 +2,7 @@ use super::context::Context;
 use super::{exec, lifecycle};
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
+use cladding::identity::invoking_uid;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
 use std::collections::HashSet;
@@ -607,7 +608,7 @@ fn create_private_runtime_root(instance_name: &str, project_root: &Path) -> Resu
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("failed to secure private runtime root {}", root.display()))?;
         use std::os::unix::fs::MetadataExt as _;
-        let owner = unsafe { libc::getuid() };
+        let owner = invoking_uid();
         let metadata = fs::symlink_metadata(&root).with_context(|| {
             format!("failed to inspect private runtime root {}", root.display())
         })?;
@@ -661,7 +662,7 @@ fn ensure_run_runtime_directory(path: &Path, private: bool) -> anyhow::Result<()
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        let owner = unsafe { libc::getuid() };
+        let owner = invoking_uid();
         if private && metadata.uid() != owner {
             anyhow::bail!(
                 "private runtime directory {} is not owned by the invoking user",
@@ -767,9 +768,7 @@ mod tests {
                 fs::metadata(&runtime_root).unwrap().permissions().mode() & 0o777,
                 0o700
             );
-            assert_eq!(fs::metadata(&runtime_root).unwrap().uid(), unsafe {
-                libc::getuid()
-            });
+            assert_eq!(fs::metadata(&runtime_root).unwrap().uid(), invoking_uid());
             assert_eq!(
                 fs::metadata(runtime_root.parent().unwrap())
                     .unwrap()

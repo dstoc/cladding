@@ -4,6 +4,7 @@ use cladding::assets::tool_files;
 use cladding::config::{DEFAULT_PROXY_IMAGE, ExecutionConfig};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::is_executable;
+use cladding::identity::invoking_uid;
 use cladding::podman::runsc_available;
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashSet;
@@ -217,10 +218,7 @@ fn validate_baffle_session_path_metadata(
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let uid = metadata.uid();
-    let trusted_uid = unsafe { libc::geteuid() };
-    if uid != 0 && uid != trusted_uid {
-        anyhow::bail!("Baffle session paths must be owned by root or the current user");
-    }
+    validate_baffle_session_owner(uid, invoking_uid())?;
 
     let mode = metadata.permissions().mode();
     if mode & 0o022 != 0 {
@@ -233,6 +231,14 @@ fn validate_baffle_session_path_metadata(
     };
     if !has_read_access {
         anyhow::bail!("Baffle session path does not have the required read access");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_baffle_session_owner(uid: u32, trusted_uid: u32) -> anyhow::Result<()> {
+    if uid != 0 && uid != trusted_uid {
+        anyhow::bail!("Baffle session paths must be owned by root or the current user");
     }
     Ok(())
 }
@@ -448,6 +454,18 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(unix)]
+    #[test]
+    fn session_ownership_uses_real_uid_and_keeps_root_trusted() {
+        let real_uid = 1000;
+        let effective_uid = 2000;
+        let trusted_uid = real_uid;
+
+        assert!(validate_baffle_session_owner(real_uid, trusted_uid).is_ok());
+        assert!(validate_baffle_session_owner(0, trusted_uid).is_ok());
+        assert!(validate_baffle_session_owner(effective_uid, trusted_uid).is_err());
+    }
 
     #[test]
     fn readiness_requires_a_project_ca_without_initializing_it() {

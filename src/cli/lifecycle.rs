@@ -8,6 +8,7 @@ use cladding::config::{
 };
 use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
+use cladding::identity::invoking_uid;
 use cladding::podman::{
     initialize_baffle_ca, list_running_projects, podman_build_image, podman_build_proxy_image,
     podman_required, runtime_cleanup, runtime_cleanup_normal, runtime_cleanup_owned,
@@ -21,7 +22,7 @@ use std::fs;
 pub(super) fn cmd_build(context: &Context) -> Result<()> {
     let config = context.load_config()?;
 
-    let host_uid = unsafe { libc::getuid() };
+    let host_uid = invoking_uid();
     let host_gid = unsafe { libc::getgid() };
     let build_plan = plan_image_builds(&config)?;
 

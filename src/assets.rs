@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::fs_utils::set_permissions;
+use crate::identity::invoking_uid;
 use anyhow::Context as _;
 use include_dir::{Dir, include_dir};
 use std::fs;
@@ -294,7 +295,7 @@ fn validate_baffle_config_path(path: &Path, directory: bool) -> anyhow::Result<(
                 path.display()
             );
         }
-        let owner = unsafe { libc::geteuid() };
+        let owner = invoking_uid();
         if metadata.uid() != owner {
             anyhow::bail!(
                 "Baffle file-only configuration must be owned by the user running cladding: {}",
@@ -438,7 +439,7 @@ unmatched = "deny"
         assert_eq!(daemon_file.permissions().mode() & 0o777, 0o644);
         assert_eq!(session_file.permissions().mode() & 0o777, 0o644);
         use std::os::unix::fs::MetadataExt as _;
-        let current_uid = unsafe { libc::geteuid() };
+        let current_uid = invoking_uid();
         assert_eq!(daemon_dir.uid(), current_uid);
         assert_eq!(sessions_dir.uid(), current_uid);
         assert_eq!(daemon_file.uid(), current_uid);

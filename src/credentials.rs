@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::identity::invoking_uid;
 use anyhow::{Context as _, bail};
 use rcgen::KeyPair;
 use std::fs::{self, File, OpenOptions};
@@ -461,7 +462,7 @@ fn require_current_owner(path: &Path) -> anyhow::Result<()> {
     let owner = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect owner of {}", path.display()))?
         .uid();
-    require_owner(path, owner, unsafe { libc::geteuid() })
+    require_owner(path, owner, invoking_uid())
 }
 
 #[cfg(unix)]
@@ -659,7 +660,7 @@ mod tests {
             assert_eq!(mode(&baffle_dir), 0o700);
             assert_eq!(mode(&baffle_dir.join(SECRETS_DIR)), 0o700);
             use std::os::unix::fs::MetadataExt as _;
-            let owner = unsafe { libc::geteuid() };
+            let owner = invoking_uid();
             assert_eq!(
                 fs::metadata(baffle_dir.join(SECRETS_DIR)).unwrap().uid(),
                 owner
@@ -712,7 +713,7 @@ mod tests {
             assert_eq!(mode(&baffle_dir.join(CERTIFICATE_FILE)), 0o644);
             assert_eq!(mode(&baffle_dir.join(PRIVATE_KEY_FILE)), 0o600);
             use std::os::unix::fs::MetadataExt as _;
-            let owner = unsafe { libc::geteuid() };
+            let owner = invoking_uid();
             assert_eq!(
                 fs::metadata(baffle_dir.join(CERTIFICATE_FILE))
                     .unwrap()
@@ -961,11 +962,28 @@ mod tests {
     #[test]
     fn wrong_credential_owner_is_reported() {
         let root = temp_project();
-        let expected = unsafe { libc::geteuid() };
+        let expected = invoking_uid();
         let actual = expected.wrapping_add(1);
         let error = require_owner(&root, actual, expected)
             .unwrap_err()
             .to_string();
+        assert!(error.contains("owned by"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_owner_check_trusts_real_uid_when_effective_uid_differs() {
+        let root = temp_project();
+        let real_uid = 1000;
+        let effective_uid = 0;
+        let trusted_uid = crate::identity::invoking_uid_from(real_uid, effective_uid);
+
+        require_owner(&root, real_uid, trusted_uid).unwrap();
+        let error = require_owner(&root, effective_uid, trusted_uid)
+            .unwrap_err()
+            .to_string();
+
         assert!(error.contains("owned by"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
