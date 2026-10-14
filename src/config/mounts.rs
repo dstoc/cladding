@@ -94,20 +94,6 @@ pub(super) fn parse_mounts_v2(
             return Err(Error::message("invalid cladding.json"));
         }
 
-        let legacy_read_only = match object.get("readOnly") {
-            Some(value) => Some(value.as_bool().ok_or_else(|| {
-                eprintln!("error: cladding.json invalid field 'mounts[{index}].readOnly' (expected boolean)");
-                eprintln!("file: {}", config_path.display());
-                Error::message("invalid cladding.json")
-            })?),
-            None => None,
-        };
-        if legacy_read_only.is_some() {
-            eprintln!(
-                "warning: mounts[{index}].readOnly is deprecated; use type: \"readonly\" instead"
-            );
-        }
-
         let configured_type = match object.get("type") {
             Some(value) => {
                 let mount_type = value.as_str().ok_or_else(|| {
@@ -170,11 +156,7 @@ pub(super) fn parse_mounts_v2(
             None => None,
         };
 
-        let mount_type = configured_type.unwrap_or(if legacy_read_only == Some(true) {
-            MountType::Readonly
-        } else {
-            MountType::Bind
-        });
+        let mount_type = configured_type.unwrap_or(MountType::Bind);
 
         if let Some(mount_type) = configured_type {
             let host_path_required = matches!(
@@ -203,20 +185,6 @@ pub(super) fn parse_mounts_v2(
                 eprintln!("file: {}", config_path.display());
                 return Err(Error::message("invalid cladding.json"));
             }
-        }
-
-        match (configured_type, legacy_read_only) {
-            (Some(MountType::Bind), Some(true))
-            | (Some(MountType::Tmpfs), Some(true))
-            | (Some(MountType::Readonly), Some(false)) => {
-                eprintln!(
-                    "error: cladding.json invalid field 'mounts[{index}].readOnly' (conflicts with type '{}')",
-                    configured_type.expect("matched configured type").as_str()
-                );
-                eprintln!("file: {}", config_path.display());
-                return Err(Error::message("invalid cladding.json"));
-            }
-            _ => {}
         }
 
         let host_path_is_private = host_path
@@ -255,14 +223,6 @@ pub(super) fn parse_mounts_v2(
             None => false,
         };
 
-        if volume.is_some() && legacy_read_only == Some(true) {
-            eprintln!(
-                "error: cladding.json invalid field 'mounts[{index}].readOnly' (readOnly not supported for volume mounts)"
-            );
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        }
-
         if ignore && (host_path.is_some() || volume.is_some()) {
             eprintln!(
                 "error: cladding.json invalid field 'mounts[{index}]' (ignore cannot be combined with hostPath or volume)"
@@ -271,20 +231,15 @@ pub(super) fn parse_mounts_v2(
             return Err(Error::message("invalid cladding.json"));
         }
 
-        if ignore
-            && (object.get("readOnly").is_some()
-                || object.get("type").is_some()
-                || object.get("size").is_some())
-        {
+        if ignore && (object.get("type").is_some() || object.get("size").is_some()) {
             eprintln!(
-                "error: cladding.json invalid field 'mounts[{index}]' (type, size, and readOnly are not supported when ignore is true)"
+                "error: cladding.json invalid field 'mounts[{index}]' (type and size are not supported when ignore is true)"
             );
             eprintln!("file: {}", config_path.display());
             return Err(Error::message("invalid cladding.json"));
         }
 
         let read_only = mount_type == MountType::Readonly
-            || (mount_type == MountType::Copy && legacy_read_only == Some(true))
             || (host_path.is_none() && volume.is_none() && mount_type == MountType::Bind);
 
         mounts.push(ResolvedMountConfig {
@@ -370,7 +325,7 @@ fn validate_mount_keys(
     config_path: &Path,
 ) -> Result<()> {
     let allowed = [
-        "mount", "hostPath", "volume", "type", "size", "readOnly", "targets", "ignore",
+        "mount", "hostPath", "volume", "type", "size", "targets", "ignore",
     ];
     let mut invalid = false;
     for key in object.keys() {
@@ -522,17 +477,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_mounts_supports_copy_tmpfs_size_and_legacy_read_only() {
+    fn parse_mounts_supports_current_types_and_default_behavior() {
         let temp = create_temp_dir("mount-types");
         let parsed = serde_json::json!({
             "mounts": [
                 { "mount": "/bind", "hostPath": "./workspace" },
+                { "mount": "/bind-explicit", "hostPath": "./workspace", "type": "bind" },
                 { "mount": "/reference", "hostPath": "../reference", "type": "readonly" },
                 { "mount": "/copy", "hostPath": "../workspace", "type": "copy", "targets": ["agent", "nw-sandbox"] },
                 { "mount": "/tmp", "type": "tmpfs", "size": "1GiB", "targets": ["agent"] },
-                { "mount": "/tmp-default", "type": "tmpfs", "targets": ["agent"] },
-                { "mount": "/legacy-ro", "hostPath": "../config", "readOnly": true },
-                { "mount": "/legacy-rw", "hostPath": "../cache", "readOnly": false }
+                { "mount": "/tmp-default", "type": "tmpfs", "targets": ["agent"] }
             ]
         });
 
@@ -540,17 +494,15 @@ mod tests {
 
         assert_eq!(mounts[0].mount_type, MountType::Bind);
         assert!(!mounts[0].read_only);
-        assert_eq!(mounts[1].mount_type, MountType::Readonly);
-        assert!(mounts[1].read_only);
-        assert_eq!(mounts[2].mount_type, MountType::Copy);
-        assert!(!mounts[2].read_only);
-        assert_eq!(mounts[3].mount_type, MountType::Tmpfs);
-        assert_eq!(mounts[3].tmpfs_size_bytes, Some(1024 * 1024 * 1024));
-        assert_eq!(mounts[4].tmpfs_size_bytes, Some(64 * 1024 * 1024));
-        assert_eq!(mounts[5].mount_type, MountType::Readonly);
-        assert!(mounts[5].read_only);
-        assert_eq!(mounts[6].mount_type, MountType::Bind);
-        assert!(!mounts[6].read_only);
+        assert_eq!(mounts[1].mount_type, MountType::Bind);
+        assert!(!mounts[1].read_only);
+        assert_eq!(mounts[2].mount_type, MountType::Readonly);
+        assert!(mounts[2].read_only);
+        assert_eq!(mounts[3].mount_type, MountType::Copy);
+        assert!(!mounts[3].read_only);
+        assert_eq!(mounts[4].mount_type, MountType::Tmpfs);
+        assert_eq!(mounts[4].tmpfs_size_bytes, Some(1024 * 1024 * 1024));
+        assert_eq!(mounts[5].tmpfs_size_bytes, Some(64 * 1024 * 1024));
     }
 
     #[test]
@@ -577,11 +529,24 @@ mod tests {
             serde_json::json!({ "mount": "/data", "type": "bind" }),
             serde_json::json!({ "mount": "/data", "type": "tmpfs", "hostPath": "../data" }),
             serde_json::json!({ "mount": "/data", "hostPath": "../data", "size": "1GiB" }),
-            serde_json::json!({ "mount": "/data", "hostPath": "../data", "type": "bind", "readOnly": true }),
-            serde_json::json!({ "mount": "/data", "type": "tmpfs", "readOnly": true }),
-            serde_json::json!({ "mount": "/data", "hostPath": "../data", "type": "readonly", "readOnly": false }),
             serde_json::json!({ "mount": "/data", "hostPath": "../data", "mode": "overlay" }),
         ] {
+            assert!(
+                parse_mounts(&temp, &serde_json::json!({ "mounts": [mount] }), &config).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_mounts_rejects_deprecated_read_only_key() {
+        let temp = create_temp_dir("deprecated-read-only");
+        let config = execution_config(true, false);
+        for read_only in [true, false] {
+            let mount = serde_json::json!({
+                "mount": "/data",
+                "hostPath": "../data",
+                "readOnly": read_only
+            });
             assert!(
                 parse_mounts(&temp, &serde_json::json!({ "mounts": [mount] }), &config).is_err()
             );
