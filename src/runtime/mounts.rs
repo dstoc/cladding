@@ -779,6 +779,39 @@ mod tests {
     }
 
     #[test]
+    fn typeless_mounts_build_per_target_read_only_empty_directories() {
+        let project_root = Path::new("/tmp/project/.cladding");
+        let mount = ResolvedMountConfig {
+            mount_path: "/empty".to_string(),
+            host_path: None,
+            volume: None,
+            mount_type: MountType::Bind,
+            tmpfs_size_bytes: None,
+            read_only: true,
+            targets: vec![MountTarget::Agent, MountTarget::NwSandbox],
+            ignore: false,
+        };
+        let custom_mounts = build_custom_mounts(project_root, project_root, "demo", &[mount]);
+
+        assert_eq!(custom_mounts.len(), 1);
+        assert!(custom_mounts[0].read_only);
+        assert!(matches!(
+            &custom_mounts[0].source,
+            RuntimeMountSource::EmptyDir
+        ));
+
+        for target in [MountTarget::Agent, MountTarget::NwSandbox] {
+            let runtime_mounts = apply_custom_mounts(Vec::new(), &custom_mounts, target);
+            assert_eq!(runtime_mounts.len(), 1);
+            assert!(runtime_mounts[0].read_only);
+            assert!(matches!(
+                &runtime_mounts[0].source,
+                RuntimeMountSource::EmptyDir
+            ));
+        }
+    }
+
+    #[test]
     fn explicitly_named_volumes_are_stable_across_persistent_and_one_off_runtimes() {
         let project_root = Path::new("/tmp/project/.cladding");
         let volume_mount = ResolvedMountConfig {

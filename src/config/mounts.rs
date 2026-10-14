@@ -554,6 +554,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_mounts_preserves_typeless_mount_as_read_only_empty_mount() {
+        let temp = create_temp_dir("typeless-empty-mount");
+        let parsed = serde_json::json!({
+            "mounts": [{ "mount": "/empty", "targets": ["agent"] }]
+        });
+
+        let mounts = parse_mounts(&temp, &parsed, &execution_config(true, false)).unwrap();
+
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].mount_type, MountType::Bind);
+        assert!(mounts[0].host_path.is_none());
+        assert!(mounts[0].volume.is_none());
+        assert!(mounts[0].read_only);
+    }
+
+    #[test]
     fn parse_mounts_rejects_invalid_type_combinations_and_mode() {
         let temp = create_temp_dir("invalid-mount-types");
         let config = execution_config(true, false);

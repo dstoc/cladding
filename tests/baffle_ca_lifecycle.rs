@@ -458,6 +458,10 @@ exit 0
             "mount": "/home/user/.cache/kache",
             "volume": "cladding-kache",
             "targets": ["agent"]
+        },
+        {
+            "mount": "/empty",
+            "targets": ["agent"]
         }
     ]);
     fs::write(
@@ -689,6 +693,18 @@ exit 0
             .lines()
             .any(|line| { line.contains("--volume cladding-kache:/home/user/.cache/kache") }),
         "one-off run should mount the explicitly named Podman volume verbatim: {run_log}"
+    );
+    assert!(
+        run_log.lines().any(|line| {
+            line.contains(
+                "--mount type=tmpfs,dst=/empty,tmpfs-mode=1777,U=true,notmpcopyup,ro=true",
+            )
+        }),
+        "one-off run should mount a typeless mount as an empty read-only tmpfs: {run_log}"
+    );
+    assert!(
+        !run_log.lines().any(|line| line.contains("-empty-empty")),
+        "one-off run must not create or mount an implicit named volume: {run_log}"
     );
     assert!(
         !run_log
@@ -949,6 +965,15 @@ exit 0
     assert!(
         agent_start.contains("--volume cladding-kache:/home/user/.cache/kache"),
         "persistent runtime should mount the explicitly named Podman volume verbatim: {agent_start}"
+    );
+    assert!(
+        agent_start
+            .contains("--mount type=tmpfs,dst=/empty,tmpfs-mode=1777,U=true,notmpcopyup,ro=true"),
+        "persistent runtime should mount a typeless mount as an empty read-only tmpfs: {agent_start}"
+    );
+    assert!(
+        !agent_start.contains("-empty-empty"),
+        "persistent runtime must not create or mount an implicit named volume: {agent_start}"
     );
 
     fs::write(&podman_log, "").unwrap();
