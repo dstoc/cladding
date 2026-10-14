@@ -508,4 +508,27 @@ cladding logs nw-sandbox -f  # follow network sandbox (mcp-run) logs
 cladding logs fs-sandbox -f  # follow filesystem sandbox (mcp-run) logs
 ```
 
+### Removing pods left by older releases
+
+Cladding does not discover or remove Podman pods left by older releases. If an
+installation still has them, list Cladding pods and inspect each candidate:
+
+```bash
+podman pod ps -a --filter label=cladding --format '{{.Name}}'
+podman pod inspect POD_NAME --format '{{.Name}} {{json .Labels}}'
+```
+
+Replace `POD_NAME` with a candidate's exact name. Confirm that the `cladding`,
+`project_root`, and `app` labels identify the intended project and component.
+Check that it is safe to stop that workload. Then remove each confirmed old pod
+by its exact name:
+
+```bash
+podman pod rm -f POD_NAME
+```
+
+`cladding down` and `cladding destroy` manage current standalone containers and
+do not remove these old pods. Remove old pods manually before starting a project
+that still has them.
+
 `cladding exec` defaults to `agent`. Its `nw-sandbox` and `fs-sandbox` targets run directly from the host; they do not use the agent's delegation or policy path. Inside the agent container, use `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` to request an allowlisted command through `run-remote` over the component-specific Unix socket. The filesystem sandbox has no workspace mount by default, so a command targeting it starts in `/home/user` unless its configuration adds a workspace mount.
