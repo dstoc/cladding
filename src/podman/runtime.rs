@@ -180,7 +180,7 @@ pub fn runtime_inventory(
 }
 
 pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
-    let mut cleanup_error = None;
+    let mut cleanup_errors = CleanupErrors::default();
     for component in runtime_components(spec) {
         if inspect_resource_state("pod", &component.name, verbose, quiet_helpers)?.is_some() {
             if resource_labels_match_component(
@@ -190,18 +190,12 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
                 verbose,
                 quiet_helpers,
             )? {
-                record_cleanup_result(
-                    &mut cleanup_error,
-                    legacy_pod_rm(&component.name, verbose, quiet_helpers),
-                );
+                cleanup_errors.record(legacy_pod_rm(&component.name, verbose, quiet_helpers));
             } else {
-                record_cleanup_result(
-                    &mut cleanup_error,
-                    Err(Error::message(format!(
-                        "refusing to remove pod '{}' because it is not owned by this Cladding component",
-                        component.name
-                    ))),
-                );
+                cleanup_errors.record(Err(Error::message(format!(
+                    "refusing to remove pod '{}' because it is not owned by this Cladding component",
+                    component.name
+                ))));
             }
             // The pod may own the legacy proxy container. Skip standalone
             // container removal whenever a same-named pod exists.
@@ -221,38 +215,20 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
                 verbose,
                 quiet_helpers,
             )? {
-                record_cleanup_result(
-                    &mut cleanup_error,
-                    container_rm(&container.name, verbose, quiet_helpers),
-                );
+                cleanup_errors.record(container_rm(&container.name, verbose, quiet_helpers));
             } else {
-                record_cleanup_result(
-                    &mut cleanup_error,
-                    Err(Error::message(format!(
-                        "refusing to remove container '{}' because it is not owned by this Cladding component",
-                        container.name
-                    ))),
-                );
+                cleanup_errors.record(Err(Error::message(format!(
+                    "refusing to remove container '{}' because it is not owned by this Cladding component",
+                    container.name
+                ))));
             }
         }
     }
 
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_socket_volumes(spec, verbose, quiet_helpers),
-    );
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_managed_mount_seed_helpers(spec, verbose, quiet_helpers),
-    );
-    record_cleanup_result(
-        &mut cleanup_error,
-        remove_managed_mount_volumes(spec, verbose, quiet_helpers),
-    );
-    match cleanup_error {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
+    cleanup_errors.record(remove_socket_volumes(spec, verbose, quiet_helpers));
+    remove_managed_mount_seed_helpers(spec, verbose, quiet_helpers, &mut cleanup_errors);
+    remove_managed_mount_volumes(spec, verbose, quiet_helpers, &mut cleanup_errors);
+    cleanup_errors.finish()
 }
 
 /// Remove resources named by the active runtime spec without discovery.
@@ -345,6 +321,8 @@ fn runtime_cleanup_normal_report(
         }
     }
 
+    remove_stale_managed_mount_volumes(spec, verbose, quiet_helpers, &mut errors);
+
     RuntimeCleanupReport {
         result: errors.finish(),
         runtime_root_safe_to_remove,
@@ -415,6 +393,16 @@ impl CleanupErrors {
                     .collect::<Vec<_>>()
                     .join("\n")
             )))
+        }
+    }
+
+    fn record_each<T>(
+        &mut self,
+        values: impl IntoIterator<Item = T>,
+        mut cleanup: impl FnMut(T) -> Result<()>,
+    ) {
+        for value in values {
+            self.record(cleanup(value));
         }
     }
 }
@@ -932,42 +920,75 @@ fn remove_managed_mount_seed_helpers(
     spec: &RuntimeSpec,
     verbose: bool,
     quiet_helpers: bool,
-) -> Result<()> {
+    errors: &mut CleanupErrors,
+) {
     let mut helper_names = BTreeSet::new();
     for (name, kind) in managed_mount_volumes(spec) {
         if matches!(kind, ManagedVolumeKind::Copy { .. }) {
             helper_names.insert(managed_mount_seed_helper_name(&name));
         }
     }
-    helper_names.extend(list_managed_mount_seed_helpers(
-        spec,
-        verbose,
-        quiet_helpers,
-    )?);
+    match list_managed_mount_seed_helpers(spec, verbose, quiet_helpers) {
+        Ok(names) => helper_names.extend(names),
+        Err(err) => errors.record(Err(err)),
+    }
     for helper_name in helper_names {
         let Some(volume_name) = helper_name.strip_suffix("-seed") else {
-            return Err(Error::message(format!(
+            errors.record(Err(Error::message(format!(
                 "refusing to remove unexpected managed mount helper '{helper_name}'"
-            )));
+            ))));
+            continue;
         };
-        remove_managed_mount_seed_helper(spec, volume_name, true, verbose, quiet_helpers)?;
+        errors.record(remove_managed_mount_seed_helper(
+            spec,
+            volume_name,
+            true,
+            verbose,
+            quiet_helpers,
+        ));
     }
-    Ok(())
 }
 
 fn remove_managed_mount_volumes(
     spec: &RuntimeSpec,
     verbose: bool,
     quiet_helpers: bool,
-) -> Result<()> {
+    errors: &mut CleanupErrors,
+) {
     let mut volume_names = managed_mount_volumes(spec)
         .into_keys()
         .collect::<BTreeSet<_>>();
-    volume_names.extend(list_managed_mount_volumes(spec, verbose, quiet_helpers)?);
-    for name in volume_names {
-        remove_managed_mount_volume(spec, &name, verbose, quiet_helpers)?;
+    match list_managed_mount_volumes(spec, verbose, quiet_helpers) {
+        Ok(names) => volume_names.extend(names),
+        Err(err) => errors.record(Err(err)),
     }
-    Ok(())
+    errors.record_each(volume_names, |name| {
+        remove_managed_mount_volume(spec, &name, verbose, quiet_helpers)
+    });
+}
+
+fn remove_stale_managed_mount_volumes(
+    spec: &RuntimeSpec,
+    verbose: bool,
+    quiet_helpers: bool,
+    errors: &mut CleanupErrors,
+) {
+    let current_names = managed_mount_volumes(spec)
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    let stale_names = match list_managed_mount_volumes(spec, verbose, quiet_helpers) {
+        Ok(names) => names
+            .into_iter()
+            .filter(|name| !current_names.contains(name))
+            .collect::<BTreeSet<_>>(),
+        Err(err) => {
+            errors.record(Err(err));
+            return;
+        }
+    };
+    errors.record_each(stale_names, |name| {
+        remove_managed_mount_volume(spec, &name, verbose, quiet_helpers)
+    });
 }
 
 fn list_managed_mount_seed_helpers(
@@ -2240,6 +2261,31 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "runtime cleanup failed:\n- container removal failed\n- volume removal failed"
+        );
+    }
+
+    #[test]
+    fn cleanup_errors_continue_after_each_failed_resource_removal() {
+        let mut errors = CleanupErrors::default();
+        let mut attempted = Vec::new();
+
+        errors.record_each(["first", "second", "third"], |name| {
+            attempted.push(name);
+            match name {
+                "first" => Err(Error::message("first volume removal failed")),
+                "second" => Ok(()),
+                "third" => Err(Error::message("third volume removal failed")),
+                _ => unreachable!(),
+            }
+        });
+
+        assert_eq!(attempted, ["first", "second", "third"]);
+        let error = errors
+            .finish()
+            .expect_err("resource removal errors should be returned");
+        assert_eq!(
+            error.to_string(),
+            "runtime cleanup failed:\n- first volume removal failed\n- third volume removal failed"
         );
     }
 
