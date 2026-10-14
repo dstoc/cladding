@@ -26,6 +26,8 @@ pub(super) fn cmd_run(
         return Err(Error::message("missing run command"));
     }
 
+    source_context.require_initialized_project()?;
+
     let secret_overrides = resolve_run_secret_overrides(
         secret_overrides,
         |name| std::env::var_os(name),
@@ -726,8 +728,38 @@ impl SignalWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::context::{ConfigSource, Context};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn run_with_external_config_requires_initialized_project_before_creating_runtime_state() {
+        let root = std::env::temp_dir().join(format!(
+            "cladding-run-uninitialized-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        let project_root = root.join(".cladding");
+        let external_config = root.join("custom.json");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(&external_config, r#"{"name":"demo","agent":{}}"#).unwrap();
+        let context = Context::new(
+            project_root.clone(),
+            root.clone(),
+            ConfigSource::File(external_config),
+        );
+
+        let error = cmd_run(&context, &[], &[], &["echo".to_string()], false, false)
+            .expect_err("run must require the project config created by init");
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing initialized .cladding project")
+        );
+        assert!(!project_root.join("runtime").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn generated_instance_suffix_is_uuid_v4() {

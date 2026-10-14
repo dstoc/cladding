@@ -113,9 +113,9 @@ fn validate_top_level_keys(parsed: &serde_json::Value, config_path: &Path) -> Re
             continue;
         }
         eprintln!("error: cladding.json unknown key: {key}");
-        if let Some(replacement) = legacy_config_key_replacement(key) {
-            eprintln!("hint: replace '{key}' with '{replacement}'");
-        }
+        eprintln!(
+            "hint: valid top-level keys are name, use_runsc, agent, nw_sandbox, fs_sandbox, proxy, and mounts"
+        );
         eprintln!("file: {}", config_path.display());
         invalid = true;
     }
@@ -125,16 +125,6 @@ fn validate_top_level_keys(parsed: &serde_json::Value, config_path: &Path) -> Re
     }
 
     Ok(())
-}
-
-fn legacy_config_key_replacement(key: &str) -> Option<&'static str> {
-    match key {
-        "nw_sandbox_image" => Some("nw_sandbox.image"),
-        "agent_image" => Some("agent.image"),
-        "sandbox_image" => Some("nw_sandbox.image"),
-        "cli_image" => Some("agent.image"),
-        _ => None,
-    }
 }
 
 fn get_config_string(parsed: &serde_json::Value, key: &str, config_path: &Path) -> Result<String> {

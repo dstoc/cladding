@@ -13,13 +13,9 @@ use std::path::Path;
 use std::process::Command;
 
 pub(super) fn cmd_check(context: &Context) -> Result<()> {
-    let legacy_config_entries_present = check_legacy_config_entries(context);
     let config = context.load_config()?;
     let spec = context.runtime_spec(&config)?;
     check_project_readiness(context, &config, &spec, false, false)?;
-    if legacy_config_entries_present {
-        return Err(Error::message("legacy config entries"));
-    }
     println!("check: ok");
     Ok(())
 }
@@ -243,25 +239,6 @@ fn validate_baffle_session_owner(uid: u32, trusted_uid: u32) -> anyhow::Result<(
     Ok(())
 }
 
-fn check_legacy_config_entries(context: &Context) -> bool {
-    let dst = context.project_root.join("config");
-    let mut legacy = false;
-
-    for (legacy_name, replacement) in legacy_config_entries() {
-        let path = dst.join(*legacy_name);
-        if path.exists() {
-            eprintln!(
-                "error: legacy config/{legacy_name} exists ({})",
-                path.display()
-            );
-            eprintln!("hint: replace config/{legacy_name} with config/{replacement}");
-            legacy = true;
-        }
-    }
-
-    legacy
-}
-
 fn required_config_entries(config: &ExecutionConfig) -> Vec<String> {
     let mut entries = vec![
         "proxy/daemon.toml".to_string(),
@@ -281,10 +258,6 @@ fn required_config_entries(config: &ExecutionConfig) -> Vec<String> {
         entries.push("fs_sandbox/main.rego".to_string());
     }
     entries
-}
-
-fn legacy_config_entries() -> &'static [(&'static str, &'static str)] {
-    &[("sandbox_commands", "nw_sandbox")]
 }
 
 pub(super) fn check_required_host_paths(spec: &RuntimeSpec) -> Result<()> {
@@ -665,41 +638,6 @@ mod tests {
         let context = Context::default_for_project(root.clone());
         assert!(check_required_config_files(&context, &config).is_err());
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn legacy_config_entries_preserve_command_policy_validation() {
-        assert_eq!(
-            legacy_config_entries(),
-            &[("sandbox_commands", "nw_sandbox")]
-        );
-    }
-
-    #[test]
-    fn check_legacy_config_entries_ignores_squid_allow_lists() {
-        let temp = create_temp_dir("squid-allow-lists");
-        let config_dir = temp.join("config");
-        fs::create_dir_all(&config_dir).expect("create config dir");
-        fs::write(config_dir.join("cli_domains.lst"), "legacy").expect("write old domain list");
-        fs::write(config_dir.join("agent_host_ports.lst"), "legacy")
-            .expect("write old host-port list");
-
-        let context = Context::default_for_project(temp);
-
-        assert!(!check_legacy_config_entries(&context));
-    }
-
-    #[test]
-    fn check_legacy_config_entries_still_detects_old_command_policy_path() {
-        let temp = create_temp_dir("legacy-command-policy");
-        let config_dir = temp.join("config");
-        fs::create_dir_all(&config_dir).expect("create config dir");
-        fs::create_dir_all(config_dir.join("sandbox_commands"))
-            .expect("create legacy command policy dir");
-
-        let context = Context::default_for_project(temp);
-
-        assert!(check_legacy_config_entries(&context));
     }
 
     #[test]

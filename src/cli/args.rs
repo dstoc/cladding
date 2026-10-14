@@ -11,18 +11,11 @@ const VERSION: &str = jj_version::jj_version!(fallback = env!("CARGO_PKG_VERSION
 #[command(name = "cladding", version = VERSION, arg_required_else_help = true)]
 pub(super) struct Cli {
     /// Select the `.cladding` directory used for runtime state and default config
-    #[arg(
-        long,
-        global = true,
-        value_name = "PATH",
-        conflicts_with = "project_root"
-    )]
+    #[arg(long, global = true, value_name = "PATH")]
     pub(super) cladding_dir: Option<PathBuf>,
     /// Load config from FILE, or from stdin when FILE is `-`
     #[arg(long, global = true, value_name = "FILE")]
     pub(super) config: Option<PathBuf>,
-    #[arg(long, global = true, hide = true)]
-    pub(super) project_root: Option<PathBuf>,
     #[command(subcommand)]
     pub(super) command: Option<CommandSpec>,
 }
@@ -49,7 +42,7 @@ pub(super) enum CommandSpec {
     },
     /// Force-remove running containers
     Destroy,
-    /// Run a command in a temporary runtime, then remove the runtime
+    /// Run a command in a temporary runtime for an initialized project, then remove the runtime
     Run {
         /// Show startup and teardown diagnostics
         #[arg(short, long)]
@@ -421,6 +414,20 @@ mod tests {
         assert_eq!(
             after.cladding_dir.as_deref(),
             Some(Path::new("/tmp/app/.cladding"))
+        );
+    }
+
+    #[test]
+    fn project_root_alias_is_not_supported() {
+        assert!(
+            Cli::try_parse_from([
+                "cladding",
+                "--project-root",
+                "/tmp/app/.cladding",
+                "run",
+                "echo",
+            ])
+            .is_err()
         );
     }
 

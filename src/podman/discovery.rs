@@ -191,29 +191,12 @@ fn list_running_container_items(
 
 fn parse_labels(value: &Value) -> HashMap<String, String> {
     let mut labels = HashMap::new();
-    match value {
-        Value::Object(map) => {
-            for (key, val) in map {
-                if let Some(s) = val.as_str() {
-                    labels.insert(key.clone(), s.to_string());
-                }
+    if let Value::Object(map) = value {
+        for (key, val) in map {
+            if let Some(s) = val.as_str() {
+                labels.insert(key.clone(), s.to_string());
             }
         }
-        Value::String(raw) => {
-            for entry in raw.split(',') {
-                let entry = entry.trim();
-                if entry.is_empty() {
-                    continue;
-                }
-                let mut parts = entry.splitn(2, '=');
-                let key = parts.next().unwrap_or("").trim();
-                let val = parts.next().unwrap_or("").trim();
-                if !key.is_empty() && !val.is_empty() {
-                    labels.insert(key.to_string(), val.to_string());
-                }
-            }
-        }
-        _ => {}
     }
     labels
 }
@@ -224,19 +207,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parse_labels_supports_string_and_object_forms() {
-        let string_labels = parse_labels(&Value::String(
-            "cladding=demo, project_root=/tmp/demo, cladding_expose=true".into(),
-        ));
-        assert_eq!(
-            string_labels.get("cladding").map(String::as_str),
-            Some("demo")
-        );
-        assert_eq!(
-            string_labels.get("project_root").map(String::as_str),
-            Some("/tmp/demo")
-        );
-
+    fn parse_labels_accepts_json_objects_only() {
         let object_labels = parse_labels(&json!({
             "cladding": "demo",
             "project_root": "/tmp/demo",
@@ -245,6 +216,12 @@ mod tests {
         assert_eq!(
             object_labels.get("cladding_expose").map(String::as_str),
             Some("true")
+        );
+        assert!(
+            parse_labels(&Value::String(
+                "cladding=demo,project_root=/tmp/demo".into()
+            ))
+            .is_empty()
         );
     }
 

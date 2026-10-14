@@ -106,16 +106,6 @@ pub(super) fn parse_mounts_v2(
                     "readonly" => MountType::Readonly,
                     "copy" => MountType::Copy,
                     "tmpfs" => MountType::Tmpfs,
-                    "overlay" => {
-                        eprintln!(
-                            "error: cladding.json invalid field 'mounts[{index}].type' (overlay mounts are no longer supported)"
-                        );
-                        eprintln!(
-                            "hint: use type: \"copy\" to snapshot a host directory into disposable shared storage"
-                        );
-                        eprintln!("file: {}", config_path.display());
-                        return Err(Error::message("unsupported mount type 'overlay'"));
-                    }
                     _ => {
                         eprintln!(
                             "error: cladding.json invalid field 'mounts[{index}].type' (unknown type '{mount_type}')"
@@ -319,25 +309,29 @@ fn parse_mount_targets(
     Ok(targets)
 }
 
+const VALID_MOUNT_KEYS: &[&str] = &[
+    "mount", "hostPath", "volume", "type", "size", "targets", "ignore",
+];
+
+fn valid_mount_keys_hint() -> String {
+    format!(
+        "hint: valid mount keys are: {}",
+        VALID_MOUNT_KEYS.join(", ")
+    )
+}
+
 fn validate_mount_keys(
     object: &serde_json::Map<String, serde_json::Value>,
     index: usize,
     config_path: &Path,
 ) -> Result<()> {
-    let allowed = [
-        "mount", "hostPath", "volume", "type", "size", "targets", "ignore",
-    ];
     let mut invalid = false;
     for key in object.keys() {
-        if allowed.contains(&key.as_str()) {
+        if VALID_MOUNT_KEYS.contains(&key.as_str()) {
             continue;
         }
         eprintln!("error: cladding.json unknown key: mounts[{index}].{key}");
-        if key == "nwSandboxOnly" || key == "sandboxOnly" {
-            eprintln!(
-                "hint: replace 'mounts[{index}].{key}' with 'mounts[{index}].targets': [\"nw-sandbox\"]"
-            );
-        }
+        eprintln!("{}", valid_mount_keys_hint());
         eprintln!("file: {}", config_path.display());
         invalid = true;
     }
@@ -554,6 +548,15 @@ mod tests {
     }
 
     #[test]
+    fn mount_key_hint_lists_only_supported_keys() {
+        assert_eq!(
+            valid_mount_keys_hint(),
+            "hint: valid mount keys are: mount, hostPath, volume, type, size, targets, ignore"
+        );
+        assert!(!VALID_MOUNT_KEYS.contains(&"readOnly"));
+    }
+
+    #[test]
     fn parse_mounts_rejects_overlay_and_copy_of_private_cladding_files() {
         let temp = create_temp_dir("private-mount");
         let removed_overlay = serde_json::json!({
@@ -660,18 +663,19 @@ mod tests {
     #[test]
     fn parse_mounts_rejects_legacy_mount_target_keys() {
         let temp = create_temp_dir("legacy-mount-target");
-        let parsed = serde_json::json!({
-            "mounts": [
-                {
-                    "mount": "/workspace",
-                    "hostPath": "./one",
-                    "nwSandboxOnly": true
-                }
-            ]
-        });
         let config = execution_config(false, false);
 
-        assert!(parse_mounts(&temp, &parsed, &config).is_err());
+        for legacy_key in ["nwSandboxOnly", "sandboxOnly"] {
+            let mut mount = serde_json::json!({
+                "mount": "/workspace",
+                "hostPath": "./one"
+            });
+            mount[legacy_key] = serde_json::Value::Bool(true);
+            assert!(
+                parse_mounts(&temp, &serde_json::json!({ "mounts": [mount] }), &config).is_err(),
+                "accepted legacy mount key {legacy_key}"
+            );
+        }
     }
 
     #[test]
