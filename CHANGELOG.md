@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.6](https://github.com/dstoc/cladding/compare/v0.4.5...v0.4.6) (2026-10-15)
+
+
+### Bug Fixes
+
+* clean up stale managed mount volumes ([#113](https://github.com/dstoc/cladding/issues/113)) ([00be8af](https://github.com/dstoc/cladding/commit/00be8af0fd99d0180a057700488a0e226b2e13dd)), closes [#85](https://github.com/dstoc/cladding/issues/85)
+* **config:** reject deprecated readOnly mount field ([#121](https://github.com/dstoc/cladding/issues/121)) ([b898dd3](https://github.com/dstoc/cladding/commit/b898dd3665f89af7e63d798b776d5abfcd3f7a1e))
+* **config:** remove obsolete compatibility shims ([#123](https://github.com/dstoc/cladding/issues/123)) ([7736486](https://github.com/dstoc/cladding/commit/7736486a597e0685dd67e1897508f25398d04e24))
+* **container:** keep npm metadata out of final image ([#127](https://github.com/dstoc/cladding/issues/127)) ([d24f3e3](https://github.com/dstoc/cladding/commit/d24f3e3d39973c95ab4ba56102311ba22dc15683))
+* forward expose connections to active agent ([#117](https://github.com/dstoc/cladding/issues/117)) ([c32ebfb](https://github.com/dstoc/cladding/commit/c32ebfbc86a97ec849060369a7ae6add158c6aca))
+* **mcp-run:** cancel raw commands on disconnect ([#114](https://github.com/dstoc/cladding/issues/114)) ([eff3932](https://github.com/dstoc/cladding/commit/eff393239dac8c9983f11add7e7a962924cda508)), closes [#80](https://github.com/dstoc/cladding/issues/80)
+* **mcp-run:** resolve relative executables from request cwd ([#115](https://github.com/dstoc/cladding/issues/115)) ([a3c7869](https://github.com/dstoc/cladding/commit/a3c7869efeb461b4be0ef44fc6fd524098002999)), closes [#81](https://github.com/dstoc/cladding/issues/81)
+* **mounts:** use empty tmpfs for typeless mounts ([#116](https://github.com/dstoc/cladding/issues/116)) ([6568213](https://github.com/dstoc/cladding/commit/6568213569b4ff04d11f547950ff7dbd7f676431))
+* **platform:** reject unsupported hosts and targets ([#120](https://github.com/dstoc/cladding/issues/120)) ([29ff207](https://github.com/dstoc/cladding/commit/29ff20785c3c6006cb59da6a11105545ef431d9b)), closes [#96](https://github.com/dstoc/cladding/issues/96)
+* use invoking real UID for ownership checks ([#118](https://github.com/dstoc/cladding/issues/118)) ([e28f5a1](https://github.com/dstoc/cladding/commit/e28f5a15d55f7e73e49d1a6b6f5bdd60255efbba))
+
 ## [0.4.5](https://github.com/dstoc/cladding/compare/v0.4.4...v0.4.5) (2026-10-13)
 
 
