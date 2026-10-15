@@ -45,10 +45,20 @@ RUN set -eu; \
     codex_version=$(node -p 'require("/tmp/npm-codex.json").version'); \
     pi_version=$(node -p 'require("/tmp/npm-pi.json").version'); \
     claude_version=$(node -p 'require("/tmp/npm-claude.json").version'); \
+    codex_platform=$(node -p '`${process.platform}-${process.arch}`'); \
+    codex_platform_package="@openai/codex-${codex_platform}"; \
     npm install --global --include=optional --fetch-retries=5 \
         "@openai/codex@${codex_version}" \
         "@earendil-works/pi-coding-agent@${pi_version}" \
         "@anthropic-ai/claude-code@${claude_version}"; \
+    npm install --prefix /tmp/codex-platform --no-save --package-lock=false \
+        --fetch-retries=5 --cache /tmp/codex-platform-cache \
+        "${codex_platform_package}@npm:@openai/codex@${codex_version}-${codex_platform}"; \
+    mkdir -p "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai"; \
+    cp -a "/tmp/codex-platform/node_modules/${codex_platform_package}" \
+        "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/"; \
+    rm -rf /tmp/codex-platform /tmp/codex-platform-cache; \
+    codex --help >/dev/null; \
     codex --version; \
     pi --version; \
     claude --version
