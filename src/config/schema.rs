@@ -1,109 +1,147 @@
 use serde::Deserialize;
-use serde::de::{Deserializer, IgnoredAny};
+use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor, value::MapAccessDeserializer};
 use std::collections::BTreeMap;
+use std::fmt;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct CladdingConfigDocument {
-    pub name: String,
-    #[serde(default)]
-    pub use_runsc: bool,
-    pub agent: AgentDocument,
-    #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub nw_sandbox: Option<ComponentDocument>,
-    #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub fs_sandbox: Option<ComponentDocument>,
-    #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub proxy: Option<ProxyDocument>,
-    #[serde(default)]
-    pub mounts: Vec<MountDocument>,
+// Derived structs accept positional sequences as well as maps. These config
+// documents were historically objects, so deserialize_map keeps that shape
+// while the generated fields structs retain typed fields and strict keys.
+macro_rules! object_document {
+    (
+        $document:ident, $fields:ident {
+            $( $(#[$attribute:meta])* $field:ident: $field_type:ty ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug)]
+        pub(super) struct $document {
+            $(pub(super) $field: $field_type),*
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct $fields {
+            $( $(#[$attribute])* $field: $field_type ),*
+        }
+
+        impl<'de> Deserialize<'de> for $document {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                struct ObjectVisitor;
+
+                impl<'de> Visitor<'de> for ObjectVisitor {
+                    type Value = $document;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        formatter.write_str("a configuration object")
+                    }
+
+                    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+                    where
+                        A: MapAccess<'de>,
+                    {
+                        let fields = $fields::deserialize(MapAccessDeserializer::new(map))?;
+                        Ok($document {
+                            $($field: fields.$field),*
+                        })
+                    }
+                }
+
+                deserializer.deserialize_map(ObjectVisitor)
+            }
+        }
+    };
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AgentDocument {
+object_document!(CladdingConfigDocument, CladdingConfigDocumentFields {
+    name: String,
+    #[serde(default)]
+    use_runsc: bool,
+    agent: AgentDocument,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub image: Option<String>,
+    nw_sandbox: Option<ComponentDocument>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub init: Option<bool>,
+    fs_sandbox: Option<ComponentDocument>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub build: Option<ImageBuildDocument>,
+    proxy: Option<ProxyDocument>,
+    #[serde(default)]
+    mounts: Vec<MountDocument>,
+});
+
+object_document!(AgentDocument, AgentDocumentFields {
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub security_opts: Option<Vec<String>>,
+    image: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_non_null_option")]
+    init: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_non_null_option")]
+    build: Option<ImageBuildDocument>,
+    #[serde(default, deserialize_with = "deserialize_non_null_option")]
+    security_opts: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_present")]
-    pub enabled: Option<PresentField>,
-}
+    enabled: Option<PresentField>,
+});
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ComponentDocument {
+object_document!(ComponentDocument, ComponentDocumentFields {
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub image: Option<String>,
+    image: Option<String>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub enabled: Option<bool>,
+    enabled: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub init: Option<bool>,
+    init: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub build: Option<ImageBuildDocument>,
+    build: Option<ImageBuildDocument>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub security_opts: Option<Vec<String>>,
-}
+    security_opts: Option<Vec<String>>,
+});
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ProxyDocument {
+object_document!(ProxyDocument, ProxyDocumentFields {
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub image: Option<String>,
+    image: Option<String>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub build: Option<ImageBuildDocument>,
+    build: Option<ImageBuildDocument>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub agent: Option<SessionConfigDocument>,
+    agent: Option<SessionConfigDocument>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub nw_sandbox: Option<SessionConfigDocument>,
-}
+    nw_sandbox: Option<SessionConfigDocument>,
+});
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct SessionConfigDocument {
+object_document!(SessionConfigDocument, SessionConfigDocumentFields {
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub session_config: Option<String>,
-}
+    session_config: Option<String>,
+});
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ImageBuildDocument {
-    pub containerfile: String,
+object_document!(ImageBuildDocument, ImageBuildDocumentFields {
+    containerfile: String,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub context: Option<String>,
+    context: Option<String>,
     #[serde(default)]
-    pub args: BTreeMap<String, String>,
-}
+    args: BTreeMap<String, String>,
+});
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct MountDocument {
-    pub mount: String,
+object_document!(MountDocument, MountDocumentFields {
+    mount: String,
     #[serde(
         default,
         rename = "hostPath",
         deserialize_with = "deserialize_non_null_option"
     )]
-    pub host_path: Option<String>,
+    host_path: Option<String>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub volume: Option<String>,
+    volume: Option<String>,
     #[serde(
         default,
         rename = "type",
         deserialize_with = "deserialize_non_null_option"
     )]
-    pub kind: Option<MountKind>,
+    kind: Option<MountKind>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub size: Option<String>,
+    size: Option<String>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
-    pub targets: Option<Vec<String>>,
+    targets: Option<Vec<String>>,
     #[serde(default)]
-    pub ignore: bool,
-}
+    ignore: bool,
+});
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

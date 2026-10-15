@@ -858,6 +858,61 @@ mod tests {
     }
 
     #[test]
+    fn load_cladding_config_rejects_arrays_where_objects_are_required() {
+        let path = Path::new("cladding.json");
+        for (location, raw) in [
+            ("top level", r#"["demo",false,{}]"#),
+            ("agent", r#"{"name":"demo","agent":[]}"#),
+            (
+                "network sandbox",
+                r#"{"name":"demo","agent":{},"nw_sandbox":[]}"#,
+            ),
+            (
+                "filesystem sandbox",
+                r#"{"name":"demo","agent":{},"fs_sandbox":[]}"#,
+            ),
+            ("proxy", r#"{"name":"demo","agent":{},"proxy":[]}"#),
+            (
+                "proxy agent session selector",
+                r#"{"name":"demo","agent":{},"proxy":{"agent":[]}}"#,
+            ),
+            (
+                "proxy network sandbox session selector",
+                r#"{"name":"demo","agent":{},"proxy":{"nw_sandbox":[]}}"#,
+            ),
+            (
+                "agent image build",
+                r#"{"name":"demo","agent":{"build":[]}}"#,
+            ),
+            (
+                "network sandbox image build",
+                r#"{"name":"demo","agent":{},"nw_sandbox":{"build":[]}}"#,
+            ),
+            (
+                "filesystem sandbox image build",
+                r#"{"name":"demo","agent":{},"fs_sandbox":{"build":[]}}"#,
+            ),
+            (
+                "proxy image build",
+                r#"{"name":"demo","agent":{},"proxy":{"build":[]}}"#,
+            ),
+            ("mount entry", r#"{"name":"demo","agent":{},"mounts":[[]]}"#),
+        ] {
+            let error = load_cladding_config_v2_from_str(path, raw)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("configuration type or field error"),
+                "array at {location} did not produce a type error: {error}"
+            );
+            assert!(
+                error.contains("expected a configuration object"),
+                "array at {location} did not report the expected object type: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn load_cladding_config_rejects_null_for_optional_fields() {
         let path = Path::new("cladding.json");
         for raw in [
