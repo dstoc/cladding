@@ -333,16 +333,17 @@ fn proxy_socket_volume_names(spec: &RuntimeSpec) -> BTreeSet<String> {
 }
 
 fn ensure_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
-    let proxy_socket_volumes = proxy_socket_volume_names(spec);
-    for name in socket_volume_names(spec) {
-        if let Some(inspection) = inspect_resource("volume", &name, verbose, quiet_helpers)? {
-            if !socket_volume_labels_match(&inspection, &name, spec) {
+    let socket_volumes = socket_volume_names(spec);
+    let proxy_socket_volume_set = proxy_socket_volume_names(spec);
+    for name in &socket_volumes {
+        if let Some(inspection) = inspect_resource("volume", name, verbose, quiet_helpers)? {
+            if !socket_volume_labels_match(&inspection, name, spec) {
                 return Err(Error::message(format!(
                     "refusing to use Podman volume '{name}' because it is not owned by this Cladding runtime"
                 )));
             }
         } else {
-            let mut cmd = build_socket_volume_create_command(&name, spec);
+            let mut cmd = build_socket_volume_create_command(name, spec);
             trace_command(&cmd, verbose);
             let output = runtime_metrics::output(&mut cmd)
                 .with_context(|| format!("failed to create Cladding socket volume '{name}'"))?;
@@ -359,17 +360,27 @@ fn ensure_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool)
                 forward_output(&output)?;
             }
         }
+    }
 
-        if proxy_socket_volumes.contains(&name) {
-            let mut cmd = build_proxy_socket_volume_prepare_command(&name, spec);
-            run_helper_command(
-                &mut cmd,
-                verbose,
-                quiet_helpers,
-                "Baffle socket volume permissions",
+    let proxy_socket_volumes: Vec<_> = socket_volumes
+        .iter()
+        .filter(|name| proxy_socket_volume_set.contains(*name))
+        .cloned()
+        .collect();
+    if !proxy_socket_volumes.is_empty() {
+        let mut cmd = build_proxy_socket_volumes_prepare_command(&proxy_socket_volumes, spec);
+        run_helper_command(
+            &mut cmd,
+            verbose,
+            quiet_helpers,
+            "Baffle socket volume permissions",
+        )
+        .with_context(|| {
+            format!(
+                "failed to secure Baffle socket volumes: {}",
+                proxy_socket_volumes.join(", ")
             )
-            .with_context(|| format!("failed to secure Baffle socket volume '{name}'"))?;
-        }
+        })?;
     }
 
     Ok(())
@@ -966,15 +977,28 @@ fn build_socket_volume_create_command(name: &str, spec: &RuntimeSpec) -> Command
     cmd
 }
 
-fn build_proxy_socket_volume_prepare_command(name: &str, spec: &RuntimeSpec) -> Command {
+fn build_proxy_socket_volumes_prepare_command(names: &[String], spec: &RuntimeSpec) -> Command {
     let mut cmd = Command::new("podman");
     cmd.args(["run", "--rm", "--network", "none", "--userns", "keep-id"]);
-    cmd.arg("--volume");
-    cmd.arg(format!("{name}:/socket:U"));
+    let socket_paths: Vec<_> = (0..names.len())
+        .map(|index| {
+            if names.len() == 1 {
+                "/socket".to_string()
+            } else {
+                format!("/socket/{index}")
+            }
+        })
+        .collect();
+    for (name, path) in names.iter().zip(&socket_paths) {
+        cmd.arg("--volume");
+        cmd.arg(format!("{name}:{path}:U"));
+    }
     cmd.args(["--entrypoint", "/bin/sh"]);
     let proxy_image = spec.proxy.container.image.as_str();
     cmd.arg(proxy_image);
-    cmd.args(["-ec", "mkdir -p /socket && chmod 0700 /socket"]);
+    let paths = socket_paths.join(" ");
+    cmd.arg("-ec");
+    cmd.arg(format!("mkdir -p {paths} && chmod 0700 {paths}"));
     cmd
 }
 
@@ -2127,8 +2151,10 @@ mod tests {
     #[test]
     fn baffle_socket_volume_prepare_helper_sets_private_mode_with_proxy_identity() {
         let spec = test_runtime_spec();
-        let cmd =
-            build_proxy_socket_volume_prepare_command("cladding-demo-socket-baffle-agent", &spec);
+        let cmd = build_proxy_socket_volumes_prepare_command(
+            &["cladding-demo-socket-baffle-agent".to_string()],
+            &spec,
+        );
         let args = command_args(&cmd);
 
         assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
@@ -2150,6 +2176,49 @@ mod tests {
         assert_eq!(
             args[args.len() - 2..],
             ["-ec", "mkdir -p /socket && chmod 0700 /socket"]
+        );
+    }
+
+    #[test]
+    fn baffle_socket_volumes_share_one_isolated_prepare_helper() {
+        let spec = test_runtime_spec();
+        let cmd = build_proxy_socket_volumes_prepare_command(
+            &[
+                "cladding-demo-socket-baffle-agent".to_string(),
+                "cladding-demo-socket-baffle-nw-sandbox".to_string(),
+            ],
+            &spec,
+        );
+        let args = command_args(&cmd);
+
+        assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
+        assert!(args.windows(2).any(|pair| pair == ["--userns", "keep-id"]));
+        assert!(!args.iter().any(|arg| arg == "--user"));
+        assert!(
+            args.windows(2).any(|pair| {
+                pair == ["--volume", "cladding-demo-socket-baffle-agent:/socket/0:U"]
+            })
+        );
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--volume",
+                "cladding-demo-socket-baffle-nw-sandbox:/socket/1:U",
+            ]
+        }));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--entrypoint", "/bin/sh"])
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "localhost/cladding-proxy:latest")
+        );
+        assert_eq!(
+            args[args.len() - 2..],
+            [
+                "-ec",
+                "mkdir -p /socket/0 /socket/1 && chmod 0700 /socket/0 /socket/1"
+            ]
         );
     }
 
