@@ -125,7 +125,7 @@ mod tests {
                     },
                 },
                 RuntimeMount {
-                    mount_path: "/run/cladding/proxy/agent".to_string(),
+                    mount_path: "/run/cladding/proxy".to_string(),
                     read_only: false,
                     source: RuntimeMountSource::NamedVolumeChown {
                         claim_name: "demo-socket-baffle-agent".to_string(),
@@ -154,7 +154,7 @@ mod tests {
                 "--volume",
                 "demo-cache:/workspace/data",
                 "--volume",
-                "demo-socket-baffle-agent:/run/cladding/proxy/agent:U",
+                "demo-socket-baffle-agent:/run/cladding/proxy:U",
                 "--mount",
                 "type=tmpfs,dst=/workspace/tmp,tmpfs-mode=1777,U=true,notmpcopyup,ro=true",
                 "--volume",

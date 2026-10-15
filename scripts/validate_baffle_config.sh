@@ -272,10 +272,13 @@ verify_scoped_socket_access() {
   fi
   if [ "$component" = agent ]; then
     component_volume=$socket_volume_agent
+    component_mount="$component_volume:/run/cladding/proxy:rw"
+    component_socket_path=/run/cladding/proxy/agent/proxy.sock
   else
     component_volume=$socket_volume_nw_sandbox
+    component_mount="$component_volume:/run/cladding/proxy/nw-sandbox:rw"
+    component_socket_path=/run/cladding/proxy/nw-sandbox/proxy.sock
   fi
-  component_mount="$component_volume:/run/cladding/proxy/$component:rw"
 
   echo "Testing rootless keep-id socket access for $component ($socket_runtime runtime)"
   current_phase="test $component socket access ($socket_runtime runtime)"
@@ -301,7 +304,10 @@ verify_scoped_socket_access() {
       --volume "$component_mount" \
       --entrypoint /bin/sh "$socket_test_image" -ec '
         socket_path=$1
-        test -S "$socket_path"
+        if [ ! -S "$socket_path" ]; then
+          echo "Baffle socket is missing: $socket_path" >&2
+          exit 1
+        fi
         socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr \
           UNIX-CONNECT:"$socket_path" &
         bridge_pid=$!
@@ -312,7 +318,7 @@ verify_scoped_socket_access() {
           echo "generated Baffle policy unexpectedly allowed example.com" >&2
           exit 88
         fi
-      ' socket-denial "/run/cladding/proxy/$component/proxy.sock" \
+      ' socket-denial "$component_socket_path" \
       >"$denial_output_file" 2>&1; then
       :
     else
@@ -339,7 +345,10 @@ verify_scoped_socket_access() {
     --volume "$component_mount" \
     --entrypoint /bin/sh "$socket_test_image" -ec '
       socket_path=$1
-      test -S "$socket_path"
+      if [ ! -S "$socket_path" ]; then
+        echo "Baffle socket is missing: $socket_path" >&2
+        exit 1
+      fi
       socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr \
         UNIX-CONNECT:"$socket_path" &
       bridge_pid=$!
@@ -347,7 +356,7 @@ verify_scoped_socket_access() {
       sleep 1
       curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
         --proxy http://127.0.0.1:3128 --output /dev/null https://example.com/
-    ' socket-test "/run/cladding/proxy/$component/proxy.sock" >"$output_file" 2>&1; then
+    ' socket-test "$component_socket_path" >"$output_file" 2>&1; then
     cat "$output_file"
   else
     status=$?
@@ -384,14 +393,6 @@ run_proxy_startup() {
     socket_volume_nw_sandbox=
   fi
 
-  socket_dir="$temp_root/sockets-$name"
-  mkdir -p "$socket_dir/agent"
-  chmod 700 "$socket_dir" "$socket_dir/agent"
-  if [ "$sandbox_enabled" = true ]; then
-    mkdir -p "$socket_dir/nw-sandbox"
-    chmod 700 "$socket_dir/nw-sandbox"
-  fi
-
   start_output_file="$temp_root/proxy-start-$name.log"
   current_phase="create proxy container ($name)"
   set -- podman run --detach --init --name "$name" \
@@ -404,8 +405,7 @@ run_proxy_startup() {
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
     --volume "$project_root/config:/opt/config:ro" \
     --volume "$project_root/credentials/baffle:/opt/credentials/baffle:ro" \
-    --volume "$socket_dir:/run/cladding/proxy:rw" \
-    --volume "$socket_volume_agent:/run/cladding/proxy/agent:U"
+    --volume "$socket_volume_agent:/run/cladding/proxy:U"
   if [ "$sandbox_enabled" = true ]; then
     set -- "$@" \
       --volume "$socket_volume_nw_sandbox:/run/cladding/proxy/nw-sandbox:U"
@@ -504,14 +504,18 @@ run_proxy_startup() {
     fi
     if [ "$component" = agent ]; then
       component_volume=$socket_volume_agent
+      component_mount="$component_volume:/run/cladding/proxy:ro"
+      component_socket_path=/run/cladding/proxy/agent/proxy.sock
     else
       component_volume=$socket_volume_nw_sandbox
+      component_mount="$component_volume:/run/cladding/proxy/nw-sandbox:ro"
+      component_socket_path=/run/cladding/proxy/nw-sandbox/proxy.sock
     fi
     if podman run --rm --network none --userns keep-id \
       --user "$container_uid:$container_gid" \
-      --volume "$component_volume:/run/cladding/proxy/$component:ro" \
+      --volume "$component_mount" \
       --entrypoint /bin/sh "$socket_test_image" -ec \
-      "test ! -e /run/cladding/proxy/$component/proxy.sock"; then
+      'test ! -e "$1"' socket-cleanup "$component_socket_path"; then
       :
     else
       echo "Baffle left a $component session socket after proxy shutdown" >&2

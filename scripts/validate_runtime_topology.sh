@@ -230,6 +230,33 @@ fi
 require_volume_count inter-container-socket 3
 require_volume_count managed-mount 1
 
+phase="verify the proxy uses managed Baffle socket volumes without a host parent bind"
+if podman inspect "$proxy" | jq -e \
+  '.[0].Mounts | any(.Destination == "/run/cladding/proxy" and .Type == "bind")' \
+  >/dev/null; then
+  echo "proxy unexpectedly has a host bind at /run/cladding/proxy" >&2
+  exit 1
+fi
+podman inspect "$proxy" | jq -e \
+  '.[0].Mounts as $mounts
+   | any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy")
+     and any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy/nw-sandbox")' \
+  >/dev/null
+agent_socket_volume=$(podman inspect "$proxy" | jq -r \
+  '.[0].Mounts[] | select(.Type == "volume" and .Destination == "/run/cladding/proxy") | .Name')
+if [ -z "$agent_socket_volume" ] || [ "$agent_socket_volume" = null ]; then
+  echo "proxy Baffle socket root is not backed by the agent socket volume" >&2
+  exit 1
+fi
+podman inspect "$agent" | jq -e --arg socket_volume "$agent_socket_volume" \
+  '.[0].Mounts | any(.Type == "volume" and .Name == $socket_volume and .Destination == "/run/cladding/proxy")' \
+  >/dev/null
+podman inspect "$nw_sandbox" | jq -e --arg socket_volume "$agent_socket_volume" \
+  '.[0].Mounts as $mounts
+   | any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy/nw-sandbox")
+     and all($mounts[]; .Name != $socket_volume)' \
+  >/dev/null
+
 phase="wait for Baffle control UDS and session sockets"
 ready=false
 attempt=0
@@ -249,12 +276,15 @@ if [ "$ready" != true ]; then
   exit 1
 fi
 podman exec "$proxy" sh -ec '
+  test "$(stat -c %a /run/cladding/proxy)" = 700
+  test "$(stat -c %u /run/cladding/proxy)" = "$(id -u)"
   for component in agent nw-sandbox; do
     socket="/run/cladding/proxy/$component/proxy.sock"
     test -S "$socket"
     test "$(stat -c %a "$socket")" = 600
   done
 '
+test ! -e "$project_root/runtime/sockets"
 
 phase="verify the default runtime does not mount the host workspace"
 for container in "$agent" "$nw_sandbox"; do
@@ -354,8 +384,7 @@ fi
 podman volume rm "$foreign_runtime_volume" >/dev/null
 podman volume rm "$unrelated_volume" >/dev/null
 require_no_project_resources
-test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
-test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
+test ! -e "$project_root/runtime/sockets"
 
 phase="configure and verify an explicit host workspace mount"
 jq '.mounts += [{"mount":"/host-project", "hostPath":"..", "targets":["agent", "nw-sandbox"]}]' \
@@ -436,13 +465,17 @@ for component in proxy agent nw-sandbox; do
 done
 for source in \
   "$run_root/runtime/scripts/proxy_startup.sh" \
-  "$run_root/runtime/empty-mask" \
-  "$run_root/runtime/sockets/proxy"; do
+  "$run_root/runtime/empty-mask"; do
   if ! grep -F "$source" "$run_podman_log" >/dev/null; then
     echo "cladding run did not pass the generated bind source to Podman: $source" >&2
     exit 1
   fi
 done
+if [ -e "$run_root/runtime/sockets" ] \
+  || grep -F "$run_root/runtime/sockets" "$run_podman_log" >/dev/null; then
+  echo "cladding run created or mounted a host socket directory" >&2
+  exit 1
+fi
 if ! grep -F "$project_root/..:/host-project" "$run_podman_log" >/dev/null; then
   echo "cladding run did not apply the configured host workspace mount" >&2
   exit 1

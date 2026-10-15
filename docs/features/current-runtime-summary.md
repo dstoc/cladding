@@ -71,17 +71,24 @@ use exact DNS hostnames and explicit ports. Baffle does not filter resolved
 destination IP addresses. See the [proxy configuration reference](proxy/summary.md)
 for migration limits and troubleshooting.
 
-## Socket directories
-Cladding creates a private runtime socket root and per-component subdirectories:
+## Socket volumes
+Cladding does not create host runtime socket directories. It creates managed
+volumes for Baffle data sockets and sandbox run sockets. The agent Baffle volume
+is mounted at `/run/cladding/proxy` in the proxy and agent containers. Baffle
+creates the agent socket under the `agent/` subdirectory in that volume. The
+network-sandbox Baffle volume is mounted at `/run/cladding/proxy/nw-sandbox` in
+the proxy and network-sandbox containers. Each execution container receives
+only its own Baffle volume. Baffle binds each session socket directly in its
+volume on Linux rootless Podman and macOS Podman machine, preserving the
+mode-`0600` socket and mode-`0700` parent.
 
-- `.cladding/runtime/sockets`
-- `.cladding/runtime/sockets/proxy`
-- `.cladding/runtime/sockets/proxy/agent`
-- `.cladding/runtime/sockets/proxy/nw-sandbox`
-- `.cladding/runtime/sockets/run/nw-sandbox`
-- `.cladding/runtime/sockets/run/fs-sandbox`
-
-Cladding mounts `.cladding/runtime/sockets/proxy` as the parent path and mounts a separate managed volume at each enabled component directory. Baffle binds each session socket directly in its volume on both Linux rootless Podman and macOS Podman machine. Each volume is shared only with its matching execution container, which preserves the mode-`0600` socket and mode-`0700` parent. The proxy's control socket and runtime configuration stay inside the proxy container. The sticky-mode `1733` `/run/baffle` directory contains a proxy-owned mode-`0700` subdirectory with mode-`0600` config and socket files; a symlink preserves Baffle's default control-socket path. The agent uses its proxy socket for outbound HTTP proxying and the sandbox run sockets when the corresponding sandboxes are enabled. The nw-sandbox and fs-sandbox containers bind their own run sockets via `MCP_BIND_UDS`.
+The proxy's control socket and runtime configuration stay inside the proxy
+container. The sticky-mode `1733` `/run/baffle` directory contains a
+proxy-owned mode-`0700` subdirectory with mode-`0600` config and socket files;
+a symlink preserves Baffle's default control-socket path. The agent uses its
+proxy socket for outbound HTTP proxying and the sandbox run sockets when the
+corresponding sandboxes are enabled. The nw-sandbox and fs-sandbox containers
+bind their own run sockets via `MCP_BIND_UDS`.
 
 Each execution container keeps its `socat` listener on `127.0.0.1:3128` and forwards to its own Baffle `proxy.sock`. Baffle owns a mode-`0600` socket inside a mode-`0700` component directory. The proxy and execution containers use ordinary `keep-id` mappings, so each process uses the invoking host user's UID to access the socket without widening its permissions. Baffle's mode-`0600` control socket and runtime configuration stay in a mode-`0700` directory inside the proxy container. Startup writes a private daemon-config copy with the proxy process UID as Baffle's trusted operator. No separate proxy bridge container is used.
 
@@ -132,12 +139,9 @@ script is refreshed at `runtime/scripts/proxy_startup.sh` by `cladding init`,
 ## Mounts
 The proxy container receives read-only mounts for `/opt/config`,
 `/opt/credentials/baffle`, `/opt/tools/bin/baffle`, and
-`/opt/scripts/proxy_startup.sh`. Cladding mounts the scoped proxy socket root
-at `/run/cladding/proxy` and mounts a managed volume at each enabled component
-directory. Baffle binds each session socket directly in its volume on both
-Linux rootless Podman and macOS Podman machine. Cladding shares each volume
-only with its matching execution container. The control socket and runtime
-configuration stay inside the proxy container.
+`/opt/scripts/proxy_startup.sh`. The agent Baffle volume provides the socket
+root at `/run/cladding/proxy`; the network-sandbox volume is mounted below it.
+The control socket and runtime configuration stay inside the proxy container.
 `/run/baffle` has sticky mode `1733`; the proxy process creates a mode-`0700`
 child directory that owns the mode-`0600` runtime config and control socket. A
 symlink at the default socket path keeps in-container Baffle commands working.

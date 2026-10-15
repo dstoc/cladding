@@ -158,6 +158,23 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
         self.assertIn('initialize_socket_volume "$socket_volume_agent"', validator)
         self.assertIn('initialize_socket_volume "$socket_volume_nw_sandbox"', validator)
+        self.assertIn('--volume "$socket_volume_agent:/run/cladding/proxy:U"', validator)
+        self.assertIn(
+            'component_mount="$component_volume:/run/cladding/proxy:rw"', validator
+        )
+        self.assertIn(
+            'component_socket_path=/run/cladding/proxy/agent/proxy.sock', validator
+        )
+        self.assertIn(
+            'component_mount="$component_volume:/run/cladding/proxy:ro"', validator
+        )
+        self.assertIn(
+            "'test ! -e \"$1\"' socket-cleanup \"$component_socket_path\"",
+            validator,
+        )
+        self.assertIn('echo "Baffle socket is missing: $socket_path"', validator)
+        self.assertIn('--volume "$component_mount"', validator)
+        self.assertNotIn('sockets-$name', validator)
 
     def test_topology_validator_checks_baffle_data_sockets_from_both_consumers(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
@@ -300,7 +317,21 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('run_root="$project_root/runtime/runs/$run_name"', validator)
         self.assertIn('"$run_root/runtime/scripts/proxy_startup.sh"', validator)
         self.assertIn('"$run_root/runtime/empty-mask"', validator)
-        self.assertIn('"$run_root/runtime/sockets/proxy"', validator)
+        self.assertIn('phase="verify the proxy uses managed Baffle socket volumes', validator)
+        self.assertIn(
+            'any(.Destination == "/run/cladding/proxy" and .Type == "bind")',
+            validator,
+        )
+        self.assertIn(
+            'any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy")',
+            validator,
+        )
+        self.assertIn('agent_socket_volume=$(podman inspect "$proxy"', validator)
+        self.assertIn('podman inspect "$agent" | jq -e --arg socket_volume', validator)
+        self.assertIn('podman inspect "$nw_sandbox" | jq -e --arg socket_volume', validator)
+        self.assertIn('[ -e "$run_root/runtime/sockets" ]', validator)
+        self.assertIn('test ! -e "$project_root/runtime/sockets"', validator)
+        self.assertIn('"$run_root/runtime/sockets" "$run_podman_log"', validator)
         self.assertIn(
             'for temp_run_root in "/tmp/$run_name" "/var/tmp/$run_name" "/dev/shm/$run_name"; do',
             validator,

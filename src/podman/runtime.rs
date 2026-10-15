@@ -51,7 +51,6 @@ impl RuntimeInventory {
 
 /// Direct runtime helpers for creating and cleaning up Podman resources.
 pub fn runtime_create(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
-    prepare_runtime_socket_dirs(spec)?;
     ensure_runtime_empty_mask_dir(spec)?;
     ensure_socket_volumes(spec, verbose, quiet_helpers)?;
     ensure_managed_mount_volumes(spec, verbose, quiet_helpers)?;
@@ -1270,52 +1269,6 @@ fn runtime_components(spec: &RuntimeSpec) -> Vec<&RuntimeComponent> {
     components
 }
 
-fn prepare_runtime_socket_dirs(spec: &RuntimeSpec) -> Result<()> {
-    let mut socket_dirs = spec.generated_runtime_socket_dirs().into_iter();
-    let Some(root_socket_dir) = socket_dirs.next() else {
-        return Ok(());
-    };
-
-    clear_path(&root_socket_dir)?;
-    fs::create_dir_all(&root_socket_dir).with_context(|| {
-        format!(
-            "failed to create runtime socket directory {}",
-            root_socket_dir.display()
-        )
-    })?;
-    set_restrictive_dir_permissions(&root_socket_dir)?;
-
-    for socket_dir in socket_dirs {
-        fs::create_dir_all(&socket_dir).with_context(|| {
-            format!(
-                "failed to create runtime socket directory {}",
-                socket_dir.display()
-            )
-        })?;
-        set_restrictive_dir_permissions(&socket_dir)?;
-    }
-    Ok(())
-}
-
-fn clear_path(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.is_dir() {
-                fs::remove_dir_all(path)
-                    .with_context(|| format!("failed to remove directory {}", path.display()))?;
-            } else {
-                fs::remove_file(path)
-                    .with_context(|| format!("failed to remove file {}", path.display()))?;
-            }
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(anyhow::Error::new(err).into());
-        }
-    }
-    Ok(())
-}
-
 #[cfg(unix)]
 fn set_restrictive_dir_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -1628,53 +1581,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn runtime_socket_tree_prepares_only_host_path_socket_directories() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let project_root =
-            std::env::temp_dir().join(format!("cladding-runtime-sockets-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&project_root);
-        fs::create_dir_all(&project_root).expect("create temporary project root");
-        let config = ExecutionConfig {
-            name: "demo".to_string(),
-            use_runsc: false,
-            agent: ExecutionComponentConfig {
-                enabled: true,
-                init: true,
-                image: "agent:image".to_string(),
-                build: None,
-                security_opts: Vec::new(),
-            },
-            nw_sandbox: None,
-            fs_sandbox: None,
-            proxy: None,
-            mounts: Vec::new(),
-        };
-        let spec = RuntimeSpec::build(&project_root, &config);
-
-        prepare_runtime_socket_dirs(&spec).expect("prepare socket directories");
-
-        for path in spec.generated_runtime_socket_dirs() {
-            let metadata = fs::metadata(&path).expect("generated socket directory exists");
-            assert_eq!(
-                metadata.permissions().mode() & 0o777,
-                0o700,
-                "{}",
-                path.display()
-            );
-        }
-        assert!(!project_root.join("runtime/sockets/agent/inject").exists());
-        assert!(project_root.join("runtime/sockets/proxy/agent").is_dir());
-        assert!(
-            !project_root
-                .join("runtime/sockets/proxy/nw-sandbox")
-                .exists()
-        );
-        fs::remove_dir_all(project_root).expect("remove temporary project root");
-    }
-
     #[test]
     fn baffle_ca_install_runs_as_container_root_with_system_trust_update() {
         let cmd = build_baffle_ca_install_command("demo-agent-instance");
@@ -1950,14 +1856,14 @@ mod tests {
         assert_eq!(
             socket_mounts(&spec.proxy),
             vec![
-                "cladding-demo-socket-baffle-agent:/run/cladding/proxy/agent:U",
+                "cladding-demo-socket-baffle-agent:/run/cladding/proxy:U",
                 "cladding-demo-socket-baffle-nw-sandbox:/run/cladding/proxy/nw-sandbox:U",
             ]
         );
         assert_eq!(
             socket_mounts(&spec.agent),
             vec![
-                "cladding-demo-socket-baffle-agent:/run/cladding/proxy/agent",
+                "cladding-demo-socket-baffle-agent:/run/cladding/proxy",
                 "cladding-demo-socket-run-nw-sandbox:/run/cladding/run/nw-sandbox",
                 "cladding-demo-socket-run-fs-sandbox:/run/cladding/run/fs-sandbox",
             ]
@@ -2384,7 +2290,7 @@ mod tests {
                     source: RuntimeMountSource::EmptyDir,
                 },
                 RuntimeMount {
-                    mount_path: "/run/cladding/proxy/agent".to_string(),
+                    mount_path: "/run/cladding/proxy".to_string(),
                     read_only: false,
                     source: RuntimeMountSource::NamedVolume {
                         claim_name: "demo-socket-baffle-agent".to_string(),
@@ -2447,7 +2353,7 @@ mod tests {
                 "--mount",
                 "type=tmpfs,dst=/workspace/tmp,tmpfs-mode=1777,U=true,notmpcopyup,ro=true",
                 "--volume",
-                "demo-socket-baffle-agent:/run/cladding/proxy/agent",
+                "demo-socket-baffle-agent:/run/cladding/proxy",
                 "--volume",
                 "/tmp/demo/workspace:/home/user/workspace",
                 "--volume",

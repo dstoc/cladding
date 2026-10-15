@@ -105,6 +105,15 @@ require_file "$CONFIG_DIR/sessions/$AGENT_SESSION_CONFIG"
 require_file "$CREDENTIALS_DIR/ca.crt"
 require_file "$CREDENTIALS_DIR/ca-key.pem"
 require_directory "$CREDENTIALS_DIR/secrets"
+require_directory "$SOCKET_DIR"
+if ! chmod 0700 "$SOCKET_DIR"; then
+    fail "failed to secure Baffle socket root directory: $SOCKET_DIR"
+fi
+if [ ! -d "$SOCKET_DIR/agent" ]; then
+    if ! mkdir -m 0700 "$SOCKET_DIR/agent"; then
+        fail "failed to create agent session socket directory: $SOCKET_DIR/agent"
+    fi
+fi
 require_directory "$SOCKET_DIR/agent"
 if [ ! -w "$SOCKET_DIR/agent" ]; then
     fail "agent session socket directory is not writable: $SOCKET_DIR/agent"
