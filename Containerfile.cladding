@@ -1,4 +1,4 @@
-FROM node:24.17-trixie-slim
+FROM node:24.17-trixie-slim AS base
 
 ENV NODE_USE_SYSTEM_CA=1
 
@@ -35,13 +35,22 @@ RUN userdel node && if getent group $GID; then \
        fi \
     && chsh -s /bin/zsh $USERNAME
 
+FROM base AS npm-tools
+
 ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-codex.json
-ADD https://registry.npmjs.org/@earendil-works/pi-coding-agent /tmp/npm-pi.json
-ADD https://registry.npmjs.org/@anthropic-ai/claude-code /tmp/npm-claude.json
+ADD https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest /tmp/npm-pi.json
+ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /tmp/npm-claude.json
 
 RUN npm install -g @openai/codex@latest \
-    && npm install -g @earendil-works/pi-coding-agent \
-    && npm install -g @anthropic-ai/claude-code
+    && npm install -g @earendil-works/pi-coding-agent@latest \
+    && npm install -g @anthropic-ai/claude-code@latest
+
+FROM base
+
+COPY --from=npm-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=npm-tools /usr/local/bin/codex /usr/local/bin/codex
+COPY --from=npm-tools /usr/local/bin/pi /usr/local/bin/pi
+COPY --from=npm-tools /usr/local/bin/claude /usr/local/bin/claude
 
 USER $USERNAME
 WORKDIR /home/$USERNAME/workspace
