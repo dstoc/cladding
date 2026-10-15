@@ -162,10 +162,17 @@ jobs:
           bin=cladding
           staging="${bin}-${{ needs.release-please.outputs.tag_name }}-${{ matrix.target }}"
           mkdir "$staging"
-          mkdir -p "$staging/docs/features/baffle-integration"
+          mkdir -p "$staging/crates/mcp-run" \
+            "$staging/docs/features/baffle-integration" \
+            "$staging/docs/features/proxy" \
+            "$staging/docs/user-guide"
           cp "target/${{ matrix.target }}/release/${bin}" "$staging/"
           cp README.md "$staging/"
+          cp crates/mcp-run/README.md "$staging/crates/mcp-run/"
+          cp docs/features/current-runtime-summary.md "$staging/docs/features/"
           cp docs/features/baffle-integration/embedded-baffle.md "$staging/docs/features/baffle-integration/"
+          cp docs/features/proxy/summary.md "$staging/docs/features/proxy/"
+          cp docs/user-guide/*.md "$staging/docs/user-guide/"
           mkdir -p "$staging/licenses/baffle"
           cp "$RUNNER_TEMP/baffle/LICENSE" "$staging/licenses/baffle/LICENSE"
           cp "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt" "$staging/licenses/baffle/"

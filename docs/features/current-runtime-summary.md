@@ -1,168 +1,135 @@
 # Current Runtime Summary
 
-This file is the quick reference for the current Cladding runtime.
+This file summarizes the current Cladding runtime. See the [user guide](../user-guide/runtime-and-commands.md) for command behavior, [mount reference](../user-guide/mounts.md) for workspace access, and [proxy reference](proxy/summary.md) for Baffle policy and trust details.
 
 ## Managed resources
+
 - One standalone proxy container per project: `<name>-proxy-instance`.
-- The proxy instance runs one Baffle daemon and creates the persistent agent session and, when enabled, the network-sandbox session.
-- Standalone execution containers use the names `<name>-agent-instance`, `<name>-nw-sandbox-instance`, and `<name>-fs-sandbox-instance` when enabled.
+- One standalone agent container: `<name>-agent-instance`.
+- Optional standalone network and filesystem sandbox containers: `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance`.
+- Podman-managed volumes carry Baffle data sockets and sandbox run sockets between their owning containers. Cladding does not create host runtime socket directories.
 
-## Runtime shape
-- The proxy, agent, nw-sandbox, and fs-sandbox run as standalone containers.
-- The proxy uses Podman's default runtime.
-- The proxy uses Podman's default network. Execution containers use `--network none`.
-- All runtime containers use `--userns keep-id`.
-- Execution containers communicate through scoped Unix-domain socket mounts under `.cladding/runtime/sockets`.
-- The proxy creates a persistent Baffle session for the agent. It creates a network-sandbox session only when that component is enabled.
-- Cladding does not wait for Baffle sessions to become ready before it starts execution containers. Early requests to the local proxy can fail during startup.
+## Persistent runtime topology
 
-## CLI execution and lifecycle
-`cladding init` creates project configuration and layout. `cladding build`
-builds local images, refreshes embedded tools, and initializes the persistent
-project Baffle CA when needed. Later builds validate and reuse that CA.
-`cladding check` and `cladding up` validate the same project prerequisites,
-including the CA. They do not initialize or rotate persistent CA material.
+All components run as standalone containers with `--userns keep-id`. The proxy uses Podman's default network. The agent and enabled sandboxes use `--network none`. `use_runsc`, when enabled, applies only to the execution containers.
 
-`cladding run [--env KEY[=VALUE] ...] <command> [args...]` creates a unique
-temporary runtime, runs the command in its agent container, and removes the
-runtime when the command ends. Repeat `--env` to set multiple variables for
-the command. Each invocation uses the selected project's config, tools,
-credentials, and home directly. This preserves project symlinks and lets the proxy use the
-selected Baffle session files and persistent CA. The command validates the CA;
-`cladding build` creates it. Each run keeps generated scripts, masks, sockets,
-containers, and volumes under UUID-scoped runtime identity. It does not copy
-project config, tools, credentials, or home into the runtime directory. Run
-requires a project initialized with `cladding init` and prepared with
-`cladding build`.
-
-`cladding exec [--target agent|nw-sandbox|fs-sandbox] [--env KEY[=VALUE] ...]
-<command> [args...]` runs a command in an already-running project. It defaults
-to `agent`; a sandbox target must be enabled. Direct host execution into either
-sandbox bypasses the agent-side delegation and policy path. The `fs-sandbox` starts
-in `/home/user` unless its configuration adds a workspace mount.
-
-## Baffle policy and trust
-`cladding init` creates native daemon and session TOML under
-`.cladding/config/proxy/`. Baffle uses `file_only` mode. The agent and network
-sandbox can read those non-secret configuration files, but the Baffle control
-socket stays private inside the proxy container.
-
-Each project has a persistent CA under `.cladding/credentials/baffle/`.
-During the first successful `cladding build`, Cladding runs Baffle's
-`ca init --config /opt/config/proxy/daemon.toml` in the selected proxy image.
-Cladding validates and reuses the CA on later builds. `check` and `up` validate
-the CA and fail when it is missing or invalid; `up` never initializes it.
-After each agent and enabled network-sandbox container starts, Cladding uses
-`podman exec --user 0` to install the public certificate in that container's
-system trust store. This exec uses container root; the application remains
-unprivileged. The default image sets `NODE_USE_SYSTEM_CA=1`. Custom images
-must provide a compatible command to install the certificate. The filesystem
-sandbox does not receive the CA.
-
-Injection secrets are provisioned separately under
-`.cladding/credentials/baffle/secrets/`. The proxy receives the credentials
-directory read-only. Execution containers receive neither the secret files
-nor the CA private key. Protect secret files as mode `0600` and the credentials
-directories as mode `0700`; never commit these files.
-
-The local application endpoint stays `http://127.0.0.1:3128`. Baffle accepts
-HTTPS origins through `CONNECT` and rejects ordinary plaintext HTTP. Rules
-use exact DNS hostnames and explicit ports. Baffle does not filter resolved
-destination IP addresses. See the [proxy configuration reference](proxy/summary.md)
-for migration limits and troubleshooting.
-
-## Socket volumes
-Cladding does not create host runtime socket directories. It creates managed
-volumes for Baffle data sockets and sandbox run sockets. The agent Baffle volume
-is mounted at `/run/cladding/proxy` in the proxy and agent containers. Baffle
-creates the agent socket under the `agent/` subdirectory in that volume. The
-network-sandbox Baffle volume is mounted at `/run/cladding/proxy/nw-sandbox` in
-the proxy and network-sandbox containers. Each execution container receives
-only its own Baffle volume. Baffle binds each session socket directly in its
-volume on Linux rootless Podman and macOS Podman machine, preserving the
-mode-`0600` socket and mode-`0700` parent.
-
-The proxy's control socket and runtime configuration stay inside the proxy
-container. The sticky-mode `1733` `/run/baffle` directory contains a
-proxy-owned mode-`0700` subdirectory with mode-`0600` config and socket files;
-a symlink preserves Baffle's default control-socket path. The agent uses its
-proxy socket for outbound HTTP proxying and the sandbox run sockets when the
-corresponding sandboxes are enabled. The nw-sandbox and fs-sandbox containers
-bind their own run sockets via `MCP_BIND_UDS`.
-
-Each execution container keeps its `socat` listener on `127.0.0.1:3128` and forwards to its own Baffle `proxy.sock`. Baffle owns a mode-`0600` socket inside a mode-`0700` component directory. The proxy and execution containers use ordinary `keep-id` mappings, so each process uses the invoking host user's UID to access the socket without widening its permissions. Baffle's mode-`0600` control socket and runtime configuration stay in a mode-`0700` directory inside the proxy container. Startup writes a private daemon-config copy with the proxy process UID as Baffle's trusted operator. No separate proxy bridge container is used.
-
-CI checks direct Baffle socket binds into managed volumes with rootless Podman and Podman machine. Linux also checks execution-container access under its default OCI runtime and `runsc`. Each check verifies socket modes and sends an HTTPS request through the component's existing `127.0.0.1:3128` endpoint. The Podman-machine check uses the machine user's UID inside its containers and verifies access with the request itself; host and VM UID values are not compared.
-
-## `use_runsc`
-- `use_runsc` applies only to the standalone execution containers.
-- The proxy stays on Podman's default runtime.
-- Optional `use_runsc` design details live in `docs/features/cladding-gvisor-runtime/prd.md`.
-- When `use_runsc` is enabled, Cladding passes `--runtime runsc`, `--runtime-flag ignore-cgroups`, `--runtime-flag host-uds=all`, and `--runtime-flag network=none` to the execution container startup command.
-- `cladding expose` does not receive Podman runtime flags; it is a host-side `socat` forwarder that delegates through `cladding exec`.
-
-## Blocking `cladding expose`
-- `cladding expose <container-port> [host-port]` runs in the foreground on the host.
-- It binds `127.0.0.1:<host-port>` by default, or the address selected with `--bind-address`, and forwards through `cladding exec socat ...` to `127.0.0.1:<container-port>` inside the agent container.
-- No persistent expose containers are created.
-
-## Blocking `cladding inject`
-- `cladding inject <host-endpoint> [container-port]` runs in the foreground on the host.
-- It starts `cladding-bridge` inside the agent over one long-lived multiplexed `podman exec` stream. Host Cladding opens each stream to the fixed TCP endpoint selected by the command.
-- The agent listens on `127.0.0.1:<container-port>`. The agent cannot select a different host destination.
-- Local Podman and Podman Machine use the same transport. A `localhost` destination resolves on the physical host where Cladding runs.
-- A bare port selects host `127.0.0.1` on the same port. An explicit `host:port` selects that host endpoint for the command.
+The proxy runs Baffle and creates a persistent session for the agent and, when enabled, the network sandbox. Each of those clients has a local listener at `127.0.0.1:3128` and its own Baffle data socket. The filesystem sandbox has no Baffle socket, local proxy listener, or proxy environment.
 
 ```mermaid
 flowchart LR
-    Agent["Agent TCP"] --> Bridge["cladding-bridge"]
-    Bridge -->|"multiplexed podman exec"| Host["Host Cladding"]
-    Host --> Target["Fixed host TCP endpoint"]
+  subgraph Proxy["proxy container · default Podman network"]
+    Baffle[Baffle daemon]
+    AgentSession[Persistent agent session]
+    NetworkSession[Optional network-sandbox session]
+    Baffle --> AgentSession
+    Baffle --> NetworkSession
+  end
+
+  subgraph Agent["agent container · network none"]
+    AgentProcess[Agent process]
+    AgentProxy["socat · 127.0.0.1:3128"]
+  end
+
+  subgraph Network["optional nw-sandbox · network none"]
+    NetworkMcp[mcp-run]
+    NetworkProxy["socat · 127.0.0.1:3128"]
+  end
+
+  subgraph Filesystem["optional fs-sandbox · network none"]
+    FilesystemMcp[mcp-run]
+  end
+
+  AgentBaffleVolume[(Managed Baffle agent volume)]
+  NetworkBaffleVolume[(Managed Baffle nw-sandbox volume)]
+  NetworkRunVolume[(Managed nw-sandbox run volume)]
+  FilesystemRunVolume[(Managed fs-sandbox run volume)]
+  HostWorkspace["Optional explicit host-backed mount"]
+
+  AgentBaffleVolume --- Proxy
+  AgentBaffleVolume --- Agent
+  NetworkBaffleVolume --- Proxy
+  NetworkBaffleVolume --- Network
+  NetworkRunVolume --- Agent
+  NetworkRunVolume --- Network
+  FilesystemRunVolume --- Agent
+  FilesystemRunVolume --- Filesystem
+
+  AgentProcess --> AgentProxy --> AgentBaffleVolume
+  NetworkMcp --> NetworkProxy --> NetworkBaffleVolume
+  AgentProcess <-->|"run-remote · UDS"| NetworkMcp
+  AgentProcess <-->|"run-remote · UDS"| FilesystemMcp
+  HostWorkspace -. "only configured targets" .-> AgentProcess
+  HostWorkspace -. "only configured targets" .-> NetworkMcp
+  HostWorkspace -. "only configured targets" .-> FilesystemMcp
 ```
 
-The reusable bridge and its future fixed Unix-socket target are described in the [Cladding bridge architecture](cladding-bridge/proposal.md). Moving Baffle to the physical host, changing its lifecycle, and removing its Podman socket volumes and local `socat` bridges require a separate proposal and task graph.
+The dashed host mount is optional. Cladding does not mount the host workspace by default. A configured mount applies only to its selected target list. The agent and network sandbox can use the proxy only through their own Baffle socket and only for destinations allowed by their session policy. The filesystem sandbox has neither proxy access nor a CA mount. Direct host execution into a sandbox bypasses the agent-side delegation and policy path.
 
-## Config and scripts materialization
-`cladding init` materializes the project layout under `.cladding`:
+## Socket volumes
 
-- `config/`
-- `home/`
-- `tools/`
-- `runtime/`
-- `runtime/empty-mask/`
+Cladding creates these volumes as components are enabled:
 
-The embedded config templates are copied into `config/`. The proxy startup
-script is refreshed at `runtime/scripts/proxy_startup.sh` by `cladding init`,
-`cladding build`, and `cladding up`. Embedded binaries are written into
-`tools/bin/` by `cladding build`.
+| Volume channel | Mounted in | Socket or mount path |
+| --- | --- | --- |
+| Baffle agent | Proxy and agent | `/run/cladding/proxy/agent/proxy.sock` |
+| Baffle network sandbox | Proxy and network sandbox | `/run/cladding/proxy/nw-sandbox/proxy.sock` |
+| Network-sandbox run | Agent and network sandbox | `/run/cladding/run/nw-sandbox/run.sock` |
+| Filesystem-sandbox run | Agent and filesystem sandbox | `/run/cladding/run/fs-sandbox/run.sock` |
 
-## Mounts
-The proxy container receives read-only mounts for `/opt/config`,
-`/opt/credentials/baffle`, `/opt/tools/bin/baffle`, and
-`/opt/scripts/proxy_startup.sh`. The agent Baffle volume provides the socket
-root at `/run/cladding/proxy`; the network-sandbox volume is mounted below it.
-The control socket and runtime configuration stay inside the proxy container.
-`/run/baffle` has sticky mode `1733`; the proxy process creates a mode-`0700`
-child directory that owns the mode-`0600` runtime config and control socket. A
-symlink at the default socket path keeps in-container Baffle commands working.
-No execution container mounts `/run/baffle`.
+The agent Baffle volume is mounted at `/run/cladding/proxy` in both the proxy and agent. Baffle creates its agent socket under the volume's `agent/` directory. The network-sandbox Baffle volume is mounted below it at `/run/cladding/proxy/nw-sandbox`; the network sandbox receives only that component volume. Each execution container receives only its own Baffle data volume and its enabled sandbox run volumes.
 
-Custom proxy images must provide a sticky, writable `/run/baffle` directory
-and `socat` for the startup socket-bind probe. The default proxy image provides
-both requirements.
+Baffle binds each session socket directly in its managed volume. Its data socket uses mode `0600` inside a mode-`0700` component directory. The proxy's control socket and runtime configuration stay inside the proxy container, in a private directory under `/run/baffle`. No execution container mounts the Baffle control socket.
 
-The current runtime mounts the following built-in paths for the agent and
-`nw-sandbox` where applicable:
+The network and filesystem sandboxes bind their run sockets through `MCP_BIND_UDS`. The agent calls those sockets through `run-remote`. The agent and network sandbox each keep a `socat` listener on `127.0.0.1:3128` and forward to their own Baffle data socket. No separate proxy bridge container is used.
 
-- `/opt/config`
-- `/run/cladding/ca/baffle.crt`
-- `/opt/tools`
-- `/home/user`
+## Default and optional mounts
 
-Cladding does not mount the host workspace by default. Add a host-backed entry
-to `mounts` when a workflow needs host files. If that mount contains the
-project `.cladding` directory, Cladding adds an empty mask at its mapped path.
-The `fs-sandbox` default mount set is limited to read-only `/opt/config`,
-read-only `/opt/tools`, and its internal run socket.
+The agent and network sandbox receive read-only `/opt/config`, read-only `/opt/tools`, the public project CA at `/run/cladding/ca/baffle.crt`, and Cladding's project home at `/home/user`. The filesystem sandbox receives read-only `/opt/config` and `/opt/tools`; it does not receive the project home or CA. The proxy receives read-only Baffle config, credentials, Baffle binary, and startup script mounts.
 
-Custom mounts are applied through the direct runtime builder rather than through kube YAML.
+These built-in mounts do not expose the host workspace. Add a host-backed mount to `mounts` when a component needs host files. Cladding maps `exec` and `run` working directories through the most-specific configured host-backed mount for the selected target that contains the invocation directory. If no such mount applies, commands start in `/home/user`. When a configured mount contains the private `.cladding` directory, Cladding adds an empty mask at the corresponding container path.
+
+Custom mounts are applied by the direct runtime builder. They do not pass through Kubernetes YAML.
+
+## Persistent and one-off lifecycle
+
+`cladding init` creates project configuration and layout. It materializes embedded config templates under `.cladding/config/` and refreshes the proxy startup script. `cladding build` builds local images, refreshes embedded binaries in `.cladding/tools/bin/`, and initializes the persistent project Baffle CA when needed. Later builds validate and reuse the CA. `cladding check` and `cladding up` validate the same project prerequisites and CA; neither initializes or rotates the CA.
+
+`cladding up` starts the persistent project containers and their managed volumes. `cladding down` removes those runtime resources but keeps project config, tools, credentials, home, and CA. `cladding destroy` force-removes the current standalone runtime resources.
+
+`cladding run [--env KEY[=VALUE] ...] -- <command> [args...]` creates a UUID-scoped one-off runtime, runs the command in its agent container, then removes the containers and Cladding-managed volumes. Its private bind sources, generated scripts, and masks live under `.cladding/runtime/runs/<instance>`. The sockets live in Podman-managed volumes, not in this private directory. The run uses the selected project's config, tools, credentials, home, selected Baffle sessions, and persistent CA directly. It does not copy those project files into the run directory or initialize a new CA.
+
+The proxy and execution containers start independently. Cladding does not wait for Baffle sessions to become ready before starting execution containers, so early requests to the local proxy can fail while Baffle starts. Startup errors appear in proxy logs and exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime.
+
+## Baffle policy and trust
+
+`cladding init` creates native Baffle daemon and session TOML under `.cladding/config/proxy/`. Baffle uses `file_only` mode. Session files start with no host rules and set `unmatched = "deny"`, so no proxy destination is allowed until a rule is added. Rules use exact DNS hostnames and explicit ports. Baffle accepts HTTPS origins through HTTP `CONNECT`, not ordinary plaintext HTTP.
+
+The proxy can read the Baffle credential directory, mounted read-only. The agent and network sandbox receive only the public `ca.crt`; they do not receive the private key or secret files. The filesystem sandbox receives no CA. Store injection secret values in protected files under `.cladding/credentials/baffle/secrets/`, not in TOML, arguments, or logs. The proxy receives those files read-only.
+
+For CA bootstrap, rotation, session selection, policy reload, DNS limitations, and credential handling, see the [proxy reference](proxy/summary.md). For migrating Baffle v1 session files, see the [session migration steps](baffle-integration/embedded-baffle.md#session-file-migration).
+
+## `use_runsc`
+
+- `use_runsc` applies only to standalone execution containers.
+- The proxy remains on Podman's default runtime.
+- When enabled, Cladding passes `--runtime runsc`, `--runtime-flag ignore-cgroups`, `--runtime-flag host-uds=all`, and `--runtime-flag network=none` to execution container startup.
+- `cladding expose` is a host-side `socat` forwarder through `cladding exec`; it does not use Podman runtime flags.
+
+Optional gVisor design details live in [the gVisor runtime feature document](cladding-gvisor-runtime/prd.md).
+
+## Host connection commands
+
+`cladding expose <container-port> [host-port]` runs a foreground host listener and forwards to the agent. It listens on `127.0.0.1` by default and creates no persistent expose container.
+
+`cladding inject <host-endpoint> [container-port]` runs `cladding-bridge` in the agent over a multiplexed `podman exec` stream. Host Cladding opens each stream to the fixed TCP endpoint selected by the command. The agent listens on `127.0.0.1:<container-port>` and cannot choose another host destination. A bare port selects host `127.0.0.1` on the same port. An explicit `host:port` selects that host endpoint. See the [Cladding bridge architecture](cladding-bridge/proposal.md) for the transport design.
+
+## Config and generated files
+
+`cladding init` materializes these paths under `.cladding/`:
+
+- `config/`: generated configuration and policy templates;
+- `home/`: persistent project home for the agent and network sandbox;
+- `tools/`: embedded binaries created or refreshed by `cladding build`;
+- `runtime/`: scripts and generated masks used by the persistent runtime.
+
+One-off runtime files live in the UUID-scoped `runtime/runs/<instance>/` directory. Podman-managed socket volumes remain outside that host path and are removed with the run.
