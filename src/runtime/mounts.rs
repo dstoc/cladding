@@ -343,20 +343,18 @@ fn canonical_or_normalized(path: &Path) -> PathBuf {
 }
 
 fn collect_required_host_paths(component: &RuntimeComponent, paths: &mut BTreeSet<PathBuf>) {
-    for container in &component.containers {
-        for mount in &container.mounts {
-            match &mount.source {
-                RuntimeMountSource::HostPath { path } if !is_generated_runtime_mount_path(path) => {
-                    paths.insert(path.clone());
-                }
-                RuntimeMountSource::ManagedVolume {
-                    kind: ManagedVolumeKind::Copy { source },
-                    ..
-                } if !is_generated_runtime_mount_path(source) => {
-                    paths.insert(source.clone());
-                }
-                _ => {}
+    for mount in &component.container.mounts {
+        match &mount.source {
+            RuntimeMountSource::HostPath { path } if !is_generated_runtime_mount_path(path) => {
+                paths.insert(path.clone());
             }
+            RuntimeMountSource::ManagedVolume {
+                kind: ManagedVolumeKind::Copy { source },
+                ..
+            } if !is_generated_runtime_mount_path(source) => {
+                paths.insert(source.clone());
+            }
+            _ => {}
         }
     }
 }
@@ -856,7 +854,9 @@ mod tests {
                 runtime_root,
                 &config,
             );
-            let mount = spec.agent.containers[0]
+            let mount = spec
+                .agent
+                .container
                 .mounts
                 .iter()
                 .find(|mount| mount.mount_path == "/home/user/.cache/kache")

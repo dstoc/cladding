@@ -67,11 +67,9 @@ pub(super) fn generated_empty_mask_dirs(spec: &RuntimeSpec) -> Vec<std::path::Pa
     let mut paths = std::collections::BTreeSet::new();
 
     for component in runtime_components(spec) {
-        for container in &component.containers {
-            for mount in &container.mounts {
-                if let RuntimeMountSource::GeneratedEmptyMask { path } = &mount.source {
-                    paths.insert(path.clone());
-                }
+        for mount in &component.container.mounts {
+            if let RuntimeMountSource::GeneratedEmptyMask { path } = &mount.source {
+                paths.insert(path.clone());
             }
         }
     }
@@ -203,7 +201,7 @@ mod tests {
                 runtime_root,
                 &config,
             );
-            let container = &spec.agent.containers[0];
+            let container = &spec.agent.container;
             let mut cmd = Command::new("podman");
             append_mount_args(&mut cmd, &container.mounts);
 

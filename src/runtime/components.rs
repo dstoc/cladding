@@ -96,7 +96,7 @@ fn build_proxy_component(
             true,
         ));
     }
-    let containers = vec![RuntimeContainer {
+    let container = RuntimeContainer {
         name: runtime_container_name(&names.proxy_name),
         image: config.proxy_image().to_string(),
         command: vec![
@@ -122,7 +122,7 @@ fn build_proxy_component(
         ports: Vec::new(),
         stdin: false,
         tty: false,
-    }];
+    };
 
     RuntimeComponent {
         name: names.proxy_name.clone(),
@@ -131,7 +131,7 @@ fn build_proxy_component(
         security_opts: Vec::new(),
         labels: build_labels(&config.name, project_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
-        containers,
+        container,
         user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
@@ -221,7 +221,7 @@ fn build_agent_component(
         security_opts: config.agent.security_opts.clone(),
         labels: build_labels(&config.name, project_root, "agent"),
         network_name: NETWORK_NONE.to_string(),
-        containers: vec![RuntimeContainer {
+        container: RuntimeContainer {
             name: runtime_container_name(&names.agent_name),
             image: config.agent_image().to_string(),
             command: build_idle_supervisor_command(
@@ -234,7 +234,7 @@ fn build_agent_component(
             ports: Vec::new(),
             stdin: true,
             tty: true,
-        }],
+        },
         user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
@@ -319,7 +319,7 @@ fn build_nw_sandbox_component(
             .unwrap_or_default(),
         labels: build_labels(&config.name, project_root, "nw-sandbox"),
         network_name: NETWORK_NONE.to_string(),
-        containers: vec![RuntimeContainer {
+        container: RuntimeContainer {
             name: runtime_container_name(component_name),
             image: config.nw_sandbox_image().to_string(),
             command: build_mcp_run_supervisor_command(
@@ -332,7 +332,7 @@ fn build_nw_sandbox_component(
             ports: Vec::new(),
             stdin: false,
             tty: false,
-        }],
+        },
         user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
@@ -372,7 +372,7 @@ fn build_fs_sandbox_component(
             .unwrap_or_default(),
         labels: build_labels(&config.name, project_root, "fs-sandbox"),
         network_name: NETWORK_NONE.to_string(),
-        containers: vec![RuntimeContainer {
+        container: RuntimeContainer {
             name: runtime_container_name(component_name),
             image: config.fs_sandbox_image().to_string(),
             command: vec![
@@ -401,7 +401,7 @@ fn build_fs_sandbox_component(
             ports: Vec::new(),
             stdin: false,
             tty: false,
-        }],
+        },
         user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
@@ -471,11 +471,8 @@ mod tests {
     }
 
     fn container<'a>(component: &'a RuntimeComponent, name: &str) -> &'a RuntimeContainer {
-        component
-            .containers
-            .iter()
-            .find(|container| container.name == name)
-            .expect("container")
+        assert_eq!(component.container.name, name);
+        &component.container
     }
 
     fn env_value<'a>(container: &'a RuntimeContainer, name: &str) -> Option<&'a str> {
@@ -528,14 +525,14 @@ mod tests {
     }
 
     #[test]
-    fn build_runtime_spec_fully_enabled_uses_five_containers() {
+    fn build_runtime_spec_fully_enabled_uses_standalone_containers() {
         let config = execution_config(true, true, Vec::new(), false);
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
 
         assert_eq!(spec.project_name, "demo");
         assert!(!spec.use_runsc);
         assert_eq!(spec.proxy.name, "demo-proxy");
-        assert_eq!(spec.agent.containers[0].name, "demo-agent-instance");
+        assert_eq!(spec.agent.container.name, "demo-agent-instance");
         assert_eq!(
             spec.proxy.labels.get("project_root").map(String::as_str),
             Some("/tmp/project/.cladding")
@@ -544,35 +541,18 @@ mod tests {
         assert_eq!(spec.agent.network_name, "none");
         assert_eq!(spec.proxy.user_namespace, RuntimeUserNamespace::KeepId);
         assert_eq!(spec.agent.user_namespace, RuntimeUserNamespace::KeepId);
-        assert_eq!(spec.proxy.containers.len(), 1);
-        assert_eq!(spec.agent.containers.len(), 1);
+        assert_eq!(spec.proxy.container.name, "demo-proxy-instance");
         assert_eq!(
-            spec.nw_sandbox
-                .as_ref()
-                .expect("network sandbox")
-                .containers
-                .len(),
-            1
-        );
-        assert_eq!(
-            spec.fs_sandbox
-                .as_ref()
-                .expect("filesystem sandbox")
-                .containers
-                .len(),
-            1
-        );
-        assert_eq!(spec.proxy.containers[0].name, "demo-proxy-instance");
-        assert_eq!(
-            spec.proxy.containers[0].command,
+            spec.proxy.container.command,
             ["/bin/sh", "/opt/scripts/proxy_startup.sh"]
         );
         assert_eq!(
-            env_value(&spec.proxy.containers[0], "CLADDING_NW_SANDBOX_ENABLED"),
+            env_value(&spec.proxy.container, "CLADDING_NW_SANDBOX_ENABLED"),
             Some("true")
         );
         assert_eq!(
-            spec.proxy.containers[0]
+            spec.proxy
+                .container
                 .env
                 .iter()
                 .map(|env| env.name.as_str())
@@ -583,17 +563,17 @@ mod tests {
                 "CLADDING_NW_SANDBOX_SESSION_CONFIG",
             ]
         );
-        assert!(spec.proxy.containers[0].ports.is_empty());
+        assert!(spec.proxy.container.ports.is_empty());
         assert_eq!(
-            spec.proxy.containers[0].image,
+            spec.proxy.container.image,
             "localhost/cladding-proxy:latest"
         );
-        assert_eq!(spec.agent.containers[0].name, "demo-agent-instance");
+        assert_eq!(spec.agent.container.name, "demo-agent-instance");
         assert_eq!(
             spec.nw_sandbox
                 .as_ref()
                 .expect("network sandbox")
-                .containers[0]
+                .container
                 .name,
             "demo-nw-sandbox-instance"
         );
@@ -601,7 +581,7 @@ mod tests {
             spec.fs_sandbox
                 .as_ref()
                 .expect("filesystem sandbox")
-                .containers[0]
+                .container
                 .name,
             "demo-fs-sandbox-instance"
         );
@@ -746,7 +726,7 @@ mod tests {
             spec.fs_sandbox
                 .as_ref()
                 .expect("filesystem sandbox")
-                .containers[0]
+                .container
                 .image,
             "fs:image"
         );
@@ -807,45 +787,11 @@ mod tests {
 
         assert!(spec.nw_sandbox.is_some());
         assert!(spec.fs_sandbox.is_none());
-        assert_eq!(spec.proxy.containers.len(), 1);
-        assert_eq!(spec.agent.containers.len(), 1);
+        assert_eq!(spec.proxy.container.name, "demo-proxy-instance");
+        assert_eq!(spec.agent.container.name, "demo-agent-instance");
         assert_eq!(
-            spec.nw_sandbox
-                .as_ref()
-                .expect("network sandbox")
-                .containers
-                .len(),
-            1
-        );
-        assert!(
-            spec.agent
-                .containers
-                .iter()
-                .all(|container| container.name != "demo-agent-proxy-client")
-        );
-        assert!(
-            spec.agent
-                .containers
-                .iter()
-                .all(|container| container.name != "demo-agent-nw-sandbox-run-client")
-        );
-        assert!(
-            spec.agent
-                .containers
-                .iter()
-                .all(|container| container.name != "demo-agent-fs-sandbox-run-client")
-        );
-        assert!(
-            spec.proxy
-                .containers
-                .iter()
-                .all(|container| container.name != "demo-proxy-agent-proxy-socket")
-        );
-        assert!(
-            spec.proxy
-                .containers
-                .iter()
-                .all(|container| container.name != "demo-proxy-nw-sandbox-proxy-socket")
+            spec.nw_sandbox.as_ref().unwrap().container.name,
+            "demo-nw-sandbox-instance"
         );
         assert_eq!(env_value(proxy, "CLADDING_SANDBOX_NAME"), None);
         assert_eq!(
@@ -869,11 +815,7 @@ mod tests {
 
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
 
-        assert_eq!(spec.proxy.containers.len(), 1);
-        assert_eq!(
-            spec.proxy.containers[0].image,
-            "localhost/custom-proxy:latest"
-        );
+        assert_eq!(spec.proxy.container.image, "localhost/custom-proxy:latest");
     }
 
     #[test]
@@ -930,13 +872,7 @@ mod tests {
             "demo-fs-sandbox-instance",
         );
 
-        assert_eq!(spec.proxy.containers.len(), 1);
-        assert!(
-            spec.proxy
-                .containers
-                .iter()
-                .all(|container| container.name != "demo-proxy-bridge-instance")
-        );
+        assert_eq!(spec.proxy.container.name, "demo-proxy-instance");
         assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
         assert_eq!(host_mount_path(proxy, "/run/cladding/proxy"), None);
         assert_socket_volume(

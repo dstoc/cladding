@@ -1,7 +1,6 @@
 use crate::error::{Error, Result};
 use crate::runtime::{
-    ManagedVolumeKind, RuntimeComponent, RuntimeContainer, RuntimeMountSource, RuntimeSpec,
-    RuntimeUserNamespace,
+    ManagedVolumeKind, RuntimeComponent, RuntimeMountSource, RuntimeSpec, RuntimeUserNamespace,
 };
 use anyhow::Context as _;
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,17 +55,9 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) ->
     ensure_managed_mount_volumes(spec, verbose, quiet_helpers)?;
 
     for component in runtime_components(spec) {
-        for container in &component.containers {
-            container_run(
-                component.use_runsc,
-                component,
-                container,
-                verbose,
-                quiet_helpers,
-            )?;
-            if should_install_baffle_ca(spec, component) {
-                install_baffle_ca(container, verbose, quiet_helpers)?;
-            }
+        container_run(component, verbose, quiet_helpers)?;
+        if should_install_baffle_ca(spec, component) {
+            install_baffle_ca(component, verbose, quiet_helpers)?;
         }
     }
 
@@ -100,12 +91,7 @@ pub fn initialize_baffle_ca(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bo
 }
 
 fn build_baffle_ca_init_command(spec: &RuntimeSpec) -> Command {
-    let proxy_image = spec
-        .proxy
-        .containers
-        .first()
-        .map(|container| container.image.as_str())
-        .expect("runtime spec must include a proxy container");
+    let proxy_image = spec.proxy.container.image.as_str();
     let mounts = [
         crate::runtime::RuntimeMount {
             mount_path: "/opt/config".to_string(),
@@ -148,17 +134,16 @@ pub fn runtime_inventory(
     let mut resources = Vec::new();
 
     for component in runtime_components(spec) {
-        for container in &component.containers {
-            expected_count += 1;
-            if let Some(state) =
-                inspect_resource_state("container", &container.name, verbose, quiet_helpers)?
-            {
-                resources.push(RuntimeResource {
-                    kind: "container",
-                    name: container.name.clone(),
-                    state,
-                });
-            }
+        let container = &component.container;
+        expected_count += 1;
+        if let Some(state) =
+            inspect_resource_state("container", &container.name, verbose, quiet_helpers)?
+        {
+            resources.push(RuntimeResource {
+                kind: "container",
+                name: container.name.clone(),
+                state,
+            });
         }
     }
 
@@ -171,26 +156,23 @@ pub fn runtime_inventory(
 pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cleanup_errors = CleanupErrors::default();
     for component in runtime_components(spec) {
-        for container in &component.containers {
-            if inspect_resource_state("container", &container.name, verbose, quiet_helpers)?
-                .is_none()
-            {
-                continue;
-            }
-            if resource_labels_match_expected(
-                "container",
-                &container.name,
-                &component.labels,
-                verbose,
-                quiet_helpers,
-            )? {
-                cleanup_errors.record(container_rm(&container.name, verbose, quiet_helpers));
-            } else {
-                cleanup_errors.record(Err(Error::message(format!(
-                    "refusing to remove container '{}' because it is not owned by this Cladding component",
-                    container.name
-                ))));
-            }
+        let container = &component.container;
+        if inspect_resource_state("container", &container.name, verbose, quiet_helpers)?.is_none() {
+            continue;
+        }
+        if resource_labels_match_expected(
+            "container",
+            &container.name,
+            &component.labels,
+            verbose,
+            quiet_helpers,
+        )? {
+            cleanup_errors.record(container_rm(&container.name, verbose, quiet_helpers));
+        } else {
+            cleanup_errors.record(Err(Error::message(format!(
+                "refusing to remove container '{}' because it is not owned by this Cladding component",
+                container.name
+            ))));
         }
     }
 
@@ -233,11 +215,9 @@ fn runtime_cleanup_normal_report(
     let mut runtime_root_safe_to_remove = true;
 
     for component in runtime_components(spec) {
-        for container in &component.containers {
-            if let Err(err) = container_rm(&container.name, verbose, quiet_helpers) {
-                runtime_root_safe_to_remove = false;
-                errors.record(Err(err));
-            }
+        if let Err(err) = container_rm(&component.container.name, verbose, quiet_helpers) {
+            runtime_root_safe_to_remove = false;
+            errors.record(Err(err));
         }
     }
 
@@ -310,11 +290,9 @@ impl CleanupErrors {
 fn socket_volume_names(spec: &RuntimeSpec) -> Vec<String> {
     let mut names = BTreeSet::new();
     for component in runtime_components(spec) {
-        for container in &component.containers {
-            for mount in &container.mounts {
-                if let RuntimeMountSource::NamedVolumeChown { claim_name } = &mount.source {
-                    names.insert(claim_name.clone());
-                }
+        for mount in &component.container.mounts {
+            if let RuntimeMountSource::NamedVolumeChown { claim_name } = &mount.source {
+                names.insert(claim_name.clone());
             }
         }
     }
@@ -323,9 +301,9 @@ fn socket_volume_names(spec: &RuntimeSpec) -> Vec<String> {
 
 fn proxy_socket_volume_names(spec: &RuntimeSpec) -> BTreeSet<String> {
     spec.proxy
-        .containers
+        .container
+        .mounts
         .iter()
-        .flat_map(|container| &container.mounts)
         .filter_map(|mount| match &mount.source {
             RuntimeMountSource::NamedVolumeChown { claim_name } => Some(claim_name.clone()),
             _ => None,
@@ -463,13 +441,11 @@ fn socket_volume_labels_match(
 fn managed_mount_volumes(spec: &RuntimeSpec) -> BTreeMap<String, ManagedVolumeKind> {
     let mut volumes = BTreeMap::new();
     for component in runtime_components(spec) {
-        for container in &component.containers {
-            for mount in &container.mounts {
-                if let RuntimeMountSource::ManagedVolume { claim_name, kind } = &mount.source {
-                    volumes
-                        .entry(claim_name.clone())
-                        .or_insert_with(|| kind.clone());
-                }
+        for mount in &component.container.mounts {
+            if let RuntimeMountSource::ManagedVolume { claim_name, kind } = &mount.source {
+                volumes
+                    .entry(claim_name.clone())
+                    .or_insert_with(|| kind.clone());
             }
         }
     }
@@ -778,12 +754,7 @@ fn build_managed_mount_helper_command(
     cmd.arg("--volume");
     cmd.arg(format!("{volume_name}:/volume:U"));
     cmd.args(["--entrypoint", "/bin/sh"]);
-    let proxy_image = spec
-        .proxy
-        .containers
-        .first()
-        .map(|container| container.image.as_str())
-        .expect("runtime spec must include a proxy container");
+    let proxy_image = spec.proxy.container.image.as_str();
     cmd.arg(proxy_image);
     cmd.args(["-ec", script]);
     cmd
@@ -997,12 +968,7 @@ fn build_proxy_socket_volume_prepare_command(name: &str, spec: &RuntimeSpec) -> 
     cmd.arg("--volume");
     cmd.arg(format!("{name}:/socket:U"));
     cmd.args(["--entrypoint", "/bin/sh"]);
-    let proxy_image = spec
-        .proxy
-        .containers
-        .first()
-        .map(|container| container.image.as_str())
-        .expect("runtime spec must include a proxy container");
+    let proxy_image = spec.proxy.container.image.as_str();
     cmd.arg(proxy_image);
     cmd.args(["-ec", "mkdir -p /socket && chmod 0700 /socket"]);
     cmd
@@ -1167,17 +1133,15 @@ fn build_resource_inspect_command(kind: &str, name: &str) -> Command {
 }
 
 pub fn container_run(
-    use_runsc: bool,
     component: &RuntimeComponent,
-    container: &RuntimeContainer,
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<()> {
-    let mut cmd = build_container_run_command(use_runsc, component, container);
+    let mut cmd = build_container_run_command(component);
     run_helper_command(&mut cmd, verbose, quiet_helpers, "podman run").inspect_err(|_| {
         eprintln!(
             "error: failed to start container '{}' for component '{}'",
-            container.name, component.name
+            component.container.name, component.name
         );
     })
 }
@@ -1191,10 +1155,11 @@ fn should_install_baffle_ca(spec: &RuntimeSpec, component: &RuntimeComponent) ->
 }
 
 fn install_baffle_ca(
-    container: &RuntimeContainer,
+    component: &RuntimeComponent,
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<()> {
+    let container = &component.container;
     let mut cmd = build_baffle_ca_install_command(&container.name);
     run_helper_command(
         &mut cmd,
@@ -1295,13 +1260,11 @@ fn ensure_runtime_empty_mask_dir(spec: &RuntimeSpec) -> Result<()> {
     Ok(())
 }
 
-fn build_container_run_command(
-    use_runsc: bool,
-    component: &RuntimeComponent,
-    container: &RuntimeContainer,
-) -> Command {
+fn build_container_run_command(component: &RuntimeComponent) -> Command {
+    let container = &component.container;
     let mut cmd = podman_command_with_options(
-        PodmanRuntimeOptions::new(use_runsc).with_network_none(component.network_name == "none"),
+        PodmanRuntimeOptions::new(component.use_runsc)
+            .with_network_none(component.network_name == "none"),
     );
     cmd.arg("run");
     for security_opt in &component.security_opts {
@@ -1426,6 +1389,33 @@ mod tests {
         )
     }
 
+    fn test_container(name: &str, image: &str) -> RuntimeContainer {
+        RuntimeContainer {
+            name: name.to_string(),
+            image: image.to_string(),
+            command: Vec::new(),
+            workdir: None,
+            env: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            stdin: false,
+            tty: false,
+        }
+    }
+
+    fn test_component(name: &str, container: RuntimeContainer) -> RuntimeComponent {
+        RuntimeComponent {
+            name: name.to_string(),
+            use_runsc: false,
+            init: true,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "none".to_string(),
+            container,
+            user_namespace: RuntimeUserNamespace::KeepId,
+            security_opts: Vec::new(),
+        }
+    }
+
     #[test]
     fn build_container_run_command_passes_security_options_as_literal_component_args() {
         let config = ExecutionConfig {
@@ -1457,12 +1447,7 @@ mod tests {
         };
         let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
         let security_opts = |component: &RuntimeComponent| {
-            let container = component.containers.first().expect("component container");
-            let args = command_args(&build_container_run_command(
-                component.use_runsc,
-                component,
-                container,
-            ));
+            let args = command_args(&build_container_run_command(component));
             args.windows(2)
                 .filter_map(|pair| (pair[0] == "--security-opt").then_some(pair[1].clone()))
                 .collect::<Vec<_>>()
@@ -1607,7 +1592,7 @@ mod tests {
             init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
-            containers: vec![RuntimeContainer {
+            container: RuntimeContainer {
                 name: "demo-proxy-instance".to_string(),
                 image: "localhost/cladding-proxy:latest".to_string(),
                 command: Vec::new(),
@@ -1617,19 +1602,15 @@ mod tests {
                 ports: Vec::new(),
                 stdin: false,
                 tty: false,
-            }],
+            },
             user_namespace: RuntimeUserNamespace::KeepId,
             security_opts: Vec::new(),
         };
-        let empty_component = |name: &str| RuntimeComponent {
-            name: name.to_string(),
-            use_runsc: false,
-            init: true,
-            labels: std::collections::BTreeMap::new(),
-            network_name: "none".to_string(),
-            containers: Vec::new(),
-            user_namespace: RuntimeUserNamespace::KeepId,
-            security_opts: Vec::new(),
+        let empty_component = |name: &str| {
+            test_component(
+                name,
+                test_container(&format!("{name}-instance"), "unused:image"),
+            )
         };
         let spec = RuntimeSpec {
             project_name: "demo".to_string(),
@@ -1672,15 +1653,11 @@ mod tests {
 
     #[test]
     fn baffle_ca_install_targets_agent_and_enabled_network_sandbox_only() {
-        let component = |name: &str| RuntimeComponent {
-            name: name.to_string(),
-            use_runsc: false,
-            init: true,
-            labels: std::collections::BTreeMap::new(),
-            network_name: "none".to_string(),
-            containers: Vec::new(),
-            user_namespace: RuntimeUserNamespace::KeepId,
-            security_opts: Vec::new(),
+        let component = |name: &str| {
+            test_component(
+                name,
+                test_container(&format!("{name}-instance"), "unused:image"),
+            )
         };
         let spec = RuntimeSpec {
             project_name: "demo".to_string(),
@@ -1739,23 +1716,17 @@ mod tests {
 
         assert_eq!(components.len(), 4);
         for component in components {
-            for container in &component.containers {
-                let args = command_args(&build_container_run_command(
-                    component.use_runsc,
-                    component,
-                    container,
-                ));
-                assert!(
-                    args.iter().any(|arg| arg == "--init"),
-                    "{} did not enable Podman init",
-                    container.name
-                );
-                assert!(
-                    !args.iter().any(|arg| arg == "--pod"),
-                    "{} must run as a standalone container",
-                    container.name
-                );
-            }
+            let args = command_args(&build_container_run_command(component));
+            assert!(
+                args.iter().any(|arg| arg == "--init"),
+                "{} did not enable Podman init",
+                component.container.name
+            );
+            assert!(
+                !args.iter().any(|arg| arg == "--pod"),
+                "{} must run as a standalone container",
+                component.container.name
+            );
         }
     }
 
@@ -1790,14 +1761,9 @@ mod tests {
         };
         let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
         let init_args = |component: &RuntimeComponent| {
-            let container = component.containers.first().expect("runtime container");
-            command_args(&build_container_run_command(
-                component.use_runsc,
-                component,
-                container,
-            ))
-            .iter()
-            .any(|arg| arg == "--init")
+            command_args(&build_container_run_command(component))
+                .iter()
+                .any(|arg| arg == "--init")
         };
 
         assert!(!init_args(&spec.agent));
@@ -1841,16 +1807,11 @@ mod tests {
         };
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
         let socket_mounts = |component: &RuntimeComponent| {
-            let container = component.containers.first().expect("runtime container");
-            command_args(&build_container_run_command(
-                component.use_runsc,
-                component,
-                container,
-            ))
-            .windows(2)
-            .filter(|pair| pair[0] == "--volume" && pair[1].contains("-socket-"))
-            .map(|pair| pair[1].clone())
-            .collect::<Vec<_>>()
+            command_args(&build_container_run_command(component))
+                .windows(2)
+                .filter(|pair| pair[0] == "--volume" && pair[1].contains("-socket-"))
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>()
         };
 
         assert_eq!(
@@ -1882,20 +1843,12 @@ mod tests {
             vec!["cladding-demo-socket-run-fs-sandbox:/run/cladding/run/fs-sandbox:U"]
         );
 
-        let agent_args = command_args(&build_container_run_command(
-            spec.agent.use_runsc,
-            &spec.agent,
-            &spec.agent.containers[0],
-        ));
+        let agent_args = command_args(&build_container_run_command(&spec.agent));
         assert!(!agent_args.iter().any(|arg| {
             arg.ends_with("/runtime/sockets/agent/inject:/run/cladding/agent/inject")
         }));
         for component in [&spec.proxy, nw, fs] {
-            let args = command_args(&build_container_run_command(
-                component.use_runsc,
-                component,
-                &component.containers[0],
-            ));
+            let args = command_args(&build_container_run_command(component));
             assert!(!args.iter().any(|arg| {
                 arg.ends_with("/runtime/sockets/agent/inject:/run/cladding/agent/inject")
             }));
@@ -2086,7 +2039,7 @@ mod tests {
     #[test]
     fn explicit_named_volumes_are_not_managed_cleanup_targets() {
         let mut spec = test_runtime_spec();
-        spec.agent.containers[0].mounts.push(RuntimeMount {
+        spec.agent.container.mounts.push(RuntimeMount {
             mount_path: "/home/user/.cache/kache".to_string(),
             read_only: false,
             source: RuntimeMountSource::NamedVolume {
@@ -2177,8 +2130,7 @@ mod tests {
         };
         let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
         let proxy = &spec.proxy;
-        let container = proxy.containers.first().expect("proxy container");
-        let args = command_args(&build_container_run_command(false, proxy, container));
+        let args = command_args(&build_container_run_command(proxy));
 
         assert!(args.windows(2).any(|pair| pair == ["--network", "default"]));
         assert!(args.windows(2).any(|pair| pair == ["--userns", "keep-id"]));
@@ -2192,23 +2144,6 @@ mod tests {
 
     #[test]
     fn build_container_run_command_uses_standalone_container_flags() {
-        let component = RuntimeComponent {
-            name: "demo-agent".to_string(),
-            use_runsc: false,
-            init: true,
-            labels: std::collections::BTreeMap::from([
-                ("app".to_string(), "agent".to_string()),
-                ("cladding".to_string(), "demo".to_string()),
-                (
-                    "project_root".to_string(),
-                    "/tmp/demo/.cladding".to_string(),
-                ),
-            ]),
-            network_name: "none".to_string(),
-            containers: Vec::new(),
-            user_namespace: RuntimeUserNamespace::KeepId,
-            security_opts: Vec::new(),
-        };
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),
             image: "demo:image".to_string(),
@@ -2220,8 +2155,25 @@ mod tests {
             stdin: false,
             tty: false,
         };
+        let component = RuntimeComponent {
+            name: "demo-agent".to_string(),
+            use_runsc: true,
+            init: true,
+            labels: std::collections::BTreeMap::from([
+                ("app".to_string(), "agent".to_string()),
+                ("cladding".to_string(), "demo".to_string()),
+                (
+                    "project_root".to_string(),
+                    "/tmp/demo/.cladding".to_string(),
+                ),
+            ]),
+            network_name: "none".to_string(),
+            container,
+            user_namespace: RuntimeUserNamespace::KeepId,
+            security_opts: Vec::new(),
+        };
 
-        let cmd = build_container_run_command(true, &component, &container);
+        let cmd = build_container_run_command(&component);
         assert_eq!(
             command_args(&cmd),
             vec![
@@ -2322,12 +2274,12 @@ mod tests {
             init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
-            containers: Vec::new(),
+            container,
             user_namespace: RuntimeUserNamespace::Default,
             security_opts: Vec::new(),
         };
 
-        let cmd = build_container_run_command(false, &component, &container);
+        let cmd = build_container_run_command(&component);
         assert_eq!(
             command_args(&cmd),
             vec![
@@ -2391,16 +2343,16 @@ mod tests {
 
         let component = RuntimeComponent {
             name: "demo-agent".to_string(),
-            use_runsc: false,
+            use_runsc: true,
             init: true,
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
-            containers: Vec::new(),
+            container,
             user_namespace: RuntimeUserNamespace::Default,
             security_opts: Vec::new(),
         };
 
-        let cmd = build_container_run_command(true, &component, &container);
+        let cmd = build_container_run_command(&component);
         assert_eq!(
             command_args(&cmd),
             vec![
@@ -2429,16 +2381,6 @@ mod tests {
 
     #[test]
     fn build_container_run_command_adds_network_for_standalone_containers() {
-        let component = RuntimeComponent {
-            name: "demo-agent".to_string(),
-            use_runsc: false,
-            init: true,
-            labels: std::collections::BTreeMap::new(),
-            network_name: "none".to_string(),
-            containers: Vec::new(),
-            user_namespace: RuntimeUserNamespace::KeepId,
-            security_opts: Vec::new(),
-        };
         let container = RuntimeContainer {
             name: "demo-agent-instance".to_string(),
             image: "demo:image".to_string(),
@@ -2450,8 +2392,17 @@ mod tests {
             stdin: false,
             tty: false,
         };
-
-        let cmd = build_container_run_command(true, &component, &container);
+        let component = RuntimeComponent {
+            name: "demo-agent".to_string(),
+            use_runsc: true,
+            init: true,
+            labels: std::collections::BTreeMap::new(),
+            network_name: "none".to_string(),
+            container,
+            user_namespace: RuntimeUserNamespace::KeepId,
+            security_opts: Vec::new(),
+        };
+        let cmd = build_container_run_command(&component);
         assert_eq!(
             command_args(&cmd),
             vec![
