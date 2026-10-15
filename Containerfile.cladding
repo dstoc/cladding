@@ -61,14 +61,22 @@ RUN set -eu; \
     codex --help >/dev/null; \
     codex --version; \
     pi --version; \
-    claude --version
+    claude --version; \
+    : > /tmp/npm-tools-bin-links; \
+    for tool in codex pi claude; do \
+        tool_target=$(readlink -f "$(command -v "$tool")"); \
+        printf '%s %s\n' "$tool" "$tool_target" >> /tmp/npm-tools-bin-links; \
+    done
 
 FROM base
 
 COPY --from=npm-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
-COPY --from=npm-tools /usr/local/bin/codex /usr/local/bin/codex
-COPY --from=npm-tools /usr/local/bin/pi /usr/local/bin/pi
-COPY --from=npm-tools /usr/local/bin/claude /usr/local/bin/claude
+COPY --from=npm-tools /tmp/npm-tools-bin-links /tmp/npm-tools-bin-links
+RUN set -eu; \
+    while read -r tool target; do \
+        ln -s "$target" "/usr/local/bin/$tool"; \
+    done < /tmp/npm-tools-bin-links; \
+    rm /tmp/npm-tools-bin-links
 
 USER $USERNAME
 WORKDIR /home/$USERNAME/workspace

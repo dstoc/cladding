@@ -37,6 +37,10 @@ podman run --rm --entrypoint /bin/sh "$image" -ec '
             echo "Expected npm tool is missing: $tool" >&2
             exit 1
         }
+        [ -L "$(command -v "$tool")" ] || {
+            echo "Expected npm tool command to resolve through its package link: $tool" >&2
+            exit 1
+        }
     done
 
     codex --help >/dev/null
