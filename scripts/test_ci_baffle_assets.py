@@ -159,8 +159,22 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('initialize_socket_volume "$socket_volume_agent"', validator)
         self.assertIn('initialize_socket_volume "$socket_volume_nw_sandbox"', validator)
         self.assertIn('--volume "$socket_volume_agent:/run/cladding/proxy:U"', validator)
+        self.assertIn(
+            'component_mount="$component_volume:/run/cladding/proxy:rw"', validator
+        )
+        self.assertIn(
+            'component_socket_path=/run/cladding/proxy/agent/proxy.sock', validator
+        )
+        self.assertIn(
+            'component_mount="$component_volume:/run/cladding/proxy:ro"', validator
+        )
+        self.assertIn(
+            "'test ! -e \"$1\"' socket-cleanup \"$component_socket_path\"",
+            validator,
+        )
+        self.assertIn('echo "Baffle socket is missing: $socket_path"', validator)
+        self.assertIn('--volume "$component_mount"', validator)
         self.assertNotIn('sockets-$name', validator)
-        self.assertNotIn(':/run/cladding/proxy:rw', validator)
 
     def test_topology_validator_checks_baffle_data_sockets_from_both_consumers(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
