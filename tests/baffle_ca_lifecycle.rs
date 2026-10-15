@@ -28,6 +28,18 @@ fn run_reuses_project_config_tools_credentials_and_persistent_ca() {
     fs::write(
         &podman,
         r#"#!/bin/sh
+case "$1:$2" in
+  info:*|image:exists)
+    if [ -n "${CLADDING_TEST_PODMAN_PREFLIGHT_DELAY:-}" ]; then
+      sleep "$CLADDING_TEST_PODMAN_PREFLIGHT_DELAY"
+    fi
+    ;;
+  rm:*|container:rm|volume:rm)
+    if [ -n "${CLADDING_TEST_PODMAN_REMOVE_DELAY:-}" ]; then
+      sleep "$CLADDING_TEST_PODMAN_REMOVE_DELAY"
+    fi
+    ;;
+esac
 if [ -n "${CLADDING_TEST_PODMAN_DELAY:-}" ]; then sleep "$CLADDING_TEST_PODMAN_DELAY"; fi
 printf '%s\n' "$*" >> "$CLADDING_PODMAN_LOG"
 case "$1:$2" in
@@ -632,7 +644,8 @@ exit 0
     run.env("CLADDING_TEST_HELPER_NOISE", "1")
         .env("CLADDING_TEST_USER_STDOUT", "user-output")
         .env("CLADDING_TEST_USER_STDERR", "user-error")
-        .env("CLADDING_TEST_PODMAN_DELAY", "0.01");
+        .env("CLADDING_TEST_PODMAN_DELAY", "0.01")
+        .env("CLADDING_TEST_PODMAN_PREFLIGHT_DELAY", "0.04");
     let verbose_run_output = run.output().unwrap();
     assert_success(verbose_run_output.clone());
     let verbose_stdout = String::from_utf8_lossy(&verbose_run_output.stdout);
@@ -700,6 +713,12 @@ exit 0
     assert!(
         elapsed >= 0.01,
         "fake Podman delay was not measured: {metrics_line}"
+    );
+    let preparation_elapsed = metric_duration(metrics_line, "prep");
+    let startup_elapsed = metric_duration(metrics_line, "startup");
+    assert!(
+        preparation_elapsed > startup_elapsed,
+        "delayed preflight work should be counted in prep, not startup: {metrics_line}"
     );
 
     let run_log = read_log(&podman_log);
@@ -1103,6 +1122,40 @@ exit 0
         "normal shutdown must not remove an explicitly named volume: {cleanup_log}"
     );
 
+    let mut failed_up = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    failed_up
+        .args(["--cladding-dir", project_root.to_str().unwrap(), "up", "-v"])
+        .env("CLADDING_TEST_FAIL_CA_INSTALL", "1")
+        .env("CLADDING_TEST_PODMAN_REMOVE_DELAY", "0.12");
+    let failed_up_output = failed_up.output().unwrap();
+    assert!(!failed_up_output.status.success());
+    let failed_up_stderr = String::from_utf8_lossy(&failed_up_output.stderr);
+    let failed_up_metrics = failed_up_stderr
+        .lines()
+        .find(|line| line.starts_with("runtime metrics: up "))
+        .expect("failed direct up prints runtime metrics");
+    let failed_up_startup = metric_duration(failed_up_metrics, "startup");
+    let failed_up_cleanup = metric_duration(failed_up_metrics, "cleanup");
+    assert!(
+        failed_up_cleanup >= 0.12,
+        "delayed failed-start cleanup was not measured: {failed_up_metrics}"
+    );
+    assert!(
+        failed_up_startup < failed_up_cleanup,
+        "failed-start cleanup must not be counted as startup: {failed_up_metrics}"
+    );
+    assert_eq!(
+        fs::read_to_string(&socket_volume_state).unwrap(),
+        "cladding-kache||||\n",
+        "failed direct up must remove its owned socket volumes and preserve external volumes"
+    );
+
     let foreign_socket_volume = "cladding-demo-socket-baffle-agent|foreign|/tmp/foreign/.cladding|inter-container-socket|cladding-demo-socket-baffle-agent\n";
     fs::write(&socket_volume_state, foreign_socket_volume).unwrap();
     fs::write(&podman_log, "").unwrap();
@@ -1243,6 +1296,17 @@ fn assert_success(output: Output) {
 
 fn read_log(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
+}
+
+fn metric_duration(metrics_line: &str, phase: &str) -> f64 {
+    metrics_line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(&format!("{phase}=")))
+        .expect("metrics line contains requested phase")
+        .strip_suffix('s')
+        .expect("phase duration ends in seconds")
+        .parse::<f64>()
+        .expect("phase duration is numeric")
 }
 
 fn is_detached_container_run(line: &str) -> bool {

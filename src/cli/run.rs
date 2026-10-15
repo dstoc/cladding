@@ -132,10 +132,7 @@ pub(super) fn cmd_run(
     }
 
     drop(preparation);
-    let (startup_result, runtime_create_attempted) = {
-        let _startup = cladding::runtime_metrics::phase("runtime startup");
-        lifecycle::cmd_up_ephemeral(&context, verbose)
-    };
+    let (startup_result, runtime_create_attempted) = lifecycle::cmd_up_ephemeral(&context, verbose);
 
     if let Err(startup_error) = startup_result {
         let _cleanup = cladding::runtime_metrics::phase("cleanup");
