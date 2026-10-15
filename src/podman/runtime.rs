@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::runtime::{
     ManagedVolumeKind, RuntimeComponent, RuntimeMountSource, RuntimeSpec, RuntimeUserNamespace,
 };
+use crate::runtime_metrics;
 use anyhow::Context as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -69,7 +70,7 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) ->
 pub fn initialize_baffle_ca(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cmd = build_baffle_ca_init_command(spec);
     trace_command(&cmd, verbose);
-    let output = cmd.output().with_context(|| {
+    let output = runtime_metrics::output(&mut cmd).with_context(|| {
         format!(
             "failed to run Baffle CA initialization for project '{}'",
             spec.project_name
@@ -323,8 +324,7 @@ fn ensure_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool)
         } else {
             let mut cmd = build_socket_volume_create_command(&name, spec);
             trace_command(&cmd, verbose);
-            let output = cmd
-                .output()
+            let output = runtime_metrics::output(&mut cmd)
                 .with_context(|| format!("failed to create Cladding socket volume '{name}'"))?;
             if !output.status.success() {
                 if quiet_helpers {
@@ -373,8 +373,7 @@ fn remove_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool)
 
         let mut cmd = build_volume_rm_command(&name);
         trace_command(&cmd, verbose);
-        let output = cmd
-            .output()
+        let output = runtime_metrics::output(&mut cmd)
             .with_context(|| format!("failed to remove Cladding socket volume '{name}'"))?;
         if output.status.success() {
             if verbose {
@@ -561,8 +560,7 @@ fn create_managed_mount_volume(
 ) -> Result<()> {
     let mut cmd = build_managed_mount_volume_create_command(spec, name, tmpfs_size_bytes);
     trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
+    let output = runtime_metrics::output(&mut cmd)
         .with_context(|| format!("failed to create managed mount volume '{name}'"))?;
     if output.status.success() {
         if verbose {
@@ -617,8 +615,7 @@ fn remove_managed_mount_volume(
 
     let mut cmd = build_volume_rm_command(name);
     trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
+    let output = runtime_metrics::output(&mut cmd)
         .with_context(|| format!("failed to remove managed mount volume '{name}'"))?;
     if output.status.success() || remove_output_is_missing_volume(&output) {
         if verbose {
@@ -931,8 +928,7 @@ fn list_labeled_resource_names(
         },
     ]);
     trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
+    let output = runtime_metrics::output(&mut cmd)
         .with_context(|| format!("failed to list managed mount {kind}s"))?;
     if !output.status.success() {
         if quiet_helpers {
@@ -983,8 +979,7 @@ fn build_volume_rm_command(name: &str) -> Command {
 fn volume_rm(name: &str, context: &'static str, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cmd = build_volume_rm_command(name);
     trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
+    let output = runtime_metrics::output(&mut cmd)
         .with_context(|| format!("failed to remove {context} '{name}'"))?;
     if output.status.success() || remove_output_is_missing_volume(&output) {
         if verbose {
@@ -1050,8 +1045,7 @@ fn inspect_value(
     let mut cmd = Command::new("podman");
     cmd.args([kind, "inspect", "--format", format, name]);
     trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
+    let output = runtime_metrics::output(&mut cmd)
         .with_context(|| format!("failed to inspect {kind} {name}"))?;
     if quiet_helpers {
         ensure_success_output_with_diagnostics(&output, "podman inspect")?;
@@ -1071,8 +1065,7 @@ fn inspect_resource_state(
     trace_command(&exists_cmd, verbose);
     let exists_output = if quiet_helpers {
         Some(
-            exists_cmd
-                .output()
+            runtime_metrics::output(&mut exists_cmd)
                 .with_context(|| format!("failed to check whether {kind} exists: {name}"))?,
         )
     } else {
@@ -1080,8 +1073,7 @@ fn inspect_resource_state(
     };
     let exists = match &exists_output {
         Some(output) => output.status,
-        None => exists_cmd
-            .status()
+        None => runtime_metrics::status(&mut exists_cmd)
             .with_context(|| format!("failed to check whether {kind} exists: {name}"))?,
     };
 
@@ -1101,8 +1093,7 @@ fn inspect_resource_state(
 
     let mut inspect_cmd = build_resource_inspect_command(kind, name);
     trace_command(&inspect_cmd, verbose);
-    let output = inspect_cmd
-        .output()
+    let output = runtime_metrics::output(&mut inspect_cmd)
         .with_context(|| format!("failed to inspect {kind}: {name}"))?;
     if !output.status.success() {
         if quiet_helpers {
@@ -1195,8 +1186,7 @@ fn build_baffle_ca_install_command(container_name: &str) -> Command {
 pub fn container_rm(container_name: &str, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cmd = build_container_rm_command(container_name);
     trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
+    let output = runtime_metrics::output(&mut cmd)
         .with_context(|| format!("failed to run podman rm for {container_name}"))?;
 
     if output.status.success() {

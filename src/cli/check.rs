@@ -7,6 +7,7 @@ use cladding::fs_utils::is_executable;
 use cladding::identity::invoking_uid;
 use cladding::podman::runsc_available;
 use cladding::runtime::RuntimeSpec;
+use cladding::runtime_metrics;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -308,7 +309,7 @@ pub(super) fn check_required_images(
         cmd.args(["image", "exists", image]);
         cladding::podman::trace_command(&cmd, verbose);
         let output = if quiet_helpers {
-            Some(cmd.output())
+            Some(runtime_metrics::output(&mut cmd))
         } else {
             None
         };
@@ -318,7 +319,7 @@ pub(super) fn check_required_images(
                 eprintln!("error: failed to check image {image}: {err}");
                 return Err(Error::message("failed to check image"));
             }
-            None => match cmd.status() {
+            None => match runtime_metrics::status(&mut cmd) {
                 Ok(status) => Some((status, None)),
                 Err(err) => {
                     eprintln!("error: failed to check image {image}: {err}");

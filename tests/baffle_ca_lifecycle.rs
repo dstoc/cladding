@@ -28,6 +28,19 @@ fn run_reuses_project_config_tools_credentials_and_persistent_ca() {
     fs::write(
         &podman,
         r#"#!/bin/sh
+case "$1:$2" in
+  info:*|image:exists)
+    if [ -n "${CLADDING_TEST_PODMAN_PREFLIGHT_DELAY:-}" ]; then
+      sleep "$CLADDING_TEST_PODMAN_PREFLIGHT_DELAY"
+    fi
+    ;;
+  rm:*|container:rm|volume:rm)
+    if [ -n "${CLADDING_TEST_PODMAN_REMOVE_DELAY:-}" ]; then
+      sleep "$CLADDING_TEST_PODMAN_REMOVE_DELAY"
+    fi
+    ;;
+esac
+if [ -n "${CLADDING_TEST_PODMAN_DELAY:-}" ]; then sleep "$CLADDING_TEST_PODMAN_DELAY"; fi
 printf '%s\n' "$*" >> "$CLADDING_PODMAN_LOG"
 case "$1:$2" in
   run:*|exec:--user|rm:-f)
@@ -558,6 +571,7 @@ exit 0
     let run_without_ca_result = run_without_ca.output().unwrap();
     assert!(!run_without_ca_result.status.success());
     let run_without_ca_stderr = String::from_utf8_lossy(&run_without_ca_result.stderr);
+    assert!(!run_without_ca_stderr.contains("runtime metrics:"));
     assert!(
         run_without_ca_stderr.contains("Baffle CA is not initialized")
             || run_without_ca_stderr.contains("incomplete Baffle CA"),
@@ -629,7 +643,9 @@ exit 0
     ]);
     run.env("CLADDING_TEST_HELPER_NOISE", "1")
         .env("CLADDING_TEST_USER_STDOUT", "user-output")
-        .env("CLADDING_TEST_USER_STDERR", "user-error");
+        .env("CLADDING_TEST_USER_STDERR", "user-error")
+        .env("CLADDING_TEST_PODMAN_DELAY", "0.01")
+        .env("CLADDING_TEST_PODMAN_PREFLIGHT_DELAY", "0.04");
     let verbose_run_output = run.output().unwrap();
     assert_success(verbose_run_output.clone());
     let verbose_stdout = String::from_utf8_lossy(&verbose_run_output.stdout);
@@ -641,6 +657,69 @@ exit 0
     assert!(verbose_stderr.contains("helper stderr:"));
     assert!(verbose_stderr.contains("cleaning up one-off instance:"));
     assert!(verbose_stderr.contains("user-error"));
+    let metrics_line = verbose_stderr
+        .lines()
+        .find(|line| line.starts_with("runtime metrics: run "))
+        .expect("verbose run prints runtime metrics");
+    for phase in ["prep=", "startup=", "command=", "cleanup="] {
+        assert!(
+            metrics_line.contains(phase),
+            "missing {phase}: {metrics_line}"
+        );
+    }
+    for operation in [
+        "discovery/inspect=",
+        "create/start/exec=",
+        "removal=",
+        "helpers/other=",
+    ] {
+        assert!(
+            metrics_line.contains(operation),
+            "missing {operation}: {metrics_line}"
+        );
+    }
+    for operation in ["discovery/inspect=", "removal="] {
+        let count = metrics_line
+            .split(operation)
+            .nth(1)
+            .unwrap()
+            .split('/')
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert!(
+            count > 0,
+            "expected measured {operation} calls: {metrics_line}"
+        );
+    }
+    let create_exec = metrics_line
+        .split("create/start/exec=")
+        .nth(1)
+        .expect("summary includes Podman create/start/exec operations");
+    let (operation_count, operation_elapsed) = create_exec.split_once('/').unwrap();
+    assert!(
+        operation_count.parse::<usize>().unwrap() > 0,
+        "{metrics_line}"
+    );
+    let elapsed = operation_elapsed
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .strip_suffix('s')
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
+    assert!(
+        elapsed >= 0.01,
+        "fake Podman delay was not measured: {metrics_line}"
+    );
+    let preparation_elapsed = metric_duration(metrics_line, "prep");
+    let startup_elapsed = metric_duration(metrics_line, "startup");
+    assert!(
+        preparation_elapsed > startup_elapsed,
+        "delayed preflight work should be counted in prep, not startup: {metrics_line}"
+    );
 
     let run_log = read_log(&podman_log);
     assert!(
@@ -800,6 +879,32 @@ exit 0
         "failed startup must remove its owned socket volumes"
     );
 
+    let mut verbose_startup_failure = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    verbose_startup_failure.args([
+        "--cladding-dir",
+        project_root.to_str().unwrap(),
+        "run",
+        "-v",
+        "true",
+    ]);
+    verbose_startup_failure.env("CLADDING_TEST_FAIL_CA_INSTALL", "1");
+    let verbose_startup_failure_output = verbose_startup_failure.output().unwrap();
+    assert!(!verbose_startup_failure_output.status.success());
+    let verbose_startup_failure_stderr =
+        String::from_utf8_lossy(&verbose_startup_failure_output.stderr);
+    let startup_metrics = verbose_startup_failure_stderr
+        .lines()
+        .find(|line| line.starts_with("runtime metrics: run "))
+        .expect("failed startup prints runtime metrics");
+    assert!(startup_metrics.contains("startup="));
+    assert!(startup_metrics.contains("cleanup="));
+
     if podman_state.exists() {
         fs::remove_file(&podman_state).unwrap();
     }
@@ -833,6 +938,42 @@ exit 0
     assert!(cleanup_failure_stderr.contains("podman rm failed (exit code 43)"));
     assert!(cleanup_failure_stderr.contains("stdout:\nhelper stdout: rm -f"));
     assert!(cleanup_failure_stderr.contains("stderr:\nhelper stderr: rm -f"));
+    assert!(!cleanup_failure_stderr.contains("runtime metrics:"));
+
+    if podman_state.exists() {
+        fs::remove_file(&podman_state).unwrap();
+    }
+    let mut verbose_cleanup_failure = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    verbose_cleanup_failure.args([
+        "--cladding-dir",
+        project_root.to_str().unwrap(),
+        "run",
+        "-v",
+        "sh",
+        "-c",
+        "printf user-output",
+    ]);
+    verbose_cleanup_failure
+        .env("CLADDING_TEST_USER_STDOUT", "user-output")
+        .env("CLADDING_TEST_FAIL_CLEANUP", "1");
+    let verbose_cleanup_failure_output = verbose_cleanup_failure.output().unwrap();
+    assert!(!verbose_cleanup_failure_output.status.success());
+    let verbose_cleanup_failure_stderr =
+        String::from_utf8_lossy(&verbose_cleanup_failure_output.stderr);
+    let cleanup_metrics = verbose_cleanup_failure_stderr
+        .lines()
+        .find(|line| line.starts_with("runtime metrics: run "))
+        .expect("failed cleanup prints runtime metrics");
+    assert!(cleanup_metrics.contains("cleanup="));
+    if podman_state.exists() {
+        fs::remove_file(&podman_state).unwrap();
+    }
     assert_eq!(
         fs::read(project_root.join("credentials/baffle/ca.crt")).unwrap(),
         certificate
@@ -850,8 +991,12 @@ exit 0
         &certificate_source,
         &private_key_source,
     );
-    up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
-    assert_success(up.output().unwrap());
+    up.args(["--cladding-dir", project_root.to_str().unwrap(), "up", "-v"]);
+    let up_output = up.output().unwrap();
+    assert_success(up_output.clone());
+    let up_stderr = String::from_utf8_lossy(&up_output.stderr);
+    assert!(up_stderr.contains("runtime metrics: up total="));
+    assert!(up_stderr.contains("startup="));
     assert!(
         !project_root.join("home/workspace").exists(),
         "cladding up must not create the former default workspace mount point"
@@ -945,7 +1090,11 @@ exit 0
         "down",
         "-v",
     ]);
-    assert_success(down.output().unwrap());
+    let down_output = down.output().unwrap();
+    assert_success(down_output.clone());
+    let down_stderr = String::from_utf8_lossy(&down_output.stderr);
+    assert!(down_stderr.contains("runtime metrics: down total="));
+    assert!(down_stderr.contains("teardown="));
     let cleanup_log = read_log(&podman_log);
     assert!(
         !cleanup_log.lines().any(|line| line.starts_with("pod ")),
@@ -971,6 +1120,40 @@ exit 0
             .lines()
             .any(|line| line == "volume rm cladding-kache"),
         "normal shutdown must not remove an explicitly named volume: {cleanup_log}"
+    );
+
+    let mut failed_up = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    failed_up
+        .args(["--cladding-dir", project_root.to_str().unwrap(), "up", "-v"])
+        .env("CLADDING_TEST_FAIL_CA_INSTALL", "1")
+        .env("CLADDING_TEST_PODMAN_REMOVE_DELAY", "0.12");
+    let failed_up_output = failed_up.output().unwrap();
+    assert!(!failed_up_output.status.success());
+    let failed_up_stderr = String::from_utf8_lossy(&failed_up_output.stderr);
+    let failed_up_metrics = failed_up_stderr
+        .lines()
+        .find(|line| line.starts_with("runtime metrics: up "))
+        .expect("failed direct up prints runtime metrics");
+    let failed_up_startup = metric_duration(failed_up_metrics, "startup");
+    let failed_up_cleanup = metric_duration(failed_up_metrics, "cleanup");
+    assert!(
+        failed_up_cleanup >= 0.12,
+        "delayed failed-start cleanup was not measured: {failed_up_metrics}"
+    );
+    assert!(
+        failed_up_startup < failed_up_cleanup,
+        "failed-start cleanup must not be counted as startup: {failed_up_metrics}"
+    );
+    assert_eq!(
+        fs::read_to_string(&socket_volume_state).unwrap(),
+        "cladding-kache||||\n",
+        "failed direct up must remove its owned socket volumes and preserve external volumes"
     );
 
     let foreign_socket_volume = "cladding-demo-socket-baffle-agent|foreign|/tmp/foreign/.cladding|inter-container-socket|cladding-demo-socket-baffle-agent\n";
@@ -1113,6 +1296,17 @@ fn assert_success(output: Output) {
 
 fn read_log(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
+}
+
+fn metric_duration(metrics_line: &str, phase: &str) -> f64 {
+    metrics_line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(&format!("{phase}=")))
+        .expect("metrics line contains requested phase")
+        .strip_suffix('s')
+        .expect("phase duration ends in seconds")
+        .parse::<f64>()
+        .expect("phase duration is numeric")
 }
 
 fn is_detached_container_run(line: &str) -> bool {

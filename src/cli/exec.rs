@@ -8,6 +8,7 @@ use cladding::podman::podman_required;
 use cladding::runtime::{
     ManagedVolumeKind, RuntimeComponent, RuntimeMount, RuntimeMountSource, RuntimeSpec,
 };
+use cladding::runtime_metrics;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::env;
@@ -230,6 +231,7 @@ fn run_podman_exec(
         cmd.arg(arg);
     }
 
+    let command_started = std::time::Instant::now();
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to run podman exec for {command_name}"))?;
@@ -242,21 +244,23 @@ fn run_podman_exec(
             Signals::new([SIGINT, SIGTERM]).with_context(|| "failed to install signal handlers")?;
         signal_handle = Some(signals.handle());
         let container_name = container_name.to_string();
+        let metrics_context = runtime_metrics::capture_context();
         signal_thread = Some(thread::spawn(move || {
             if let Some(signal) = signals.forever().next()
                 && !kill_pattern.is_empty()
             {
                 let signal = format!("-{signal}");
-                let _ = Command::new("podman")
-                    .args([
-                        "exec",
-                        &container_name,
-                        "pkill",
-                        &signal,
-                        "-f",
-                        &kill_pattern,
-                    ])
-                    .status();
+                let mut command = Command::new("podman");
+                command.args([
+                    "exec",
+                    &container_name,
+                    "pkill",
+                    &signal,
+                    "-f",
+                    &kill_pattern,
+                ]);
+                let _ =
+                    runtime_metrics::status_with_context(&mut command, metrics_context.as_ref());
             }
         }));
     }
@@ -264,6 +268,7 @@ fn run_podman_exec(
     let status = child
         .wait()
         .with_context(|| format!("failed to run podman exec for {command_name}"))?;
+    runtime_metrics::record_command_elapsed(&cmd, command_started.elapsed());
 
     if let Some(handle) = signal_handle {
         handle.close();

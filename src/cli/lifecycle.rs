@@ -322,6 +322,10 @@ fn cmd_up_inner(
     quiet_helpers: bool,
     runtime_create_attempted: &mut bool,
 ) -> Result<()> {
+    let direct_startup =
+        (!fail_if_already_running).then(|| cladding::runtime_metrics::phase("runtime startup"));
+    let preparation =
+        fail_if_already_running.then(|| cladding::runtime_metrics::phase("preparation/preflight"));
     let config = context.load_config()?;
     let status = project_runtime_status(context, &config, verbose, quiet_helpers)?;
     let spec = context.runtime_spec(&config)?;
@@ -361,12 +365,19 @@ fn cmd_up_inner(
         fs::create_dir_all(context.runtime_root.join("runtime/empty-mask"))
             .with_context(|| "failed to create runtime empty-mask directory")?;
     }
+    drop(preparation);
+    let startup =
+        fail_if_already_running.then(|| cladding::runtime_metrics::phase("runtime startup"));
     *runtime_create_attempted = true;
-    if let Err(startup_error) = runtime_create(&spec, verbose, quiet_helpers) {
-        if !fail_if_already_running
-            && let Err(cleanup_error) = runtime_cleanup_owned(&spec, verbose, quiet_helpers)
-        {
-            eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
+    let startup_result = runtime_create(&spec, verbose, quiet_helpers);
+    drop(startup);
+    drop(direct_startup);
+    if let Err(startup_error) = startup_result {
+        if !fail_if_already_running {
+            let _cleanup = cladding::runtime_metrics::phase("cleanup");
+            if let Err(cleanup_error) = runtime_cleanup_owned(&spec, verbose, quiet_helpers) {
+                eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
+            }
         }
         return Err(startup_error);
     }
@@ -393,6 +404,7 @@ fn prepare_baffle_runtime(project_root: &std::path::Path) -> Result<()> {
 }
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
+    let _phase = cladding::runtime_metrics::phase("runtime teardown");
     let config = context.load_config()?;
     let spec = context.runtime_spec(&config)?;
     runtime_cleanup_normal(&spec, verbose, false)
