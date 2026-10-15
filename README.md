@@ -276,6 +276,12 @@ default.
 
 Each component can use an existing image or build one from a Containerfile. The component `image` value is the build output tag when `build` is also set. If `image` is omitted, `cladding build` generates a local tag such as `localhost/cladding-myproject-agent:latest`.
 
+Cladding reads `cladding.json` as a strict JSON configuration. The top-level
+`name` and `agent` fields are required. Fixed configuration objects reject
+unknown keys, and fields that accept an optional value must be omitted instead
+of set to `null`. JSON syntax errors report their line and column. Type and
+missing-field errors report the field path and the expected or missing value.
+
 Execution components can set `security_opts` to an array of Podman security options. Cladding passes each value as a separate `--security-opt` argument when it starts that component. For example, this passes `unmask=/proc/*` as one literal argument to the agent container:
 
 ```json
@@ -339,6 +345,8 @@ The default session files are `.cladding/config/proxy/sessions/agent.toml` and
 
 ```json
 {
+  "name": "myproject",
+  "agent": {},
   "proxy": {
     "agent": {
       "session_config": "agent-restricted.toml"
@@ -395,6 +403,7 @@ Example:
 
 ```json
 {
+  "name": "myproject",
   "agent": {
     "image": "cladding-agent:local"
   },
@@ -402,6 +411,7 @@ Example:
     "enabled": true,
     "image": "cladding-sandbox:local"
   },
+  "fs_sandbox": { "enabled": true },
   "mounts": [
     { "mount": "/workspace/.cache/npm", "volume": "npm-cache" },
     { "mount": "/opt/data", "hostPath": "../data", "type": "readonly" },
@@ -418,6 +428,8 @@ Default mounts for the agent and `nw-sandbox` (as if expressed via `mounts`):
 
 ```json
 {
+  "name": "myproject",
+  "agent": {},
   "mounts": [
     { "mount": "/opt/config", "hostPath": "config", "type": "readonly" },
     { "mount": "/opt/tools", "hostPath": "tools", "type": "readonly" },

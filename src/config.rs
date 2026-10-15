@@ -1,6 +1,7 @@
 mod init;
 mod load;
 mod mounts;
+mod schema;
 mod session;
 mod types;
 

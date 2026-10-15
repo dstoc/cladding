@@ -1,4 +1,8 @@
 use super::mounts::parse_mounts_v2;
+use super::schema::{
+    AgentDocument, CladdingConfigDocument, ComponentDocument, ImageBuildDocument, ProxyDocument,
+    SessionConfigDocument,
+};
 use super::types::{
     DEFAULT_AGENT_SESSION_CONFIG, DEFAULT_COMPONENT_IMAGE, DEFAULT_NW_SANDBOX_SESSION_CONFIG,
     DEFAULT_PROXY_IMAGE, ExecutionComponentConfig, ExecutionConfig, ExecutionProxyConfig,
@@ -6,7 +10,6 @@ use super::types::{
 };
 use crate::error::{Error, Result};
 use anyhow::Context as _;
-use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,315 +46,220 @@ pub fn load_cladding_config_v2_from_path(config_path: &Path) -> Result<Execution
 ///
 /// For stdin input, pass a synthetic path whose parent is the required base directory.
 pub fn load_cladding_config_v2_from_str(config_path: &Path, raw: &str) -> Result<ExecutionConfig> {
-    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
-        eprintln!("error: cladding.json must include string key: name");
-        Error::message("invalid cladding.json")
-    })?;
+    let mut deserializer = serde_json::Deserializer::from_str(raw);
+    let document = serde_path_to_error::deserialize::<_, CladdingConfigDocument>(&mut deserializer)
+        .map_err(|error| {
+            let path = error.path().to_string();
+            config_deserialization_error(config_path, Some(&path), error.into_inner())
+        })?;
+    deserializer
+        .end()
+        .map_err(|error| config_deserialization_error(config_path, None, error))?;
 
-    validate_top_level_keys(&parsed, config_path)?;
+    let name = document.name;
+    if !is_lowercase_alnum(&name) {
+        return Err(invalid_config(
+            config_path,
+            "config key 'name' must be lowercase alphanumeric ([a-z0-9]+)",
+        ));
+    }
 
-    let name = get_config_string(&parsed, "name", config_path)?;
-    let use_runsc = get_config_bool(&parsed, "use_runsc", config_path)?;
-    let agent = parse_component_object(&parsed, "agent", true, &name, config_path)?;
-    let nw_sandbox = parse_component_object(&parsed, "nw_sandbox", false, &name, config_path)?;
-    let fs_sandbox = parse_component_object(&parsed, "fs_sandbox", false, &name, config_path)?;
-    let proxy = parse_proxy_object(&parsed, &name, config_path)?;
+    let agent = parse_agent(document.agent, &name, config_path)?;
+    let nw_sandbox = document
+        .nw_sandbox
+        .map(|component| parse_component(component, "nw_sandbox", &name, config_path))
+        .transpose()?;
+    let fs_sandbox = document
+        .fs_sandbox
+        .map(|component| parse_component(component, "fs_sandbox", &name, config_path))
+        .transpose()?;
+    let proxy = parse_proxy(document.proxy, &name, config_path)?;
     let execution_config = ExecutionConfig {
-        name: name.clone(),
-        use_runsc,
-        agent: agent.expect("required component already validated"),
+        name,
+        use_runsc: document.use_runsc,
+        agent,
         nw_sandbox,
         fs_sandbox,
         proxy,
         mounts: Vec::new(),
     };
-    let mut used_mount_targets = HashSet::new();
     let config_dir = resolve_path(
         Path::new("."),
         config_path.parent().unwrap_or(Path::new(".")),
     );
     let mounts = parse_mounts_v2(
         &config_dir,
-        &parsed,
+        &document.mounts,
         config_path,
         &execution_config,
-        &mut used_mount_targets,
     )?;
-    let execution_config = ExecutionConfig {
+    Ok(ExecutionConfig {
         mounts,
         ..execution_config
+    })
+}
+
+fn config_deserialization_error(
+    config_path: &Path,
+    path: Option<&str>,
+    error: serde_json::Error,
+) -> Error {
+    let category = match error.classify() {
+        serde_json::error::Category::Syntax => "JSON syntax error",
+        serde_json::error::Category::Data => "configuration type or field error",
+        serde_json::error::Category::Eof => "unexpected end of JSON",
+        serde_json::error::Category::Io => "configuration read error",
     };
-
-    if !is_lowercase_alnum(&name) {
-        eprintln!("error: config key 'name' must be lowercase alphanumeric ([a-z0-9]+)");
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid name"));
-    }
-
-    Ok(execution_config)
-}
-
-fn validate_top_level_keys(parsed: &serde_json::Value, config_path: &Path) -> Result<()> {
-    let Some(object) = parsed.as_object() else {
-        eprintln!("error: cladding.json must be a JSON object");
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid cladding.json"));
+    let path = path.filter(|path| !path.is_empty());
+    let detail = match path {
+        Some(path) => format!("{path}: {error}"),
+        None => error.to_string(),
     };
-
-    let allowed = [
-        "name",
-        "use_runsc",
-        "agent",
-        "nw_sandbox",
-        "fs_sandbox",
-        "proxy",
-        "mounts",
-    ];
-    let mut invalid = false;
-    for key in object.keys() {
-        if allowed.contains(&key.as_str()) {
-            continue;
-        }
-        eprintln!("error: cladding.json unknown key: {key}");
-        eprintln!(
-            "hint: valid top-level keys are name, use_runsc, agent, nw_sandbox, fs_sandbox, proxy, and mounts"
-        );
-        eprintln!("file: {}", config_path.display());
-        invalid = true;
-    }
-
-    if invalid {
-        return Err(Error::message("invalid cladding.json"));
-    }
-
-    Ok(())
+    eprintln!("error: cladding.json {category}: {detail}");
+    eprintln!("file: {}", config_path.display());
+    Error::message(format!("invalid cladding.json ({category}): {detail}"))
 }
 
-fn get_config_string(parsed: &serde_json::Value, key: &str, config_path: &Path) -> Result<String> {
-    parsed
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
-        .ok_or_else(|| {
-            eprintln!("error: cladding.json must include string key: {key}");
-            eprintln!("file: {}", config_path.display());
-            Error::message("invalid cladding.json")
-        })
+fn invalid_config(config_path: &Path, message: &str) -> Error {
+    eprintln!("error: cladding.json {message}");
+    eprintln!("file: {}", config_path.display());
+    Error::message("invalid cladding.json")
 }
 
-fn get_config_bool(parsed: &serde_json::Value, key: &str, config_path: &Path) -> Result<bool> {
-    match parsed.get(key) {
-        Some(value) => value.as_bool().ok_or_else(|| {
-            eprintln!("error: cladding.json invalid field '{key}' (expected boolean)");
-            eprintln!("file: {}", config_path.display());
-            Error::message("invalid cladding.json")
-        }),
-        None => Ok(false),
-    }
-}
-
-fn parse_component_object(
-    parsed: &serde_json::Value,
-    key: &str,
-    required: bool,
+fn parse_agent(
+    document: AgentDocument,
     project_name: &str,
     config_path: &Path,
-) -> Result<Option<ExecutionComponentConfig>> {
-    let Some(raw) = parsed.get(key) else {
-        if required {
-            eprintln!("error: cladding.json must include object key: {key}");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        }
-        return Ok(None);
-    };
-
-    let object = raw.as_object().ok_or_else(|| {
-        eprintln!("error: cladding.json field '{key}' must be an object");
-        eprintln!("file: {}", config_path.display());
-        Error::message("invalid cladding.json")
-    })?;
-
-    validate_component_keys(object, key, config_path)?;
-
-    let build = parse_build_config(object.get("build"), key, config_path)?;
-    let init = match object.get("init") {
-        Some(value) => value.as_bool().ok_or_else(|| {
-            eprintln!("error: cladding.json invalid field '{key}.init' (expected boolean)");
-            eprintln!("file: {}", config_path.display());
-            Error::message("invalid cladding.json")
-        })?,
-        None => true,
-    };
-    let security_opts = parse_security_opts(object.get("security_opts"), key, config_path)?;
-    let image = match object.get("image") {
-        Some(value) => value
-            .as_str()
-            .ok_or_else(|| {
-                eprintln!("error: cladding.json invalid field '{key}.image' (expected string)");
-                eprintln!("file: {}", config_path.display());
-                Error::message("invalid cladding.json")
-            })?
-            .to_string(),
-        None if build.is_some() => generated_image_tag(project_name, key),
-        None => DEFAULT_COMPONENT_IMAGE.to_string(),
-    };
-
-    if image.is_empty() {
-        eprintln!("error: cladding.json invalid field '{key}.image' (must not be empty)");
+) -> Result<ExecutionComponentConfig> {
+    if document.enabled.is_some() {
+        eprintln!("error: cladding.json invalid field 'agent.enabled' (agent cannot be disabled)");
+        eprintln!("hint: remove 'agent.enabled'");
         eprintln!("file: {}", config_path.display());
         return Err(Error::message("invalid cladding.json"));
     }
 
-    if key == "agent" {
-        if object.contains_key("enabled") {
-            eprintln!(
-                "error: cladding.json invalid field 'agent.enabled' (agent cannot be disabled)"
-            );
-            eprintln!("hint: remove 'agent.enabled'");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        }
-
-        return Ok(Some(ExecutionComponentConfig {
-            enabled: true,
-            init,
-            image: image.to_string(),
-            build,
-            security_opts,
-        }));
-    }
-
-    let enabled = match object.get("enabled") {
-        Some(value) => value.as_bool().ok_or_else(|| {
-            eprintln!("error: cladding.json invalid field '{key}.enabled' (expected boolean)");
-            eprintln!("file: {}", config_path.display());
-            Error::message("invalid cladding.json")
-        })?,
-        None => true,
-    };
-
-    Ok(Some(ExecutionComponentConfig {
-        enabled,
-        init,
+    let build = parse_build_config(document.build, "agent", config_path)?;
+    let image = component_image(
+        document.image,
+        build.is_some(),
+        project_name,
+        "agent",
+        config_path,
+    )?;
+    let security_opts = parse_security_opts(
+        document.security_opts.unwrap_or_default(),
+        "agent",
+        config_path,
+    )?;
+    Ok(ExecutionComponentConfig {
+        enabled: true,
+        init: document.init.unwrap_or(true),
         image,
         build,
         security_opts,
-    }))
+    })
+}
+
+fn parse_component(
+    document: ComponentDocument,
+    key: &str,
+    project_name: &str,
+    config_path: &Path,
+) -> Result<ExecutionComponentConfig> {
+    let build = parse_build_config(document.build, key, config_path)?;
+    let image = component_image(
+        document.image,
+        build.is_some(),
+        project_name,
+        key,
+        config_path,
+    )?;
+    let security_opts =
+        parse_security_opts(document.security_opts.unwrap_or_default(), key, config_path)?;
+    Ok(ExecutionComponentConfig {
+        enabled: document.enabled.unwrap_or(true),
+        init: document.init.unwrap_or(true),
+        image,
+        build,
+        security_opts,
+    })
+}
+
+fn component_image(
+    image: Option<String>,
+    has_build: bool,
+    project_name: &str,
+    component_key: &str,
+    config_path: &Path,
+) -> Result<String> {
+    let image = image.unwrap_or_else(|| {
+        if has_build {
+            generated_image_tag(project_name, component_key)
+        } else {
+            DEFAULT_COMPONENT_IMAGE.to_string()
+        }
+    });
+    if image.is_empty() {
+        return Err(invalid_config(
+            config_path,
+            &format!("invalid field '{component_key}.image' (must not be empty)"),
+        ));
+    }
+    Ok(image)
 }
 
 fn parse_security_opts(
-    raw: Option<&serde_json::Value>,
+    options: Vec<String>,
     component_key: &str,
     config_path: &Path,
 ) -> Result<Vec<String>> {
-    let Some(raw) = raw else {
-        return Ok(Vec::new());
-    };
     let field = format!("{component_key}.security_opts");
-    let Some(values) = raw.as_array() else {
-        eprintln!("error: cladding.json field '{field}' must be an array of non-empty strings");
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid cladding.json"));
-    };
-
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let option = value
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    eprintln!(
-                        "error: cladding.json field '{field}[{index}]' must be a non-empty string"
-                    );
-                    eprintln!("file: {}", config_path.display());
-                    Error::message("invalid cladding.json")
-                })?;
-            Ok(option.to_string())
-        })
-        .collect()
-}
-
-fn validate_component_keys(
-    object: &serde_json::Map<String, serde_json::Value>,
-    component_key: &str,
-    config_path: &Path,
-) -> Result<()> {
-    let allowed = ["image", "enabled", "init", "build", "security_opts"];
-
-    let mut invalid = false;
-    for key in object.keys() {
-        if allowed.contains(&key.as_str()) {
-            continue;
+    for (index, option) in options.iter().enumerate() {
+        if option.is_empty() {
+            return Err(invalid_config(
+                config_path,
+                &format!("field '{field}[{index}]' must be a non-empty string"),
+            ));
         }
-        eprintln!("error: cladding.json unknown key: {component_key}.{key}");
-        eprintln!("file: {}", config_path.display());
-        invalid = true;
     }
-
-    if invalid {
-        return Err(Error::message("invalid cladding.json"));
-    }
-
-    Ok(())
+    Ok(options)
 }
 
-fn parse_proxy_object(
-    parsed: &serde_json::Value,
+fn parse_proxy(
+    document: Option<ProxyDocument>,
     project_name: &str,
     config_path: &Path,
 ) -> Result<Option<ExecutionProxyConfig>> {
-    let Some(raw) = parsed.get("proxy") else {
+    let Some(document) = document else {
         return Ok(None);
     };
     let key = "proxy";
-    let object = raw.as_object().ok_or_else(|| {
-        eprintln!("error: cladding.json field 'proxy' must be an object");
-        eprintln!("file: {}", config_path.display());
-        Error::message("invalid cladding.json")
-    })?;
-
-    let allowed = ["image", "build", "agent", "nw_sandbox"];
-    for field in object.keys() {
-        if !allowed.contains(&field.as_str()) {
-            eprintln!("error: cladding.json unknown key: proxy.{field}");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        }
-    }
-
-    let build = parse_build_config(object.get("build"), key, config_path)?;
+    let build = parse_build_config(document.build, key, config_path)?;
     let agent_session_config = parse_proxy_session_config(
-        object.get("agent"),
+        document.agent,
         "proxy.agent",
         DEFAULT_AGENT_SESSION_CONFIG,
         config_path,
     )?;
     let nw_sandbox_session_config = parse_proxy_session_config(
-        object.get("nw_sandbox"),
+        document.nw_sandbox,
         "proxy.nw_sandbox",
         DEFAULT_NW_SANDBOX_SESSION_CONFIG,
         config_path,
     )?;
-    let image = if let Some(value) = object.get("image") {
-        let Some(image) = value.as_str() else {
-            eprintln!("error: cladding.json invalid field 'proxy.image' (expected string)");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        };
-        if image.is_empty() {
-            eprintln!("error: cladding.json invalid field 'proxy.image' (must not be empty)");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
+    let image = document.image.unwrap_or_else(|| {
+        if build.is_some() {
+            generated_image_tag(project_name, key)
+        } else {
+            DEFAULT_PROXY_IMAGE.to_string()
         }
-        image.to_string()
-    } else if build.is_some() {
-        generated_image_tag(project_name, key)
-    } else {
-        DEFAULT_PROXY_IMAGE.to_string()
-    };
+    });
+    if image.is_empty() {
+        return Err(invalid_config(
+            config_path,
+            "invalid field 'proxy.image' (must not be empty)",
+        ));
+    }
 
     Ok(Some(ExecutionProxyConfig {
         image,
@@ -362,7 +270,7 @@ fn parse_proxy_object(
 }
 
 fn parse_proxy_session_config(
-    raw: Option<&serde_json::Value>,
+    raw: Option<SessionConfigDocument>,
     field: &str,
     default: &str,
     config_path: &Path,
@@ -370,37 +278,23 @@ fn parse_proxy_session_config(
     let Some(raw) = raw else {
         return Ok(default.to_string());
     };
-    let Some(object) = raw.as_object() else {
-        eprintln!("error: cladding.json field '{field}' must be an object");
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid cladding.json"));
-    };
-
-    for key in object.keys() {
-        if key != "session_config" {
-            eprintln!("error: cladding.json unknown key: {field}.{key}");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        }
-    }
-
-    let Some(value) = object.get("session_config") else {
+    let Some(value) = raw.session_config else {
         return Ok(default.to_string());
     };
-    let Some(value) = value.as_str().filter(|value| !value.is_empty()) else {
-        eprintln!(
-            "error: cladding.json field '{field}.session_config' must be a non-empty relative path"
-        );
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid cladding.json"));
-    };
+    if value.is_empty() {
+        return Err(invalid_config(
+            config_path,
+            &format!("field '{field}.session_config' must be a non-empty relative path"),
+        ));
+    }
 
-    validate_session_config_path(value).map_err(|reason| {
-        eprintln!("error: cladding.json field '{field}.session_config' {reason}");
-        eprintln!("file: {}", config_path.display());
-        Error::message("invalid cladding.json")
+    validate_session_config_path(&value).map_err(|reason| {
+        invalid_config(
+            config_path,
+            &format!("field '{field}.session_config' {reason}"),
+        )
     })?;
-    Ok(value.to_string())
+    Ok(value)
 }
 
 pub fn validate_session_config_path(value: &str) -> std::result::Result<(), &'static str> {
@@ -428,7 +322,7 @@ pub fn validate_session_config_path(value: &str) -> std::result::Result<(), &'st
 }
 
 fn parse_build_config(
-    raw: Option<&serde_json::Value>,
+    raw: Option<ImageBuildDocument>,
     component_key: &str,
     config_path: &Path,
 ) -> Result<Option<ImageBuildConfig>> {
@@ -436,74 +330,33 @@ fn parse_build_config(
         return Ok(None);
     };
     let field = format!("{component_key}.build");
-    let Some(object) = raw.as_object() else {
-        eprintln!("error: cladding.json field '{field}' must be an object");
-        eprintln!("file: {}", config_path.display());
-        return Err(Error::message("invalid cladding.json"));
-    };
-
-    for key in object.keys() {
-        if !["containerfile", "context", "args"].contains(&key.as_str()) {
-            eprintln!("error: cladding.json unknown key: {field}.{key}");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        }
+    if raw.containerfile.is_empty() {
+        return Err(invalid_config(
+            config_path,
+            &format!("field '{field}.containerfile' must be a non-empty string"),
+        ));
     }
-
-    let containerfile = object
-        .get("containerfile")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            eprintln!(
-                "error: cladding.json field '{field}.containerfile' must be a non-empty string"
-            );
-            eprintln!("file: {}", config_path.display());
-            Error::message("invalid cladding.json")
-        })?;
-    let context = match object.get("context") {
-        Some(value) => value
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                eprintln!(
-                    "error: cladding.json field '{field}.context' must be a non-empty string"
-                );
-                eprintln!("file: {}", config_path.display());
-                Error::message("invalid cladding.json")
-            })?,
-        None => ".",
-    };
-
-    let mut args = BTreeMap::new();
-    if let Some(value) = object.get("args") {
-        let Some(values) = value.as_object() else {
-            eprintln!("error: cladding.json field '{field}.args' must be an object of strings");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        };
-        for (name, value) in values {
-            let Some(value) = value.as_str() else {
-                eprintln!("error: cladding.json field '{field}.args.{name}' must be a string");
-                eprintln!("file: {}", config_path.display());
-                return Err(Error::message("invalid cladding.json"));
-            };
-            if name.is_empty() {
-                eprintln!(
-                    "error: cladding.json field '{field}.args.{name}' must not have an empty name"
-                );
-                eprintln!("file: {}", config_path.display());
-                return Err(Error::message("invalid cladding.json"));
-            }
-            args.insert(name.clone(), value.to_string());
+    let context = raw.context.as_deref().unwrap_or(".");
+    if context.is_empty() {
+        return Err(invalid_config(
+            config_path,
+            &format!("field '{field}.context' must be a non-empty string"),
+        ));
+    }
+    for name in raw.args.keys() {
+        if name.is_empty() {
+            return Err(invalid_config(
+                config_path,
+                &format!("field '{field}.args.{name}' must not have an empty name"),
+            ));
         }
     }
 
     let base = config_path.parent().unwrap_or(Path::new("."));
     Ok(Some(ImageBuildConfig {
-        containerfile: resolve_path(base, Path::new(containerfile)),
+        containerfile: resolve_path(base, Path::new(&raw.containerfile)),
         context: resolve_path(base, Path::new(context)),
-        args,
+        args: raw.args,
     }))
 }
 
@@ -973,6 +826,51 @@ mod tests {
         .unwrap();
 
         assert!(load_cladding_config_v2(&temp).is_err());
+    }
+
+    #[test]
+    fn load_cladding_config_reports_syntax_type_and_missing_field_errors() {
+        let path = Path::new("cladding.json");
+
+        let syntax_error = load_cladding_config_v2_from_str(path, r#"{"name":"demo","agent": }"#)
+            .unwrap_err()
+            .to_string();
+        assert!(syntax_error.contains("JSON syntax error"), "{syntax_error}");
+        assert!(
+            syntax_error.contains("line") && syntax_error.contains("column"),
+            "{syntax_error}"
+        );
+
+        let type_error =
+            load_cladding_config_v2_from_str(path, r#"{"name":"demo","agent":{"init":"false"}}"#)
+                .unwrap_err()
+                .to_string();
+        assert!(type_error.contains("agent.init"), "{type_error}");
+        assert!(type_error.contains("boolean"), "{type_error}");
+
+        let missing_error = load_cladding_config_v2_from_str(path, r#"{"agent":{}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing_error.contains("missing field `name`"),
+            "{missing_error}"
+        );
+    }
+
+    #[test]
+    fn load_cladding_config_rejects_null_for_optional_fields() {
+        let path = Path::new("cladding.json");
+        for raw in [
+            r#"{"name":"demo","agent":{},"nw_sandbox":null}"#,
+            r#"{"name":"demo","agent":{},"proxy":null}"#,
+            r#"{"name":"demo","agent":{"image":null}}"#,
+            r#"{"name":"demo","agent":{},"mounts":[{"mount":"/data","hostPath":null}]}"#,
+        ] {
+            assert!(
+                load_cladding_config_v2_from_str(path, raw).is_err(),
+                "accepted explicit null in {raw}"
+            );
+        }
     }
 
     #[test]
