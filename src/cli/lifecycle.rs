@@ -660,11 +660,6 @@ mod tests {
         assert_eq!(first_spec.runtime_root, first_runtime);
         assert_eq!(second_spec.runtime_root, second_runtime);
         assert_ne!(first_spec.agent.name, second_spec.agent.name);
-        assert_ne!(
-            first_spec.generated_runtime_socket_dirs(),
-            second_spec.generated_runtime_socket_dirs()
-        );
-
         for (spec, runtime_root) in [
             (&first_spec, &first_runtime),
             (&second_spec, &second_runtime),

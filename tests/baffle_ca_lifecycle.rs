@@ -205,7 +205,6 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
     home_dir=
     baffle_binary=
     runtime_script=
-    runtime_sockets=
     agent_session_config=agent.toml
     nw_sandbox_session_config=nw-sandbox.toml
     while [ "$#" -gt 0 ]; do
@@ -235,9 +234,6 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
             ;;
           *:/opt/scripts/proxy_startup.sh:ro)
             runtime_script=${1%:/opt/scripts/proxy_startup.sh:ro}
-            ;;
-          *:/run/cladding/proxy)
-            runtime_sockets=${1%:/run/cladding/proxy*}
             ;;
         esac
       elif [ "$1" = "--env" ]; then
@@ -277,9 +273,6 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
         printf '%s\n' 'RUNTIME_HAS_NO_PROJECT_COPIES' >> "$CLADDING_PODMAN_LOG"
       fi
     fi
-    if [ -n "$runtime_sockets" ]; then
-      printf 'RUNTIME_SOCKETS_SOURCE=%s\n' "$runtime_sockets" >> "$CLADDING_PODMAN_LOG"
-    fi
     if [ -n "$credentials_dir" ] && [ -n "$secret_source_dir" ] \
       && [ "$secret_source_dir" != "$credentials_dir/secrets" ]; then
       if [ -n "$(find "$credentials_dir/secrets" -mindepth 1 -print -quit)" ]; then
@@ -297,7 +290,6 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
   home_dir=
   baffle_binary=
   runtime_script=
-  runtime_sockets=
   agent_session_config=agent.toml
   nw_sandbox_session_config=nw-sandbox.toml
   one_shot=0
@@ -334,9 +326,6 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
         *:/opt/scripts/proxy_startup.sh:ro*)
           runtime_script=${1%:/opt/scripts/proxy_startup.sh:ro*}
           ;;
-        *:/run/cladding/proxy)
-          runtime_sockets=${1%:/run/cladding/proxy*}
-          ;;
       esac
     fi
     shift
@@ -365,9 +354,6 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
       && [ ! -e "$runtime_root/credentials" ] && [ ! -e "$runtime_root/home" ]; then
       printf '%s\n' 'RUNTIME_HAS_NO_PROJECT_COPIES' >> "$CLADDING_PODMAN_LOG"
     fi
-  fi
-  if [ -n "$runtime_sockets" ]; then
-    printf 'RUNTIME_SOCKETS_SOURCE=%s\n' "$runtime_sockets" >> "$CLADDING_PODMAN_LOG"
   fi
   if [ -n "$credentials_dir" ] && [ "$one_shot" = "1" ]; then
     cp "$CLADDING_TEST_CA_CERT" "$credentials_dir/ca.crt"
@@ -758,13 +744,9 @@ exit 0
         .find_map(|line| line.strip_prefix("RUNTIME_SCRIPT_SOURCE="))
         .expect("one-off proxy should mount its generated startup script");
     let runtime_root = Path::new(runtime_script).ancestors().nth(3).unwrap();
-    let runtime_sockets = run_log
-        .lines()
-        .find_map(|line| line.strip_prefix("RUNTIME_SOCKETS_SOURCE="))
-        .expect("one-off proxy should mount its runtime socket directory");
-    assert_eq!(
-        runtime_sockets,
-        runtime_root.join("runtime/sockets/proxy").to_str().unwrap()
+    assert!(
+        !run_log.contains("runtime/sockets/proxy"),
+        "one-off run should not create or mount a host proxy socket directory: {run_log}"
     );
     assert_eq!(
         runtime_root.parent().unwrap(),

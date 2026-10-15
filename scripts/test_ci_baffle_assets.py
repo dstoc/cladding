@@ -300,7 +300,18 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('run_root="$project_root/runtime/runs/$run_name"', validator)
         self.assertIn('"$run_root/runtime/scripts/proxy_startup.sh"', validator)
         self.assertIn('"$run_root/runtime/empty-mask"', validator)
-        self.assertIn('"$run_root/runtime/sockets/proxy"', validator)
+        self.assertIn('phase="verify the proxy uses managed Baffle socket volumes', validator)
+        self.assertIn(
+            'any(.Destination == "/run/cladding/proxy" and .Type == "bind")',
+            validator,
+        )
+        self.assertIn(
+            'any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy/agent")',
+            validator,
+        )
+        self.assertIn('[ -e "$run_root/runtime/sockets" ]', validator)
+        self.assertIn('test ! -e "$project_root/runtime/sockets"', validator)
+        self.assertIn('"$run_root/runtime/sockets" "$run_podman_log"', validator)
         self.assertIn(
             'for temp_run_root in "/tmp/$run_name" "/var/tmp/$run_name" "/dev/shm/$run_name"; do',
             validator,

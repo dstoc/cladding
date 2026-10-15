@@ -1,5 +1,3 @@
-use super::sockets::is_generated_runtime_mount_path;
-use super::sockets::{RUNTIME_PROXY_MOUNT_PATH, RUNTIME_PROXY_SOCKET_DIR};
 use super::types::{
     ManagedVolumeKind, RuntimeComponent, RuntimeCustomMount, RuntimeMount, RuntimeMountSource,
     RuntimeSpec,
@@ -26,12 +24,8 @@ impl RuntimeSpec {
     }
 }
 
-pub(super) fn build_proxy_mounts(
-    project_root: &Path,
-    runtime_root: &Path,
-    _custom_mounts: &[RuntimeCustomMount],
-) -> Vec<RuntimeMount> {
-    let mounts = vec![
+pub(super) fn build_proxy_mounts(project_root: &Path, runtime_root: &Path) -> Vec<RuntimeMount> {
+    vec![
         RuntimeMount {
             mount_path: "/opt/config".to_string(),
             read_only: true,
@@ -60,17 +54,7 @@ pub(super) fn build_proxy_mounts(
                 path: runtime_root.join("runtime/scripts/proxy_startup.sh"),
             },
         },
-        RuntimeMount {
-            mount_path: RUNTIME_PROXY_MOUNT_PATH.to_string(),
-            read_only: false,
-            source: RuntimeMountSource::HostPath {
-                path: runtime_root
-                    .join("runtime/sockets")
-                    .join(RUNTIME_PROXY_SOCKET_DIR),
-            },
-        },
-    ];
-    mounts
+    ]
 }
 
 pub(super) fn build_agent_mounts(project_root: &Path) -> Vec<RuntimeMount> {
@@ -377,6 +361,21 @@ fn collect_required_host_paths(component: &RuntimeComponent, paths: &mut BTreeSe
     }
 }
 
+fn is_generated_runtime_mount_path(path: &Path) -> bool {
+    let mut saw_runtime = false;
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component {
+            if saw_runtime && name == "scripts" {
+                return true;
+            }
+            saw_runtime = name == "runtime";
+        } else {
+            saw_runtime = false;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,16 +421,30 @@ mod tests {
         let config = execution_config(
             true,
             false,
-            vec![ResolvedMountConfig {
-                mount_path: "/workspace".to_string(),
-                host_path: Some(PathBuf::from("/tmp/workspace")),
-                volume: None,
-                mount_type: MountType::Bind,
-                tmpfs_size_bytes: None,
-                read_only: true,
-                targets: vec![MountTarget::Agent],
-                ignore: false,
-            }],
+            vec![
+                ResolvedMountConfig {
+                    mount_path: "/workspace".to_string(),
+                    host_path: Some(PathBuf::from("/tmp/workspace")),
+                    volume: None,
+                    mount_type: MountType::Bind,
+                    tmpfs_size_bytes: None,
+                    read_only: true,
+                    targets: vec![MountTarget::Agent],
+                    ignore: false,
+                },
+                ResolvedMountConfig {
+                    mount_path: "/runtime-socket-data".to_string(),
+                    host_path: Some(PathBuf::from(
+                        "/tmp/project/.cladding/runtime/sockets/custom",
+                    )),
+                    volume: None,
+                    mount_type: MountType::Bind,
+                    tmpfs_size_bytes: None,
+                    read_only: true,
+                    targets: vec![MountTarget::Agent],
+                    ignore: false,
+                },
+            ],
             false,
         );
         let spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
@@ -448,6 +461,9 @@ mod tests {
         assert!(required.contains(&PathBuf::from("/tmp/project/.cladding/home")));
         assert!(!required.contains(&PathBuf::from("/tmp/project/.cladding/runtime/empty-mask")));
         assert!(required.contains(&PathBuf::from("/tmp/workspace")));
+        assert!(required.contains(&PathBuf::from(
+            "/tmp/project/.cladding/runtime/sockets/custom"
+        )));
     }
 
     #[test]

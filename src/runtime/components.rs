@@ -46,8 +46,7 @@ impl RuntimeSpec {
             build_custom_mounts(&project_root, &runtime_root, &config.name, &config.mounts);
         let names = RuntimeNames::from_config(config);
 
-        let proxy =
-            build_proxy_component(&project_root, &runtime_root, config, &names, &custom_mounts);
+        let proxy = build_proxy_component(&project_root, &runtime_root, config, &names);
         let agent = build_agent_component(&project_root, config, &names, &custom_mounts);
         let nw_sandbox = names.nw_sandbox_name.as_ref().map(|component_name| {
             build_nw_sandbox_component(&project_root, config, component_name, &custom_mounts)
@@ -81,9 +80,8 @@ fn build_proxy_component(
     runtime_root: &Path,
     config: &ExecutionConfig,
     names: &RuntimeNames,
-    custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimeComponent {
-    let mut mounts = build_proxy_mounts(project_root, runtime_root, custom_mounts);
+    let mut mounts = build_proxy_mounts(project_root, runtime_root);
     mounts.push(build_socket_volume_mount(
         &config.name,
         "baffle-agent",
@@ -613,7 +611,7 @@ mod tests {
         assert!(mount_paths(proxy).contains("/opt/credentials/baffle"));
         assert!(mount_paths(proxy).contains("/opt/tools/bin/baffle"));
         assert!(mount_paths(proxy).contains("/opt/scripts/proxy_startup.sh"));
-        assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert!(!mount_paths(proxy).contains("/run/cladding/proxy"));
         assert!(!mount_paths(proxy).contains("/run/baffle"));
         let baffle_binary = proxy
             .mounts
@@ -621,17 +619,6 @@ mod tests {
             .find(|mount| mount.mount_path == "/opt/tools/bin/baffle")
             .expect("Baffle executable mount");
         assert!(baffle_binary.read_only);
-        let proxy_sockets = proxy
-            .mounts
-            .iter()
-            .find(|mount| mount.mount_path == "/run/cladding/proxy")
-            .expect("proxy socket mount");
-        assert!(!proxy_sockets.read_only);
-        assert!(matches!(
-            &proxy_sockets.source,
-            super::super::types::RuntimeMountSource::HostPath { path }
-                if path == &PathBuf::from("/tmp/project/.cladding/runtime/sockets/proxy")
-        ));
         let agent = container(&spec.agent, "demo-agent-instance");
         assert!(!mount_paths(agent).contains("/home/user/workspace"));
         assert_eq!(agent.workdir.as_deref(), Some("/home/user"));
@@ -923,16 +910,10 @@ mod tests {
             env_value(proxy, "CLADDING_NW_SANDBOX_ENABLED"),
             Some("false")
         );
-        assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert!(!mount_paths(proxy).contains("/run/cladding/proxy"));
         assert!(mount_paths(agent).contains("/run/cladding/proxy/agent"));
         assert!(!mount_paths(agent).contains("/run/cladding/proxy"));
         assert!(spec.nw_sandbox.is_none());
-        assert!(
-            !spec
-                .generated_runtime_socket_dirs()
-                .iter()
-                .any(|path| path.ends_with("proxy/nw-sandbox"))
-        );
     }
 
     #[test]
@@ -957,10 +938,8 @@ mod tests {
                 .iter()
                 .all(|container| container.name != "demo-proxy-bridge-instance")
         );
-        assert_eq!(
-            host_mount_path(proxy, "/run/cladding/proxy"),
-            Some(Path::new("/tmp/project/.cladding/runtime/sockets/proxy"))
-        );
+        assert!(!mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert_eq!(host_mount_path(proxy, "/run/cladding/proxy"), None);
         assert_socket_volume(
             proxy,
             "/run/cladding/proxy/agent",

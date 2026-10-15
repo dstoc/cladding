@@ -911,6 +911,9 @@ verify_runtime_path_metadata() {
   exit "$status"
 }
 
+verify_runtime_path_metadata \
+  "verify Baffle socket root directory" \
+  "$proxy" /run/cladding/proxy directory 700 true
 for component in agent nw-sandbox; do
   verify_runtime_path_metadata \
     "verify Baffle $component socket directory" \
@@ -987,8 +990,7 @@ if [ "$socket_topology_only" = true ]; then
   phase="verify managed socket volumes were removed"
   require_socket_volume_count 0
   phase="verify Baffle session socket paths were cleared"
-  test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
-  test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
+  test ! -e "$project_root/runtime/sockets"
   echo "Baffle managed socket channel topology passed ($runtime runtime)"
   exit 0
 fi
@@ -1171,8 +1173,7 @@ phase="stop restarted persistent runtime"
 phase="verify restart cleanup removed all managed socket volumes"
 require_socket_volume_count 0
 phase="verify restart cleanup cleared Baffle session socket paths"
-test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
-test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
+test ! -e "$project_root/runtime/sockets"
 
 phase="verify disabled network-sandbox lifecycle"
 jq '.nw_sandbox.enabled = false' \
@@ -1190,8 +1191,7 @@ if printf '%s\n' "$sessions" | grep -F 'nw-sandbox/proxy.sock' >/dev/null; then
   exit 1
 fi
 "$cladding_bin" --cladding-dir "$project_root" down
-test ! -S "$project_root/runtime/sockets/proxy/agent/proxy.sock"
-test ! -S "$project_root/runtime/sockets/proxy/nw-sandbox/proxy.sock"
+test ! -e "$project_root/runtime/sockets"
 
 phase="verify one-off shared project state and isolated runtime cleanup"
 mkdir -m 0700 "$temp_root/run-tmp"
@@ -1250,7 +1250,7 @@ if [ -z "$run_root" ]; then
 fi
 run_name=${run_root##*/}
 test -d "$run_root/runtime/empty-mask"
-test -d "$run_root/runtime/sockets/proxy"
+test ! -e "$run_root/runtime/sockets"
 test "$(stat_mode "$project_root/runtime/runs")" = 700
 test "$(stat_mode "$run_root")" = 700
 test "$(stat_mode "$run_root/runtime/secrets")" = 700
@@ -1312,7 +1312,6 @@ for persistent_secret_name in test-token-old test-token-new; do
   fi
 done
 assert_mount "$run_proxy" "$run_root/runtime/scripts/proxy_startup.sh" /opt/scripts/proxy_startup.sh
-assert_mount "$run_proxy" "$run_root/runtime/sockets/proxy" /run/cladding/proxy
 assert_mount "$run_agent" "$project_root/config" /opt/config
 assert_mount "$run_agent" "$project_root/home" /home/user
 assert_mount "$run_agent" "$temp_root/workspace" /workspace
