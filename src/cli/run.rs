@@ -22,6 +22,7 @@ pub(super) fn cmd_run(
     config_uses_stdin: bool,
     verbose: bool,
 ) -> Result<()> {
+    let preparation = cladding::runtime_metrics::phase("preparation/preflight");
     if args.is_empty() {
         return Err(Error::message("missing run command"));
     }
@@ -77,6 +78,8 @@ pub(super) fn cmd_run(
     ) {
         Ok(mounts) => mounts,
         Err(setup_error) => {
+            drop(preparation);
+            let _cleanup = cladding::runtime_metrics::phase("cleanup");
             let root_cleanup = remove_private_runtime_root(&runtime_root).with_context(|| {
                 format!(
                     "failed to remove private runtime root {}",
@@ -105,6 +108,8 @@ pub(super) fn cmd_run(
     };
 
     if let Err(setup_error) = lifecycle::prepare_run_runtime_root(&runtime_root) {
+        drop(preparation);
+        let _cleanup = cladding::runtime_metrics::phase("cleanup");
         let root_cleanup = remove_private_runtime_root(&runtime_root).with_context(|| {
             format!(
                 "failed to remove private runtime root {}",
@@ -126,9 +131,14 @@ pub(super) fn cmd_run(
         )));
     }
 
-    let (startup_result, runtime_create_attempted) = lifecycle::cmd_up_ephemeral(&context, verbose);
+    drop(preparation);
+    let (startup_result, runtime_create_attempted) = {
+        let _startup = cladding::runtime_metrics::phase("runtime startup");
+        lifecycle::cmd_up_ephemeral(&context, verbose)
+    };
 
     if let Err(startup_error) = startup_result {
+        let _cleanup = cladding::runtime_metrics::phase("cleanup");
         let cleanup_error = if runtime_create_attempted {
             cleanup_ephemeral_runtime(&context, &runtime_root, &instance_name, verbose)
         } else {
@@ -149,11 +159,17 @@ pub(super) fn cmd_run(
         )));
     }
 
-    let command_result = match signals.received() {
-        Some(signal) => Err(signal_status_error(signal)),
-        None => exec::cmd_run_command(&context, env_vars, args, !config_uses_stdin),
+    let command_result = {
+        let _command = cladding::runtime_metrics::phase("user command");
+        match signals.received() {
+            Some(signal) => Err(signal_status_error(signal)),
+            None => exec::cmd_run_command(&context, env_vars, args, !config_uses_stdin),
+        }
     };
-    let cleanup_error = cleanup_ephemeral_runtime(&context, &runtime_root, &instance_name, verbose);
+    let cleanup_error = {
+        let _cleanup = cladding::runtime_metrics::phase("cleanup");
+        cleanup_ephemeral_runtime(&context, &runtime_root, &instance_name, verbose)
+    };
     let signal = signals.finish();
 
     finish_run(

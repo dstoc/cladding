@@ -293,6 +293,7 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
 }
 
 pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
+    let _phase = cladding::runtime_metrics::phase("runtime startup");
     let mut runtime_create_attempted = false;
     cmd_up_inner(
         context,
@@ -363,10 +364,11 @@ fn cmd_up_inner(
     }
     *runtime_create_attempted = true;
     if let Err(startup_error) = runtime_create(&spec, verbose, quiet_helpers) {
-        if !fail_if_already_running
-            && let Err(cleanup_error) = runtime_cleanup_owned(&spec, verbose, quiet_helpers)
-        {
-            eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
+        if !fail_if_already_running {
+            let _cleanup = cladding::runtime_metrics::phase("cleanup");
+            if let Err(cleanup_error) = runtime_cleanup_owned(&spec, verbose, quiet_helpers) {
+                eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
+            }
         }
         return Err(startup_error);
     }
@@ -393,6 +395,7 @@ fn prepare_baffle_runtime(project_root: &std::path::Path) -> Result<()> {
 }
 
 pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
+    let _phase = cladding::runtime_metrics::phase("runtime teardown");
     let config = context.load_config()?;
     let spec = context.runtime_spec(&config)?;
     runtime_cleanup_normal(&spec, verbose, false)

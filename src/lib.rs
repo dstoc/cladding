@@ -12,3 +12,4 @@ pub mod fs_utils;
 pub mod identity;
 pub mod podman;
 pub mod runtime;
+pub mod runtime_metrics;

@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::runtime_metrics;
 use anyhow::Context as _;
 use std::ffi::OsStr;
 use std::io::Write as _;
@@ -109,15 +110,13 @@ pub fn run_helper_command(
 ) -> Result<()> {
     trace_command(cmd, verbose);
     if !capture_success {
-        let status = cmd
-            .status()
-            .with_context(|| format!("failed to run {context}"))?;
+        let status =
+            runtime_metrics::status(cmd).with_context(|| format!("failed to run {context}"))?;
         return ensure_success(status, context);
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to run {context}"))?;
+    let output =
+        runtime_metrics::output(cmd).with_context(|| format!("failed to run {context}"))?;
     ensure_success_output_with_diagnostics(&output, context)
 }
 

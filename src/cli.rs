@@ -28,6 +28,12 @@ const CONTAINER_HOME_DIR: &str = "/home/user";
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let command = cli.command.unwrap();
+    let _metrics = match &command {
+        CommandSpec::Up { verbose: true } => Some(cladding::runtime_metrics::start("up")),
+        CommandSpec::Down { verbose: true } => Some(cladding::runtime_metrics::start("down")),
+        CommandSpec::Run { verbose: true, .. } => Some(cladding::runtime_metrics::start("run")),
+        _ => None,
+    };
 
     let cwd = std::env::current_dir().with_context(|| "failed to determine current directory")?;
     if cli.config.is_some() && !command.uses_config() {

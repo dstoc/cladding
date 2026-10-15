@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::fs_utils::is_executable;
+use crate::runtime_metrics;
 use anyhow::Context as _;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -31,7 +32,7 @@ pub fn runsc_available(verbose: bool, quiet_helpers: bool) -> Result<bool> {
     let mut cmd = Command::new("podman");
     cmd.args(["info", "--format", "{{json .Host.OCIRuntimes}}"]);
     trace_command(&cmd, verbose);
-    let output = cmd.output().with_context(|| "failed to run podman info")?;
+    let output = runtime_metrics::output(&mut cmd).with_context(|| "failed to run podman info")?;
 
     if !output.status.success() {
         if quiet_helpers {
@@ -109,9 +110,9 @@ pub fn list_running_projects(verbose: bool, quiet_helpers: bool) -> Result<Vec<R
 }
 
 pub fn podman_container_exists(container_name: &str) -> Result<bool> {
-    let status = Command::new("podman")
-        .args(["container", "exists", container_name])
-        .status()
+    let mut cmd = Command::new("podman");
+    cmd.args(["container", "exists", container_name]);
+    let status = runtime_metrics::status(&mut cmd)
         .with_context(|| "failed to run podman container exists")?;
 
     match status.code() {
@@ -146,9 +147,8 @@ fn list_running_container_items(
         "json",
     ]);
     trace_command(&cmd, verbose);
-    let output = cmd
-        .output()
-        .with_context(|| "failed to run podman container ps")?;
+    let output =
+        runtime_metrics::output(&mut cmd).with_context(|| "failed to run podman container ps")?;
 
     if !output.status.success() {
         if quiet_helpers {
