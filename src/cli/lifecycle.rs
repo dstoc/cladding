@@ -1,5 +1,5 @@
 use super::check::check_project_readiness;
-use super::context::{Context, project_runtime_status};
+use super::context::{Context, project_runtime_status_from_snapshot};
 use super::{DEFAULT_CLADDING_BUILD_IMAGE, DEFAULT_CLI_BUILD_IMAGE, DEFAULT_SANDBOX_BUILD_IMAGE};
 use anyhow::Context as _;
 use cladding::assets::{materialize_config, write_embedded_tools, write_proxy_startup_script};
@@ -10,9 +10,10 @@ use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::identity::invoking_uid;
 use cladding::podman::{
-    initialize_baffle_ca, list_running_projects, podman_build_image, podman_build_proxy_image,
-    podman_required, runtime_cleanup, runtime_cleanup_normal, runtime_cleanup_owned,
-    runtime_cleanup_owned_report, runtime_create, runtime_inventory,
+    initialize_baffle_ca, list_container_snapshot, list_running_projects, podman_build_image,
+    podman_build_proxy_image, podman_required, runtime_cleanup, runtime_cleanup_normal,
+    runtime_cleanup_owned, runtime_cleanup_owned_report, runtime_create,
+    runtime_inventory_from_snapshot,
 };
 #[cfg(test)]
 use cladding::runtime::RuntimeSpec;
@@ -327,9 +328,10 @@ fn cmd_up_inner(
     let preparation =
         fail_if_already_running.then(|| cladding::runtime_metrics::phase("preparation/preflight"));
     let config = context.load_config()?;
-    let status = project_runtime_status(context, &config, verbose, quiet_helpers)?;
+    let containers = list_container_snapshot(verbose, quiet_helpers)?;
+    let status = project_runtime_status_from_snapshot(context, &config, &containers)?;
     let spec = context.runtime_spec(&config)?;
-    let inventory = runtime_inventory(&spec, verbose, quiet_helpers)?;
+    let inventory = runtime_inventory_from_snapshot(&spec, &containers);
 
     if status.already_running && inventory.is_fully_running() {
         if fail_if_already_running {
