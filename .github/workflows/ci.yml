@@ -222,10 +222,13 @@ jobs:
             scripts/validate_baffle_runtime.sh \
             scripts/validate_runtime_topology.sh \
             scripts/validate_managed_mounts.sh \
+            scripts/validate_cladding_image.sh \
             scripts/podman-build-timer; do
             sh -n "$script"
           done
           python3 -m py_compile scripts/validate_expose.py scripts/validate_inject.py
+      - name: Build and verify the default Cladding tools image
+        run: scripts/validate_cladding_image.sh
       - name: Validate Baffle startup and socket access under rootless Podman
         run: scripts/validate_baffle_config.sh "$GITHUB_WORKSPACE/target/debug/cladding" "$RUNNER_TEMP/linux-tools/bin/baffle"
       - name: Validate shared runtime topology under rootless Podman

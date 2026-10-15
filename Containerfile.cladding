@@ -1,4 +1,4 @@
-FROM node:24.17-trixie-slim
+FROM node:24.17-trixie-slim AS base
 
 ENV NODE_USE_SYSTEM_CA=1
 
@@ -35,13 +35,48 @@ RUN userdel node && if getent group $GID; then \
        fi \
     && chsh -s /bin/zsh $USERNAME
 
-ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-codex.json
-ADD https://registry.npmjs.org/@earendil-works/pi-coding-agent /tmp/npm-pi.json
-ADD https://registry.npmjs.org/@anthropic-ai/claude-code /tmp/npm-claude.json
+FROM base AS npm-tools
 
-RUN npm install -g @openai/codex@latest \
-    && npm install -g @earendil-works/pi-coding-agent \
-    && npm install -g @anthropic-ai/claude-code
+ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-codex.json
+ADD https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest /tmp/npm-pi.json
+ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /tmp/npm-claude.json
+
+RUN set -eu; \
+    codex_version=$(node -p 'require("/tmp/npm-codex.json").version'); \
+    pi_version=$(node -p 'require("/tmp/npm-pi.json").version'); \
+    claude_version=$(node -p 'require("/tmp/npm-claude.json").version'); \
+    codex_platform=$(node -p '`${process.platform}-${process.arch}`'); \
+    codex_platform_package="@openai/codex-${codex_platform}"; \
+    npm install --global --include=optional --fetch-retries=5 \
+        "@openai/codex@${codex_version}" \
+        "@earendil-works/pi-coding-agent@${pi_version}" \
+        "@anthropic-ai/claude-code@${claude_version}"; \
+    npm install --prefix /tmp/codex-platform --no-save --package-lock=false \
+        --fetch-retries=5 --cache /tmp/codex-platform-cache \
+        "${codex_platform_package}@npm:@openai/codex@${codex_version}-${codex_platform}"; \
+    mkdir -p "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai"; \
+    cp -a "/tmp/codex-platform/node_modules/${codex_platform_package}" \
+        "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/"; \
+    rm -rf /tmp/codex-platform /tmp/codex-platform-cache; \
+    codex --help >/dev/null; \
+    codex --version; \
+    pi --version; \
+    claude --version; \
+    : > /tmp/npm-tools-bin-links; \
+    for tool in codex pi claude; do \
+        tool_target=$(readlink -f "$(command -v "$tool")"); \
+        printf '%s %s\n' "$tool" "$tool_target" >> /tmp/npm-tools-bin-links; \
+    done
+
+FROM base
+
+COPY --from=npm-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=npm-tools /tmp/npm-tools-bin-links /tmp/npm-tools-bin-links
+RUN set -eu; \
+    while read -r tool target; do \
+        ln -s "$target" "/usr/local/bin/$tool"; \
+    done < /tmp/npm-tools-bin-links; \
+    rm /tmp/npm-tools-bin-links
 
 USER $USERNAME
 WORKDIR /home/$USERNAME/workspace
