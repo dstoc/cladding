@@ -1856,14 +1856,14 @@ mod tests {
         assert_eq!(
             socket_mounts(&spec.proxy),
             vec![
-                "cladding-demo-socket-baffle-agent:/run/cladding/proxy/agent:U",
+                "cladding-demo-socket-baffle-agent:/run/cladding/proxy:U",
                 "cladding-demo-socket-baffle-nw-sandbox:/run/cladding/proxy/nw-sandbox:U",
             ]
         );
         assert_eq!(
             socket_mounts(&spec.agent),
             vec![
-                "cladding-demo-socket-baffle-agent:/run/cladding/proxy/agent",
+                "cladding-demo-socket-baffle-agent:/run/cladding/proxy",
                 "cladding-demo-socket-run-nw-sandbox:/run/cladding/run/nw-sandbox",
                 "cladding-demo-socket-run-fs-sandbox:/run/cladding/run/fs-sandbox",
             ]
@@ -2290,7 +2290,7 @@ mod tests {
                     source: RuntimeMountSource::EmptyDir,
                 },
                 RuntimeMount {
-                    mount_path: "/run/cladding/proxy/agent".to_string(),
+                    mount_path: "/run/cladding/proxy".to_string(),
                     read_only: false,
                     source: RuntimeMountSource::NamedVolume {
                         claim_name: "demo-socket-baffle-agent".to_string(),
@@ -2353,7 +2353,7 @@ mod tests {
                 "--mount",
                 "type=tmpfs,dst=/workspace/tmp,tmpfs-mode=1777,U=true,notmpcopyup,ro=true",
                 "--volume",
-                "demo-socket-baffle-agent:/run/cladding/proxy/agent",
+                "demo-socket-baffle-agent:/run/cladding/proxy",
                 "--volume",
                 "/tmp/demo/workspace:/home/user/workspace",
                 "--volume",

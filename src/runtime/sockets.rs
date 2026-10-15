@@ -1,6 +1,8 @@
 use super::types::{RuntimeMount, RuntimeMountSource};
 
-pub(super) const RUNTIME_PROXY_AGENT_MOUNT_PATH: &str = "/run/cladding/proxy/agent";
+// The agent volume provides Baffle's socket root. The agent container sees only
+// this volume, which contains its socket under the `agent/` subdirectory.
+pub(super) const RUNTIME_PROXY_AGENT_MOUNT_PATH: &str = "/run/cladding/proxy";
 pub(super) const RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/proxy/nw-sandbox";
 pub(super) const RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/nw-sandbox";
 pub(super) const RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH: &str = "/run/cladding/run/fs-sandbox";

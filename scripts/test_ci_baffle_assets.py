@@ -158,6 +158,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
         self.assertIn('initialize_socket_volume "$socket_volume_agent"', validator)
         self.assertIn('initialize_socket_volume "$socket_volume_nw_sandbox"', validator)
+        self.assertIn('--volume "$socket_volume_agent:/run/cladding/proxy:U"', validator)
+        self.assertNotIn('sockets-$name', validator)
+        self.assertNotIn(':/run/cladding/proxy:rw', validator)
 
     def test_topology_validator_checks_baffle_data_sockets_from_both_consumers(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
@@ -306,9 +309,12 @@ class BaffleCiAssetsTests(unittest.TestCase):
             validator,
         )
         self.assertIn(
-            'any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy/agent")',
+            'any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy")',
             validator,
         )
+        self.assertIn('agent_socket_volume=$(podman inspect "$proxy"', validator)
+        self.assertIn('podman inspect "$agent" | jq -e --arg socket_volume', validator)
+        self.assertIn('podman inspect "$nw_sandbox" | jq -e --arg socket_volume', validator)
         self.assertIn('[ -e "$run_root/runtime/sockets" ]', validator)
         self.assertIn('test ! -e "$project_root/runtime/sockets"', validator)
         self.assertIn('"$run_root/runtime/sockets" "$run_podman_log"', validator)

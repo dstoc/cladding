@@ -611,7 +611,7 @@ mod tests {
         assert!(mount_paths(proxy).contains("/opt/credentials/baffle"));
         assert!(mount_paths(proxy).contains("/opt/tools/bin/baffle"));
         assert!(mount_paths(proxy).contains("/opt/scripts/proxy_startup.sh"));
-        assert!(!mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
         assert!(!mount_paths(proxy).contains("/run/baffle"));
         let baffle_binary = proxy
             .mounts
@@ -678,7 +678,7 @@ mod tests {
         );
         assert_eq!(env_value(fs, "MCP_BIND_ADDR"), None);
 
-        assert!(mount_paths(agent).contains("/run/cladding/proxy/agent"));
+        assert!(mount_paths(agent).contains("/run/cladding/proxy"));
         assert!(!mount_paths(agent).contains("/run/cladding/agent/inject"));
         assert!(mount_paths(agent).contains("/run/cladding/run/nw-sandbox"));
         assert!(mount_paths(agent).contains("/run/cladding/run/fs-sandbox"));
@@ -910,9 +910,8 @@ mod tests {
             env_value(proxy, "CLADDING_NW_SANDBOX_ENABLED"),
             Some("false")
         );
-        assert!(!mount_paths(proxy).contains("/run/cladding/proxy"));
-        assert!(mount_paths(agent).contains("/run/cladding/proxy/agent"));
-        assert!(!mount_paths(agent).contains("/run/cladding/proxy"));
+        assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert!(mount_paths(agent).contains("/run/cladding/proxy"));
         assert!(spec.nw_sandbox.is_none());
     }
 
@@ -938,11 +937,11 @@ mod tests {
                 .iter()
                 .all(|container| container.name != "demo-proxy-bridge-instance")
         );
-        assert!(!mount_paths(proxy).contains("/run/cladding/proxy"));
+        assert!(mount_paths(proxy).contains("/run/cladding/proxy"));
         assert_eq!(host_mount_path(proxy, "/run/cladding/proxy"), None);
         assert_socket_volume(
             proxy,
-            "/run/cladding/proxy/agent",
+            "/run/cladding/proxy",
             "cladding-demo-socket-baffle-agent",
             true,
         );
@@ -954,7 +953,7 @@ mod tests {
         );
         assert_socket_volume(
             agent,
-            "/run/cladding/proxy/agent",
+            "/run/cladding/proxy",
             "cladding-demo-socket-baffle-agent",
             false,
         );
@@ -990,24 +989,14 @@ mod tests {
         );
 
         assert_eq!(host_mount_path(agent, "/run/cladding/agent/inject"), None);
-        for (component, container, own_socket, other_socket) in [
-            (
-                &spec.agent,
-                agent,
-                "/run/cladding/proxy/agent",
-                "/run/cladding/proxy/nw-sandbox",
-            ),
-            (
-                spec.nw_sandbox.as_ref().expect("network sandbox"),
-                nw,
-                "/run/cladding/proxy/nw-sandbox",
-                "/run/cladding/proxy/agent",
-            ),
+        assert!(mount_paths(agent).contains("/run/cladding/proxy"));
+        assert!(!mount_paths(agent).contains("/run/cladding/proxy/nw-sandbox"));
+        assert!(mount_paths(nw).contains("/run/cladding/proxy/nw-sandbox"));
+        assert!(!mount_paths(nw).contains("/run/cladding/proxy"));
+        for (component, container) in [
+            (&spec.agent, agent),
+            (spec.nw_sandbox.as_ref().expect("network sandbox"), nw),
         ] {
-            let paths = mount_paths(container);
-            assert!(paths.contains(own_socket));
-            assert!(!paths.contains(other_socket));
-            assert!(!paths.contains("/run/cladding/proxy"));
             assert_eq!(component.network_name, "none");
             assert_eq!(component.user_namespace, RuntimeUserNamespace::KeepId);
             assert!(

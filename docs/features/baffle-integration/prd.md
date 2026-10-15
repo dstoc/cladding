@@ -211,7 +211,13 @@ The certificate must exist before mounting it, but Cladding does **not** wait fo
 
 ## Data sockets, UID mapping and isolation
 
-Create one Cladding-managed volume for each enabled Baffle component. Mount each volume at `/run/cladding/proxy/<component>` in the proxy and only in the matching execution container. Keep Baffle's `0600` socket and `0700` directory permissions; do not relax them to make mounts work.
+Create one Cladding-managed volume for each enabled Baffle component. Mount
+the agent volume at `/run/cladding/proxy` in the proxy and agent containers.
+Baffle creates the agent socket under `/run/cladding/proxy/agent`. Mount the
+network-sandbox volume at `/run/cladding/proxy/nw-sandbox` in the proxy and
+network-sandbox containers. Each execution container receives only its own
+volume. Keep Baffle's `0600` socket and `0700` directory permissions; do not
+relax them to make mounts work.
 
 The proxy and execution containers use ordinary rootless `keep-id` mappings so they access mode-`0600` data sockets as their owning user. Do not assume that a custom UID or GID remap works on every Podman host. Cladding creates a component-specific Podman-managed volume for each enabled Baffle session, sets the volume root to the proxy's mapped ownership and mode `0700`, and mounts it only into the proxy and its matching execution container. Baffle binds each mode-`0600` session socket directly in that volume on both local rootless Podman and Podman Machine. The proxy keeps Baffle's control socket and runtime configuration in a private directory that execution containers do not mount or access. Custom proxy images must include `socat` for the startup socket-bind probe. At startup, Cladding sets Baffle's trusted operator UID to the proxy process UID in its user namespace.
 

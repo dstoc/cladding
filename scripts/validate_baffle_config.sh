@@ -384,14 +384,6 @@ run_proxy_startup() {
     socket_volume_nw_sandbox=
   fi
 
-  socket_dir="$temp_root/sockets-$name"
-  mkdir -p "$socket_dir/agent"
-  chmod 700 "$socket_dir" "$socket_dir/agent"
-  if [ "$sandbox_enabled" = true ]; then
-    mkdir -p "$socket_dir/nw-sandbox"
-    chmod 700 "$socket_dir/nw-sandbox"
-  fi
-
   start_output_file="$temp_root/proxy-start-$name.log"
   current_phase="create proxy container ($name)"
   set -- podman run --detach --init --name "$name" \
@@ -404,8 +396,7 @@ run_proxy_startup() {
     --volume "$project_root/runtime/scripts/proxy_startup.sh:/opt/scripts/proxy_startup.sh:ro" \
     --volume "$project_root/config:/opt/config:ro" \
     --volume "$project_root/credentials/baffle:/opt/credentials/baffle:ro" \
-    --volume "$socket_dir:/run/cladding/proxy:rw" \
-    --volume "$socket_volume_agent:/run/cladding/proxy/agent:U"
+    --volume "$socket_volume_agent:/run/cladding/proxy:U"
   if [ "$sandbox_enabled" = true ]; then
     set -- "$@" \
       --volume "$socket_volume_nw_sandbox:/run/cladding/proxy/nw-sandbox:U"

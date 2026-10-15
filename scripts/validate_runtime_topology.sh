@@ -239,8 +239,22 @@ if podman inspect "$proxy" | jq -e \
 fi
 podman inspect "$proxy" | jq -e \
   '.[0].Mounts as $mounts
-   | any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy/agent")
+   | any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy")
      and any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy/nw-sandbox")' \
+  >/dev/null
+agent_socket_volume=$(podman inspect "$proxy" | jq -r \
+  '.[0].Mounts[] | select(.Type == "volume" and .Destination == "/run/cladding/proxy") | .Name')
+if [ -z "$agent_socket_volume" ] || [ "$agent_socket_volume" = null ]; then
+  echo "proxy Baffle socket root is not backed by the agent socket volume" >&2
+  exit 1
+fi
+podman inspect "$agent" | jq -e --arg socket_volume "$agent_socket_volume" \
+  '.[0].Mounts | any(.Type == "volume" and .Name == $socket_volume and .Destination == "/run/cladding/proxy")' \
+  >/dev/null
+podman inspect "$nw_sandbox" | jq -e --arg socket_volume "$agent_socket_volume" \
+  '.[0].Mounts as $mounts
+   | any($mounts[]; .Type == "volume" and .Destination == "/run/cladding/proxy/nw-sandbox")
+     and all($mounts[]; .Name != $socket_volume)' \
   >/dev/null
 
 phase="wait for Baffle control UDS and session sockets"
