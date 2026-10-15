@@ -664,7 +664,7 @@ mod tests {
             (&first_spec, &first_runtime),
             (&second_spec, &second_runtime),
         ] {
-            let proxy = &spec.proxy.containers[0];
+            let proxy = &spec.proxy.container;
             assert!(proxy.mounts.iter().any(|mount| {
                 mount.mount_path == "/opt/config"
                     && matches!(
@@ -689,7 +689,7 @@ mod tests {
                             if path == &runtime_root.join("runtime/scripts/proxy_startup.sh")
                     )
             }));
-            assert!(spec.agent.containers[0].mounts.iter().any(|mount| {
+            assert!(spec.agent.container.mounts.iter().any(|mount| {
                 mount.mount_path == "/home/user"
                     && matches!(
                         &mount.source,

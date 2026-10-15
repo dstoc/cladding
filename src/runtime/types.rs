@@ -45,7 +45,7 @@ pub struct RuntimeComponent {
     pub security_opts: Vec<String>,
     pub labels: BTreeMap<String, String>,
     pub network_name: String,
-    pub containers: Vec<RuntimeContainer>,
+    pub container: RuntimeContainer,
     pub user_namespace: RuntimeUserNamespace,
 }
 

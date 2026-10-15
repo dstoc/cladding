@@ -166,16 +166,13 @@ fn run_podman_exec(
 
     let runtime_spec = context.runtime_spec(config)?;
     let component = runtime_component_for_target(&runtime_spec, mount_target)?;
-    let runtime_container = component
-        .containers
-        .iter()
-        .find(|container| container.name == container_name)
-        .ok_or_else(|| {
-            Error::message(format!(
-                "runtime target '{}' has no container named '{container_name}'",
-                mount_target_name(mount_target)
-            ))
-        })?;
+    let runtime_container = &component.container;
+    if runtime_container.name != container_name {
+        return Err(Error::message(format!(
+            "runtime target '{}' has no container named '{container_name}'",
+            mount_target_name(mount_target)
+        )));
+    }
     let container_workdir = resolve_target_workdir(
         &runtime_container.mounts,
         &config.mounts,
@@ -583,7 +580,7 @@ mod tests {
         fs::create_dir_all(&project_root).expect("create project root");
 
         let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
-        let container = &runtime.agent.containers[0];
+        let container = &runtime.agent.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
             &[],
@@ -606,7 +603,7 @@ mod tests {
         fs::create_dir_all(&project_root).expect("create project root");
 
         let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
-        let container = &runtime.agent.containers[0];
+        let container = &runtime.agent.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
             &[],
@@ -633,7 +630,7 @@ mod tests {
             .expect("link configured home source");
 
         let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
-        let container = &runtime.agent.containers[0];
+        let container = &runtime.agent.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
             &[],
@@ -671,7 +668,7 @@ mod tests {
             vec![ignored_workspace.clone()],
             false,
         );
-        let container = &runtime.agent.containers[0];
+        let container = &runtime.agent.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
             &[ignored_workspace],
@@ -696,7 +693,7 @@ mod tests {
         let runtime = runtime_spec(&project_root, &workspace, Vec::new(), true);
         let component = runtime_component_for_target(&runtime, MountTarget::FsSandbox)
             .expect("filesystem sandbox component");
-        let container = &component.containers[0];
+        let container = &component.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
             &[],
@@ -729,7 +726,7 @@ mod tests {
             ignore: false,
         };
         let runtime = runtime_spec(&project_root, &workspace, vec![custom_mount.clone()], false);
-        let container = &runtime.agent.containers[0];
+        let container = &runtime.agent.container;
 
         let resolved = resolve_target_workdir(
             &container.mounts,
@@ -767,7 +764,7 @@ mod tests {
             vec![explicit_mount.clone()],
             false,
         );
-        let container = &runtime.agent.containers[0];
+        let container = &runtime.agent.container;
 
         let resolved = resolve_target_workdir(
             &container.mounts,

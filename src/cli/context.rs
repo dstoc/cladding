@@ -109,9 +109,8 @@ impl Context {
             &self.runtime_root,
             config,
         );
-        if let Some(proxy) = spec.proxy.containers.first_mut()
-            && let Some(secret_mounts) = &self.run_secret_mounts
-        {
+        if let Some(secret_mounts) = &self.run_secret_mounts {
+            let proxy = &mut spec.proxy.container;
             proxy.mounts.push(RuntimeMount {
                 mount_path: "/opt/credentials/baffle/secrets".to_string(),
                 read_only: true,
@@ -433,7 +432,9 @@ mod tests {
                 }],
             });
         let spec = context.runtime_spec(&config).unwrap();
-        let secret_directory_mount = spec.proxy.containers[0]
+        let secret_directory_mount = spec
+            .proxy
+            .container
             .mounts
             .iter()
             .find(|mount| mount.mount_path == "/opt/credentials/baffle/secrets")
@@ -444,7 +445,9 @@ mod tests {
             &secret_directory_mount.source,
             RuntimeMountSource::HostPath { path } if path == &secret_directory
         ));
-        let project_secret_mount = spec.proxy.containers[0]
+        let project_secret_mount = spec
+            .proxy
+            .container
             .mounts
             .iter()
             .find(|mount| mount.mount_path == "/opt/credentials/baffle/secrets/other-token")
@@ -454,7 +457,7 @@ mod tests {
             &project_secret_mount.source,
             RuntimeMountSource::HostPath { path } if path == &project_secret
         ));
-        assert!(spec.proxy.containers[0].mounts.iter().any(|mount| {
+        assert!(spec.proxy.container.mounts.iter().any(|mount| {
             mount.mount_path == "/opt/credentials/baffle"
                 && matches!(
                     &mount.source,
@@ -467,17 +470,15 @@ mod tests {
             .chain(spec.nw_sandbox.iter())
             .chain(spec.fs_sandbox.iter())
         {
-            assert!(execution.containers.iter().all(|container| {
-                container.mounts.iter().all(|mount| {
-                    mount.mount_path != "/opt/credentials/baffle/secrets"
-                        && !mount
-                            .mount_path
-                            .starts_with("/opt/credentials/baffle/secrets/")
-                        && !matches!(
-                            &mount.source,
-                            RuntimeMountSource::HostPath { path } if path == &secret_directory
-                        )
-                })
+            assert!(execution.container.mounts.iter().all(|mount| {
+                mount.mount_path != "/opt/credentials/baffle/secrets"
+                    && !mount
+                        .mount_path
+                        .starts_with("/opt/credentials/baffle/secrets/")
+                    && !matches!(
+                        &mount.source,
+                        RuntimeMountSource::HostPath { path } if path == &secret_directory
+                    )
             }));
         }
 
