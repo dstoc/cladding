@@ -1,3 +1,4 @@
+use super::schema::{MountDocument, MountKind};
 use super::types::{ExecutionConfig, MountTarget, MountType, ResolvedMountConfig};
 use crate::error::{Error, Result};
 use std::collections::HashSet;
@@ -6,77 +7,34 @@ use std::path::{Path, PathBuf};
 
 pub(super) fn parse_mounts_v2(
     config_dir: &Path,
-    parsed: &serde_json::Value,
+    entries: &[MountDocument],
     config_path: &Path,
     execution_config: &ExecutionConfig,
-    used_mount_targets: &mut HashSet<(MountTarget, String)>,
 ) -> Result<Vec<ResolvedMountConfig>> {
-    let Some(raw) = parsed.get("mounts") else {
-        return Ok(Vec::new());
-    };
-
-    let array = raw.as_array().ok_or_else(|| {
-        eprintln!("error: cladding.json field 'mounts' must be an array");
-        eprintln!("file: {}", config_path.display());
-        Error::message("invalid cladding.json")
-    })?;
-
-    let mut mounts = Vec::with_capacity(array.len());
-    for (index, entry) in array.iter().enumerate() {
-        let Some(object) = entry.as_object() else {
-            eprintln!("error: cladding.json field 'mounts[{index}]' must be an object");
-            eprintln!("file: {}", config_path.display());
-            return Err(Error::message("invalid cladding.json"));
-        };
-        validate_mount_keys(object, index, config_path)?;
-
-        let mount_path = object
-            .get("mount")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                eprintln!(
-                    "error: cladding.json invalid field 'mounts[{index}].mount' (expected string)"
-                );
-                eprintln!("file: {}", config_path.display());
-                Error::message("invalid cladding.json")
-            })?;
+    let mut used_mount_targets = HashSet::new();
+    let mut mounts = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let mount_path = entry.mount.as_str();
         ensure_absolute_mount_path(config_path, &format!("mounts[{index}].mount"), mount_path)?;
         let normalized_mount_path = normalize_path(Path::new(mount_path));
 
-        let host_path = match object.get("hostPath") {
-            Some(value) => {
-                let raw = value.as_str().ok_or_else(|| {
-                    eprintln!("error: cladding.json invalid field 'mounts[{index}].hostPath' (expected string)");
-                    eprintln!("file: {}", config_path.display());
-                    Error::message("invalid cladding.json")
-                })?;
-                let candidate = PathBuf::from(raw);
-                Some(if candidate.is_absolute() {
-                    candidate
-                } else {
-                    config_dir.join(candidate)
-                })
+        let host_path = entry.host_path.as_ref().map(|raw| {
+            let candidate = PathBuf::from(raw);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                config_dir.join(candidate)
             }
-            None => None,
-        };
-
-        let volume = match object.get("volume") {
-            Some(value) => Some(
-                value
-                    .as_str()
-                    .ok_or_else(|| {
-                        eprintln!("error: cladding.json invalid field 'mounts[{index}].volume' (expected string)");
-                        eprintln!("file: {}", config_path.display());
-                        Error::message("invalid cladding.json")
-                    })?
-                    .to_string(),
-            ),
-            None => None,
-        };
-
-        let targets = parse_mount_targets(object, index, config_path, execution_config)?;
+        });
+        let volume = entry.volume.clone();
+        let targets = parse_mount_targets(
+            entry.targets.as_deref(),
+            index,
+            config_path,
+            execution_config,
+        )?;
         for target in &targets {
-            if !used_mount_targets.insert((*target, mount_path.to_string())) {
+            if !used_mount_targets.insert((*target, mount_path.to_owned())) {
                 eprintln!(
                     "error: cladding.json duplicate mount path '{mount_path}' for target '{}'",
                     target.as_str()
@@ -94,56 +52,27 @@ pub(super) fn parse_mounts_v2(
             return Err(Error::message("invalid cladding.json"));
         }
 
-        let configured_type = match object.get("type") {
-            Some(value) => {
-                let mount_type = value.as_str().ok_or_else(|| {
-                    eprintln!("error: cladding.json invalid field 'mounts[{index}].type' (expected string)");
-                    eprintln!("file: {}", config_path.display());
-                    Error::message("invalid cladding.json")
-                })?;
-                Some(match mount_type {
-                    "bind" => MountType::Bind,
-                    "readonly" => MountType::Readonly,
-                    "copy" => MountType::Copy,
-                    "tmpfs" => MountType::Tmpfs,
-                    _ => {
-                        eprintln!(
-                            "error: cladding.json invalid field 'mounts[{index}].type' (unknown type '{mount_type}')"
-                        );
-                        eprintln!("hint: valid mount types are bind, readonly, copy, and tmpfs");
-                        eprintln!("file: {}", config_path.display());
-                        return Err(Error::message("invalid cladding.json"));
-                    }
-                })
+        let configured_type = entry.kind.map(mount_type_from_kind);
+        let tmpfs_size_bytes = if let Some(size) = entry.size.as_deref() {
+            if configured_type != Some(MountType::Tmpfs) {
+                eprintln!(
+                    "error: cladding.json invalid field 'mounts[{index}].size' (size is only valid for type 'tmpfs')"
+                );
+                eprintln!("file: {}", config_path.display());
+                return Err(Error::message("invalid cladding.json"));
             }
-            None => None,
-        };
-
-        let tmpfs_size_bytes = match object.get("size") {
-            Some(value) => {
-                if configured_type != Some(MountType::Tmpfs) {
-                    eprintln!(
-                        "error: cladding.json invalid field 'mounts[{index}].size' (size is only valid for type 'tmpfs')"
-                    );
-                    eprintln!("file: {}", config_path.display());
-                    return Err(Error::message("invalid cladding.json"));
-                }
-                let size = value.as_str().ok_or_else(|| {
-                    eprintln!("error: cladding.json invalid field 'mounts[{index}].size' (expected a size string such as '1GiB')");
-                    eprintln!("file: {}", config_path.display());
-                    Error::message("invalid cladding.json")
-                })?;
-                Some(parse_tmpfs_size(size).ok_or_else(|| {
-                    eprintln!(
-                        "error: cladding.json invalid field 'mounts[{index}].size' (invalid size '{size}')"
-                    );
-                    eprintln!("hint: use a non-negative integer with optional B, K, M, G, T, KiB, MiB, GiB, or TiB units");
-                    eprintln!("file: {}", config_path.display());
-                    Error::message("invalid cladding.json")
-                })?)
-            }
-            None if configured_type == Some(MountType::Tmpfs) => Some(64 * 1024 * 1024),
-            None => None,
+            Some(parse_tmpfs_size(size).ok_or_else(|| {
+                eprintln!(
+                    "error: cladding.json invalid field 'mounts[{index}].size' (invalid size '{size}')"
+                );
+                eprintln!("hint: use a non-negative integer with optional B, K, M, G, T, KiB, MiB, GiB, or TiB units");
+                eprintln!("file: {}", config_path.display());
+                Error::message("invalid cladding.json")
+            })?)
+        } else if configured_type == Some(MountType::Tmpfs) {
+            Some(64 * 1024 * 1024)
+        } else {
+            None
         };
 
         let mount_type = configured_type.unwrap_or(MountType::Bind);
@@ -202,16 +131,7 @@ pub(super) fn parse_mounts_v2(
             return Err(Error::message("invalid cladding.json"));
         }
 
-        let ignore = match object.get("ignore") {
-            Some(value) => value.as_bool().ok_or_else(|| {
-                eprintln!(
-                    "error: cladding.json invalid field 'mounts[{index}].ignore' (expected boolean)"
-                );
-                eprintln!("file: {}", config_path.display());
-                Error::message("invalid cladding.json")
-            })?,
-            None => false,
-        };
+        let ignore = entry.ignore;
 
         if ignore && (host_path.is_some() || volume.is_some()) {
             eprintln!(
@@ -221,7 +141,7 @@ pub(super) fn parse_mounts_v2(
             return Err(Error::message("invalid cladding.json"));
         }
 
-        if ignore && (object.get("type").is_some() || object.get("size").is_some()) {
+        if ignore && (entry.kind.is_some() || entry.size.is_some()) {
             eprintln!(
                 "error: cladding.json invalid field 'mounts[{index}]' (type and size are not supported when ignore is true)"
             );
@@ -248,38 +168,23 @@ pub(super) fn parse_mounts_v2(
 }
 
 fn parse_mount_targets(
-    object: &serde_json::Map<String, serde_json::Value>,
+    raw_targets: Option<&[String]>,
     index: usize,
     config_path: &Path,
     execution_config: &ExecutionConfig,
 ) -> Result<Vec<MountTarget>> {
-    let Some(raw_targets) = object.get("targets") else {
+    let Some(raw_targets) = raw_targets else {
         return Ok(execution_config.default_mount_targets());
     };
-
-    let array = raw_targets.as_array().ok_or_else(|| {
-        eprintln!("error: cladding.json field 'mounts[{index}].targets' must be an array");
-        eprintln!("file: {}", config_path.display());
-        Error::message("invalid cladding.json")
-    })?;
-
-    if array.is_empty() {
+    if raw_targets.is_empty() {
         eprintln!("error: cladding.json field 'mounts[{index}].targets' must not be empty");
         eprintln!("file: {}", config_path.display());
         return Err(Error::message("invalid cladding.json"));
     }
 
-    let mut targets = Vec::with_capacity(array.len());
+    let mut targets = Vec::with_capacity(raw_targets.len());
     let mut seen = HashSet::new();
-    for (target_index, value) in array.iter().enumerate() {
-        let target_name = value.as_str().ok_or_else(|| {
-            eprintln!(
-                "error: cladding.json invalid field 'mounts[{index}].targets[{target_index}]' (expected string)"
-            );
-            eprintln!("file: {}", config_path.display());
-            Error::message("invalid cladding.json")
-        })?;
-
+    for (target_index, target_name) in raw_targets.iter().enumerate() {
         let target = MountTarget::from_config_name(target_name).ok_or_else(|| {
             eprintln!(
                 "error: cladding.json invalid field 'mounts[{index}].targets[{target_index}]' (unknown target '{target_name}')"
@@ -309,38 +214,13 @@ fn parse_mount_targets(
     Ok(targets)
 }
 
-const VALID_MOUNT_KEYS: &[&str] = &[
-    "mount", "hostPath", "volume", "type", "size", "targets", "ignore",
-];
-
-fn valid_mount_keys_hint() -> String {
-    format!(
-        "hint: valid mount keys are: {}",
-        VALID_MOUNT_KEYS.join(", ")
-    )
-}
-
-fn validate_mount_keys(
-    object: &serde_json::Map<String, serde_json::Value>,
-    index: usize,
-    config_path: &Path,
-) -> Result<()> {
-    let mut invalid = false;
-    for key in object.keys() {
-        if VALID_MOUNT_KEYS.contains(&key.as_str()) {
-            continue;
-        }
-        eprintln!("error: cladding.json unknown key: mounts[{index}].{key}");
-        eprintln!("{}", valid_mount_keys_hint());
-        eprintln!("file: {}", config_path.display());
-        invalid = true;
+fn mount_type_from_kind(kind: MountKind) -> MountType {
+    match kind {
+        MountKind::Bind => MountType::Bind,
+        MountKind::Readonly => MountType::Readonly,
+        MountKind::Copy => MountType::Copy,
+        MountKind::Tmpfs => MountType::Tmpfs,
     }
-
-    if invalid {
-        return Err(Error::message("invalid cladding.json"));
-    }
-
-    Ok(())
 }
 
 impl MountType {
@@ -548,12 +428,9 @@ mod tests {
     }
 
     #[test]
-    fn mount_key_hint_lists_only_supported_keys() {
-        assert_eq!(
-            valid_mount_keys_hint(),
-            "hint: valid mount keys are: mount, hostPath, volume, type, size, targets, ignore"
-        );
-        assert!(!VALID_MOUNT_KEYS.contains(&"readOnly"));
+    fn mount_schema_rejects_unknown_fields() {
+        let raw = serde_json::json!({ "mount": "/data", "readOnly": false });
+        assert!(serde_json::from_value::<MountDocument>(raw).is_err());
     }
 
     #[test]
@@ -720,13 +597,18 @@ mod tests {
         parsed: &serde_json::Value,
         execution_config: &ExecutionConfig,
     ) -> Result<Vec<ResolvedMountConfig>> {
-        let mut used_mount_targets = HashSet::new();
+        let entries: Vec<MountDocument> = serde_json::from_value(
+            parsed
+                .get("mounts")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )
+        .map_err(|error| Error::message(format!("invalid cladding.json: {error}")))?;
         parse_mounts_v2(
             project_root,
-            parsed,
+            &entries,
             &project_root.join("cladding.json"),
             execution_config,
-            &mut used_mount_targets,
         )
     }
 
