@@ -42,6 +42,13 @@ case "$1:$2" in
 esac
 if [ -n "${CLADDING_TEST_PODMAN_DELAY:-}" ]; then sleep "$CLADDING_TEST_PODMAN_DELAY"; fi
 printf '%s\n' "$*" >> "$CLADDING_PODMAN_LOG"
+if [ "$1" = "run" ] && [ "${CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP:-}" = "1" ]; then
+  for argument in "$@"; do
+    case "$argument" in
+      *:/socket:U|*:/socket/*:U) exit 44 ;;
+    esac
+  done
+fi
 case "$1:$2" in
   run:*|exec:--user|rm:-f)
     if [ "$CLADDING_TEST_HELPER_NOISE" = "1" ]; then
@@ -995,6 +1002,56 @@ exit 0
 
     fs::write(&socket_volume_state, "cladding-kache||||\n").unwrap();
     fs::write(&podman_log, "").unwrap();
+    let mut failed_socket_prepare = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    failed_socket_prepare
+        .args(["--cladding-dir", project_root.to_str().unwrap(), "up", "-v"])
+        .env("CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP", "1");
+    let failed_socket_prepare_output = failed_socket_prepare.output().unwrap();
+    assert!(!failed_socket_prepare_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed_socket_prepare_output.stderr)
+            .contains("failed to secure Baffle socket volumes")
+    );
+    let failed_socket_prepare_log = read_log(&podman_log);
+    let failed_socket_prepare_helpers: Vec<_> = failed_socket_prepare_log
+        .lines()
+        .filter(|line| line.starts_with("run --rm --network none --userns keep-id"))
+        .collect();
+    assert_eq!(
+        failed_socket_prepare_helpers.len(),
+        1,
+        "{failed_socket_prepare_log}"
+    );
+    assert!(
+        failed_socket_prepare_helpers[0].contains("cladding-demo-socket-baffle-agent:/socket/0:U")
+    );
+    assert!(
+        failed_socket_prepare_helpers[0]
+            .contains("cladding-demo-socket-baffle-nw-sandbox:/socket/1:U")
+    );
+    assert!(
+        !failed_socket_prepare_log.contains("--name demo-proxy-instance"),
+        "a failed socket preparation must stop before runtime consumers start: {failed_socket_prepare_log}"
+    );
+    assert!(
+        !failed_socket_prepare_log
+            .lines()
+            .any(|line| line.split_whitespace().any(|argument| argument == "-d")),
+        "a failed socket preparation must not start any runtime consumer: {failed_socket_prepare_log}"
+    );
+    assert_eq!(
+        fs::read_to_string(&socket_volume_state).unwrap(),
+        "cladding-kache||||\n",
+        "failed socket preparation must clean up every created socket volume"
+    );
+
+    fs::write(&podman_log, "").unwrap();
     let mut up = cli(
         &root,
         &bin_dir,
@@ -1054,21 +1111,23 @@ exit 0
         .lines()
         .position(|line| line.contains("--name demo-proxy-instance"))
         .expect("proxy start command is logged");
-    for channel in ["baffle-agent", "baffle-nw-sandbox"] {
-        let helper_command = format!(
-            "run --rm --network none --userns keep-id --volume cladding-demo-socket-{channel}:/socket:U --entrypoint /bin/sh localhost/cladding-proxy:latest -ec mkdir -p /socket && chmod 0700 /socket"
-        );
-        let helper_index = startup_log
+    let helper_command = "run --rm --network none --userns keep-id --volume cladding-demo-socket-baffle-agent:/socket/0:U --volume cladding-demo-socket-baffle-nw-sandbox:/socket/1:U --entrypoint /bin/sh localhost/cladding-proxy:latest -ec mkdir -p /socket/0 /socket/1 && chmod 0700 /socket/0 /socket/1";
+    let helper_index = startup_log
+        .lines()
+        .position(|line| line == helper_command)
+        .unwrap_or_else(|| panic!("missing batched Baffle volume preparation: {startup_log}"));
+    assert!(
+        helper_index < proxy_start_index,
+        "Baffle volume permissions must be set before proxy startup: {startup_log}"
+    );
+    assert_eq!(
+        startup_log
             .lines()
-            .position(|line| line == helper_command)
-            .unwrap_or_else(|| {
-                panic!("missing Baffle volume preparation: {helper_command}\n{startup_log}")
-            });
-        assert!(
-            helper_index < proxy_start_index,
-            "Baffle volume permissions must be set before proxy startup: {startup_log}"
-        );
-    }
+            .filter(|line| line.starts_with("run --rm --network none --userns keep-id"))
+            .count(),
+        1,
+        "two Baffle socket volumes must share one preparation helper: {startup_log}"
+    );
     assert!(
         !startup_log.contains("cladding-demo-socket-run-nw-sandbox:/socket:U"),
         "Baffle permission preparation must not change sandbox run-volume setup"
