@@ -45,6 +45,7 @@ pub struct RuntimeResourceAttempts {
     managed_mount_volumes: BTreeSet<String>,
     managed_mount_seed_helpers: BTreeSet<String>,
     transient_helpers: BTreeSet<String>,
+    transient_helpers_pending_cleanup: BTreeSet<String>,
 }
 
 enum RuntimeResourceCreation {
@@ -66,6 +67,7 @@ impl RuntimeResourceAttempts {
             managed_mount_volumes: BTreeSet::new(),
             managed_mount_seed_helpers: BTreeSet::new(),
             transient_helpers: BTreeSet::new(),
+            transient_helpers_pending_cleanup: BTreeSet::new(),
         }
     }
 
@@ -89,10 +91,15 @@ impl RuntimeResourceAttempts {
                 self.managed_mount_seed_helpers.insert(name);
             }
             RuntimeResourceCreation::TransientHelper(name) => {
-                self.transient_helpers.insert(name);
+                self.transient_helpers.insert(name.clone());
+                self.transient_helpers_pending_cleanup.insert(name);
             }
         }
         create()
+    }
+
+    fn transient_helper_completed(&mut self, name: &str) {
+        self.transient_helpers_pending_cleanup.remove(name);
     }
 
     fn covers_all_attempts(&self, spec: &RuntimeSpec) -> bool {
@@ -121,7 +128,7 @@ impl RuntimeResourceAttempts {
         let expected_transient_helpers = if proxy_socket_volume_names(spec).is_empty() {
             BTreeSet::new()
         } else {
-            BTreeSet::from(["baffle-socket-volume-permissions".to_string()])
+            BTreeSet::from([baffle_socket_permissions_helper_name(spec)])
         };
         self.containers.is_subset(&expected_containers)
             && self.socket_volumes.is_subset(&expected_socket_volumes)
@@ -309,6 +316,14 @@ pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -
         }
     }
 
+    if !proxy_socket_volume_names(spec).is_empty() {
+        cleanup_errors.record(remove_baffle_socket_permissions_helper(
+            spec,
+            &baffle_socket_permissions_helper_name(spec),
+            verbose,
+            quiet_helpers,
+        ));
+    }
     cleanup_errors.record(remove_socket_volumes(spec, verbose, quiet_helpers));
     remove_managed_mount_seed_helpers(spec, verbose, quiet_helpers, &mut cleanup_errors);
     remove_managed_mount_volumes(spec, verbose, quiet_helpers, &mut cleanup_errors);
@@ -321,7 +336,7 @@ pub fn runtime_cleanup_normal(
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<()> {
-    runtime_cleanup_normal_report(spec, verbose, quiet_helpers, true).result
+    runtime_cleanup_normal_report(spec, verbose, quiet_helpers, true, None).result
 }
 
 /// Remove resources named by a one-off runtime spec and report whether its
@@ -333,12 +348,42 @@ pub fn runtime_cleanup_owned_report(
     verbose: bool,
     quiet_helpers: bool,
 ) -> RuntimeCleanupReport {
+    let attempts_complete = attempts.covers_all_attempts(spec);
+    let transient_helpers = transient_helpers_requiring_cleanup(spec, attempts, attempts_complete);
     runtime_cleanup_normal_report(
         spec,
         verbose,
         quiet_helpers,
-        !attempts.covers_all_attempts(spec),
+        !attempts_complete,
+        Some(&transient_helpers),
     )
+}
+
+/// Clean resources left by a failed persistent startup. The attempt ledger
+/// handles transient helpers while stale managed volumes retain their usual
+/// defensive discovery pass.
+pub fn runtime_cleanup_failed_start(
+    spec: &RuntimeSpec,
+    attempts: &RuntimeResourceAttempts,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    let transient_helpers =
+        transient_helpers_requiring_cleanup(spec, attempts, attempts.covers_all_attempts(spec));
+    runtime_cleanup_normal_report(spec, verbose, quiet_helpers, true, Some(&transient_helpers))
+        .result
+}
+
+fn transient_helpers_requiring_cleanup(
+    spec: &RuntimeSpec,
+    attempts: &RuntimeResourceAttempts,
+    attempts_complete: bool,
+) -> BTreeSet<String> {
+    let mut names = attempts.transient_helpers_pending_cleanup.clone();
+    if !attempts_complete && !proxy_socket_volume_names(spec).is_empty() {
+        names.insert(baffle_socket_permissions_helper_name(spec));
+    }
+    names
 }
 
 /// Clean up a one-off runtime by its unique resource names.
@@ -356,6 +401,7 @@ fn runtime_cleanup_normal_report(
     verbose: bool,
     quiet_helpers: bool,
     discover_stale_managed_mount_volumes: bool,
+    transient_helpers_to_clean: Option<&BTreeSet<String>>,
 ) -> RuntimeCleanupReport {
     let mut errors = CleanupErrors::default();
     let mut runtime_root_safe_to_remove = true;
@@ -365,6 +411,16 @@ fn runtime_cleanup_normal_report(
             runtime_root_safe_to_remove = false;
             errors.record(Err(err));
         }
+    }
+
+    let transient_helpers = transient_helpers_to_clean.cloned().unwrap_or_default();
+    for helper_name in transient_helpers {
+        errors.record(remove_baffle_socket_permissions_helper(
+            spec,
+            &helper_name,
+            verbose,
+            quiet_helpers,
+        ));
     }
 
     for name in socket_volume_names(spec) {
@@ -503,10 +559,9 @@ fn ensure_socket_volumes(
         .cloned()
         .collect();
     if !proxy_socket_volumes.is_empty() {
-        attempts.before(
-            RuntimeResourceCreation::TransientHelper(
-                "baffle-socket-volume-permissions".to_string(),
-            ),
+        let helper_name = baffle_socket_permissions_helper_name(spec);
+        let result = attempts.before(
+            RuntimeResourceCreation::TransientHelper(helper_name.clone()),
             || {
                 let mut cmd =
                     build_proxy_socket_volumes_prepare_command(&proxy_socket_volumes, spec);
@@ -524,7 +579,11 @@ fn ensure_socket_volumes(
                 })?;
                 Ok(())
             },
-        )?;
+        );
+        if result.is_ok() {
+            attempts.transient_helper_completed(&helper_name);
+        }
+        result?;
     }
 
     Ok(())
@@ -602,6 +661,50 @@ fn socket_volume_labels_match(
     spec: &RuntimeSpec,
 ) -> bool {
     labels_match_expected(&inspection.labels, &socket_volume_labels(spec, name))
+}
+
+fn baffle_socket_permissions_helper_name(spec: &RuntimeSpec) -> String {
+    format!("{}-baffle-socket-volume-permissions", spec.project_name)
+}
+
+fn baffle_socket_permissions_helper_labels(spec: &RuntimeSpec) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "app".to_string(),
+            "baffle-socket-volume-permissions".to_string(),
+        ),
+        ("cladding".to_string(), spec.project_name.clone()),
+        (
+            "project_root".to_string(),
+            spec.project_root.to_string_lossy().into_owned(),
+        ),
+    ])
+}
+
+fn remove_baffle_socket_permissions_helper(
+    spec: &RuntimeSpec,
+    name: &str,
+    verbose: bool,
+    quiet_helpers: bool,
+) -> Result<()> {
+    let expected_name = baffle_socket_permissions_helper_name(spec);
+    if name != expected_name {
+        return Err(Error::message(format!(
+            "refusing to remove unexpected Baffle socket permission helper '{name}'"
+        )));
+    }
+    let Some(inspection) = inspect_resource("container", name, verbose, quiet_helpers)? else {
+        return Ok(());
+    };
+    if !resource_labels_match_expected(
+        &inspection.labels,
+        &baffle_socket_permissions_helper_labels(spec),
+    ) {
+        return Err(Error::message(format!(
+            "refusing to remove container '{name}' because it is not owned by this Cladding runtime"
+        )));
+    }
+    container_rm(name, verbose, quiet_helpers)
 }
 
 fn managed_mount_volumes(spec: &RuntimeSpec) -> BTreeMap<String, ManagedVolumeKind> {
@@ -1138,6 +1241,9 @@ fn build_socket_volume_create_command(name: &str, spec: &RuntimeSpec) -> Command
 fn build_proxy_socket_volumes_prepare_command(names: &[String], spec: &RuntimeSpec) -> Command {
     let mut cmd = Command::new("podman");
     cmd.args(["run", "--rm", "--network", "none", "--userns", "keep-id"]);
+    cmd.arg("--name");
+    cmd.arg(baffle_socket_permissions_helper_name(spec));
+    append_label_args(&mut cmd, &baffle_socket_permissions_helper_labels(spec));
     let socket_paths: Vec<_> = (0..names.len())
         .map(|index| {
             if names.len() == 1 {
@@ -2197,9 +2303,7 @@ mod tests {
             ),
             RuntimeResourceCreation::ManagedMountVolume("demo-cache".to_string()),
             RuntimeResourceCreation::ManagedMountSeedHelper("demo-cache-seed".to_string()),
-            RuntimeResourceCreation::TransientHelper(
-                "baffle-socket-volume-permissions".to_string(),
-            ),
+            RuntimeResourceCreation::TransientHelper(baffle_socket_permissions_helper_name(&spec)),
         ];
 
         for resource in resources {
@@ -2222,6 +2326,61 @@ mod tests {
             )
             .expect_err("injected create failure");
         assert!(!untracked_attempt.covers_all_attempts(&spec));
+
+        let expected_transient_helper = baffle_socket_permissions_helper_name(&spec);
+        let mut incomplete_helper_attempt = RuntimeResourceAttempts::for_spec(&spec);
+        incomplete_helper_attempt
+            .before(
+                RuntimeResourceCreation::TransientHelper("foreign-helper".to_string()),
+                || Err::<(), _>(Error::message("injected create failure")),
+            )
+            .expect_err("injected create failure");
+        assert!(!incomplete_helper_attempt.covers_all_attempts(&spec));
+        assert!(
+            transient_helpers_requiring_cleanup(&spec, &incomplete_helper_attempt, false)
+                .contains(&expected_transient_helper)
+        );
+    }
+
+    #[test]
+    fn transient_helper_attempt_keeps_identity_and_tracks_pending_cleanup_separately() {
+        let spec = test_runtime_spec();
+        let name = baffle_socket_permissions_helper_name(&spec);
+        let mut failed_attempt = RuntimeResourceAttempts::for_spec(&spec);
+
+        failed_attempt
+            .before(
+                RuntimeResourceCreation::TransientHelper(name.clone()),
+                || Err::<(), _>(Error::message("injected helper interruption")),
+            )
+            .expect_err("injected helper interruption");
+        assert!(failed_attempt.transient_helpers.contains(&name));
+        assert!(
+            failed_attempt
+                .transient_helpers_pending_cleanup
+                .contains(&name)
+        );
+        assert!(failed_attempt.covers_all_attempts(&spec));
+
+        let mut successful_attempt = RuntimeResourceAttempts::for_spec(&spec);
+        successful_attempt
+            .before(
+                RuntimeResourceCreation::TransientHelper(name.clone()),
+                || Ok(()),
+            )
+            .expect("helper command succeeds");
+        assert!(
+            successful_attempt
+                .transient_helpers_pending_cleanup
+                .contains(&name)
+        );
+        successful_attempt.transient_helper_completed(&name);
+        assert!(successful_attempt.transient_helpers.contains(&name));
+        assert!(
+            !successful_attempt
+                .transient_helpers_pending_cleanup
+                .contains(&name)
+        );
     }
 
     #[test]
@@ -2336,6 +2495,18 @@ mod tests {
 
         assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
         assert!(args.windows(2).any(|pair| pair == ["--userns", "keep-id"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--name", "demo-baffle-socket-volume-permissions"] })
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--label", "app=baffle-socket-volume-permissions"] })
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--label", "cladding=demo"])
+        );
         assert!(!args.iter().any(|arg| arg == "--user"));
         assert!(
             args.windows(2).any(|pair| {

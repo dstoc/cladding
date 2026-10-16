@@ -14,7 +14,7 @@ pub use discovery::{
 };
 pub use runtime::{
     RuntimeCleanupReport, RuntimeInventory, RuntimeResource, RuntimeResourceAttempts, container_rm,
-    container_run, initialize_baffle_ca, runtime_cleanup, runtime_cleanup_normal,
-    runtime_cleanup_owned, runtime_cleanup_owned_report, runtime_create, runtime_inventory,
-    runtime_inventory_from_snapshot,
+    container_run, initialize_baffle_ca, runtime_cleanup, runtime_cleanup_failed_start,
+    runtime_cleanup_normal, runtime_cleanup_owned, runtime_cleanup_owned_report, runtime_create,
+    runtime_inventory, runtime_inventory_from_snapshot,
 };

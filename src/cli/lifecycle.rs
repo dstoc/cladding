@@ -12,8 +12,8 @@ use cladding::identity::invoking_uid;
 use cladding::podman::{
     RuntimeResourceAttempts, initialize_baffle_ca, list_container_snapshot, list_running_projects,
     podman_build_image, podman_build_proxy_image, podman_required, runtime_cleanup,
-    runtime_cleanup_normal, runtime_cleanup_owned, runtime_cleanup_owned_report, runtime_create,
-    runtime_inventory_from_snapshot,
+    runtime_cleanup_failed_start, runtime_cleanup_normal, runtime_cleanup_owned_report,
+    runtime_create, runtime_inventory_from_snapshot,
 };
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashMap;
@@ -404,14 +404,11 @@ fn cmd_up_inner(
     if let Err(startup_error) = startup_result {
         if !fail_if_already_running {
             let _cleanup = cladding::runtime_metrics::phase("cleanup");
-            if let Err(cleanup_error) = runtime_cleanup_normal(runtime.spec, verbose, quiet_helpers)
+            if let Err(cleanup_error) =
+                runtime_cleanup_failed_start(runtime.spec, runtime.attempts, verbose, quiet_helpers)
             {
                 eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
             }
-        } else if let Err(cleanup_error) =
-            runtime_cleanup_owned(runtime.spec, runtime.attempts, verbose, quiet_helpers)
-        {
-            eprintln!("error: cleanup after failed 'cladding run' startup failed: {cleanup_error}");
         }
         return Err(startup_error);
     }
