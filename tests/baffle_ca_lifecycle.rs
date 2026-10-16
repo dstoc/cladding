@@ -434,6 +434,8 @@ exit 0
     )
     .unwrap();
     let config_path = project_root.join("cladding.json");
+    let run_mount_source = root.join("run-mount-source");
+    fs::create_dir_all(&run_mount_source).unwrap();
     let mut project_config: serde_json::Value =
         serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     project_config["proxy"]["agent"]["session_config"] = "custom/agent.toml".into();
@@ -446,6 +448,11 @@ exit 0
         },
         {
             "mount": "/empty",
+            "targets": ["agent"]
+        },
+        {
+            "mount": "/runtime-mount",
+            "hostPath": run_mount_source.to_str().unwrap(),
             "targets": ["agent"]
         }
     ]);
@@ -637,6 +644,7 @@ exit 0
     )
     .unwrap();
     fs::write(&socket_volume_state, "cladding-kache||||\n").unwrap();
+    fs::write(&podman_log, "").unwrap();
     let mut run = cli(
         &root,
         &bin_dir,
@@ -674,6 +682,11 @@ exit 0
     assert!(verbose_stderr.contains("helper stderr:"));
     assert!(verbose_stderr.contains("cleaning up one-off instance:"));
     assert!(verbose_stderr.contains("user-error"));
+    let run_calls = read_log(&podman_log);
+    assert!(
+        !run_calls.contains("volume ls"),
+        "one-off cleanup must use its prepared resource record without a stale-volume scan: {run_calls}"
+    );
     let metrics_line = verbose_stderr
         .lines()
         .find(|line| line.starts_with("runtime metrics: run "))
@@ -695,6 +708,10 @@ exit 0
             "missing {operation}: {metrics_line}"
         );
     }
+    assert!(
+        metrics_line.contains("preparation runtime-specs=1 custom-mount-paths-prepared=1"),
+        "one-off run should prepare its runtime spec once: {metrics_line}"
+    );
     for operation in ["discovery/inspect=", "removal="] {
         let count = metrics_line
             .split(operation)

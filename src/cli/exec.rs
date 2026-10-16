@@ -42,9 +42,11 @@ pub(super) fn cmd_exec(
     }
     let container_name =
         runtime_container_name(&project_component_name(&config.name, target.as_str()));
+    let runtime_spec = context.runtime_spec(&config)?;
     run_podman_exec(
         context,
         &config,
+        &runtime_spec,
         PodmanExec {
             command_name: "exec",
             mount_target: target.mount_target(),
@@ -60,15 +62,17 @@ pub(super) fn cmd_exec(
 
 pub(super) fn cmd_run_command(
     context: &Context,
+    config: &ExecutionConfig,
+    runtime_spec: &RuntimeSpec,
     env_vars: &[String],
     args: &[String],
     forward_stdin: bool,
 ) -> Result<()> {
-    let config = context.load_config()?;
     let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
     run_podman_exec(
         context,
-        &config,
+        config,
+        runtime_spec,
         PodmanExec {
             command_name: "run",
             mount_target: MountTarget::Agent,
@@ -140,6 +144,7 @@ fn logs_target_disabled(config: &ExecutionConfig, target: LogsTarget) -> Result<
 fn run_podman_exec(
     context: &Context,
     config: &ExecutionConfig,
+    runtime_spec: &RuntimeSpec,
     request: PodmanExec<'_>,
 ) -> Result<()> {
     let PodmanExec {
@@ -166,8 +171,8 @@ fn run_podman_exec(
 
     let cwd = env::current_dir().with_context(|| "failed to determine current directory")?;
 
-    let runtime_spec = context.runtime_spec(config)?;
-    let component = runtime_component_for_target(&runtime_spec, mount_target)?;
+    runtime_spec.validate_custom_mount_sources()?;
+    let component = runtime_component_for_target(runtime_spec, mount_target)?;
     let runtime_container = &component.container;
     if runtime_container.name != container_name {
         return Err(Error::message(format!(
@@ -778,6 +783,60 @@ mod tests {
         )
         .expect("fallback workdir for other target");
         assert_eq!(resolved_for_other_target, PathBuf::from(CONTAINER_HOME_DIR));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_runtime_rejects_a_custom_mount_symlink_retargeted_after_preparation() {
+        let temp = create_temp_dir("changed-custom-mount-symlink");
+        let project_root = temp.join("project/.cladding");
+        let original_target = temp.join("original");
+        let changed_target = project_root.join("private");
+        let link = temp.join("mount-source");
+        fs::create_dir_all(&project_root).expect("create project root");
+        fs::create_dir_all(&original_target).expect("create original target");
+        fs::create_dir_all(&changed_target).expect("create changed target");
+        std::os::unix::fs::symlink(&original_target, &link).expect("create mount symlink");
+
+        let configured_mount = ResolvedMountConfig {
+            mount_path: "/workspace".to_string(),
+            host_path: Some(link.clone()),
+            volume: None,
+            mount_type: MountType::Bind,
+            tmpfs_size_bytes: None,
+            read_only: false,
+            targets: vec![MountTarget::Agent],
+            ignore: false,
+        };
+        let spec = runtime_spec(&project_root, vec![configured_mount.clone()], false);
+
+        fs::remove_file(&link).expect("remove original symlink");
+        std::os::unix::fs::symlink(&changed_target, &link).expect("retarget mount symlink");
+
+        let error = spec
+            .validate_custom_mount_sources()
+            .expect_err("changed custom mount source must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("changed after runtime preparation")
+        );
+
+        let agent = &spec.agent.container;
+        let cwd = changed_target.join("secrets");
+        fs::create_dir_all(&cwd).expect("create path under changed target");
+        assert_eq!(
+            resolve_target_workdir(
+                &agent.mounts,
+                &[configured_mount],
+                MountTarget::Agent,
+                agent.workdir.as_deref(),
+                &cwd,
+            )
+            .expect("workdir mapping uses current symlink target"),
+            PathBuf::from("/workspace/secrets")
+        );
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]

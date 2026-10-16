@@ -10,12 +10,11 @@ use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::identity::invoking_uid;
 use cladding::podman::{
-    initialize_baffle_ca, list_container_snapshot, list_running_projects, podman_build_image,
-    podman_build_proxy_image, podman_required, runtime_cleanup, runtime_cleanup_normal,
-    runtime_cleanup_owned, runtime_cleanup_owned_report, runtime_create,
+    RuntimeResourceAttempts, initialize_baffle_ca, list_container_snapshot, list_running_projects,
+    podman_build_image, podman_build_proxy_image, podman_required, runtime_cleanup,
+    runtime_cleanup_normal, runtime_cleanup_owned, runtime_cleanup_owned_report, runtime_create,
     runtime_inventory_from_snapshot,
 };
-#[cfg(test)]
 use cladding::runtime::RuntimeSpec;
 use std::collections::HashMap;
 use std::fs;
@@ -295,9 +294,19 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
 }
 
 pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
+    let preparation = cladding::runtime_metrics::phase("runtime startup");
+    let config = context.load_config()?;
+    let spec = context.runtime_spec(&config)?;
+    drop(preparation);
+    let mut attempts = RuntimeResourceAttempts::for_spec(&spec);
     let mut runtime_create_attempted = false;
     cmd_up_inner(
         context,
+        RuntimeStart {
+            config: &config,
+            spec: &spec,
+            attempts: &mut attempts,
+        },
         verbose,
         false,
         false,
@@ -305,10 +314,21 @@ pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
     )
 }
 
-pub(super) fn cmd_up_ephemeral(context: &Context, verbose: bool) -> (Result<()>, bool) {
+pub(super) fn cmd_up_ephemeral(
+    context: &Context,
+    config: &ExecutionConfig,
+    spec: &RuntimeSpec,
+    attempts: &mut RuntimeResourceAttempts,
+    verbose: bool,
+) -> (Result<()>, bool) {
     let mut runtime_create_attempted = false;
     let result = cmd_up_inner(
         context,
+        RuntimeStart {
+            config,
+            spec,
+            attempts,
+        },
         verbose,
         true,
         !verbose,
@@ -319,6 +339,7 @@ pub(super) fn cmd_up_ephemeral(context: &Context, verbose: bool) -> (Result<()>,
 
 fn cmd_up_inner(
     context: &Context,
+    runtime: RuntimeStart<'_>,
     verbose: bool,
     fail_if_already_running: bool,
     quiet_helpers: bool,
@@ -328,23 +349,21 @@ fn cmd_up_inner(
         (!fail_if_already_running).then(|| cladding::runtime_metrics::phase("runtime startup"));
     let preparation =
         fail_if_already_running.then(|| cladding::runtime_metrics::phase("preparation/preflight"));
-    let config = context.load_config()?;
     let containers = list_container_snapshot(verbose, quiet_helpers)?;
-    let status = project_runtime_status_from_snapshot(context, &config, &containers)?;
-    let spec = context.runtime_spec(&config)?;
-    let inventory = runtime_inventory_from_snapshot(&spec, &containers);
+    let status = project_runtime_status_from_snapshot(context, runtime.config, &containers)?;
+    let inventory = runtime_inventory_from_snapshot(runtime.spec, &containers);
 
     if status.already_running && inventory.is_fully_running() {
         if fail_if_already_running {
             eprintln!(
                 "error: one-off instance '{}' collides with existing runtime resources",
-                config.name
+                runtime.config.name
             );
             return Err(Error::message("one-off runtime name collision"));
         }
         println!(
             "already running: {} ({})",
-            config.name, status.current_project_root
+            runtime.config.name, status.current_project_root
         );
         return Ok(());
     }
@@ -352,7 +371,7 @@ fn cmd_up_inner(
     if !inventory.is_empty() {
         eprintln!(
             "error: cladding project '{}' has an incomplete or stopped runtime",
-            config.name
+            runtime.config.name
         );
         eprintln!("existing runtime resources:");
         for resource in inventory.resources {
@@ -362,7 +381,13 @@ fn cmd_up_inner(
         return Err(Error::message("incomplete or stopped runtime"));
     }
 
-    check_project_readiness(context, &config, &spec, verbose, quiet_helpers)?;
+    check_project_readiness(
+        context,
+        runtime.config,
+        runtime.spec,
+        verbose,
+        quiet_helpers,
+    )?;
     if !fail_if_already_running {
         prepare_runtime_files(&context.runtime_root)?;
         fs::create_dir_all(context.runtime_root.join("runtime/empty-mask"))
@@ -371,21 +396,33 @@ fn cmd_up_inner(
     drop(preparation);
     let startup =
         fail_if_already_running.then(|| cladding::runtime_metrics::phase("runtime startup"));
+    runtime.spec.validate_custom_mount_sources()?;
     *runtime_create_attempted = true;
-    let startup_result = runtime_create(&spec, verbose, quiet_helpers);
+    let startup_result = runtime_create(runtime.spec, runtime.attempts, verbose, quiet_helpers);
     drop(startup);
     drop(direct_startup);
     if let Err(startup_error) = startup_result {
         if !fail_if_already_running {
             let _cleanup = cladding::runtime_metrics::phase("cleanup");
-            if let Err(cleanup_error) = runtime_cleanup_owned(&spec, verbose, quiet_helpers) {
+            if let Err(cleanup_error) = runtime_cleanup_normal(runtime.spec, verbose, quiet_helpers)
+            {
                 eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
             }
+        } else if let Err(cleanup_error) =
+            runtime_cleanup_owned(runtime.spec, runtime.attempts, verbose, quiet_helpers)
+        {
+            eprintln!("error: cleanup after failed 'cladding run' startup failed: {cleanup_error}");
         }
         return Err(startup_error);
     }
 
     Ok(())
+}
+
+struct RuntimeStart<'a> {
+    config: &'a ExecutionConfig,
+    spec: &'a RuntimeSpec,
+    attempts: &'a mut RuntimeResourceAttempts,
 }
 
 pub(super) fn prepare_run_runtime_root(runtime_root: &std::path::Path) -> Result<()> {
@@ -413,16 +450,13 @@ pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
     runtime_cleanup_normal(&spec, verbose, false)
 }
 
-pub(super) fn cmd_down_ephemeral(context: &Context, verbose: bool) -> (Result<()>, bool) {
-    let result = (|| {
-        let config = context.load_config()?;
-        let spec = context.runtime_spec(&config)?;
-        Ok(runtime_cleanup_owned_report(&spec, verbose, !verbose))
-    })();
-    match result {
-        Ok(report) => (report.result, report.runtime_root_safe_to_remove),
-        Err(err) => (Err(err), false),
-    }
+pub(super) fn cmd_down_ephemeral(
+    spec: &RuntimeSpec,
+    attempts: &RuntimeResourceAttempts,
+    verbose: bool,
+) -> (Result<()>, bool) {
+    let report = runtime_cleanup_owned_report(spec, attempts, verbose, !verbose);
+    (report.result, report.runtime_root_safe_to_remove)
 }
 
 pub(super) fn cmd_destroy(context: &Context) -> Result<()> {

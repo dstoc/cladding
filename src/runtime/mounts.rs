@@ -1,13 +1,28 @@
 use super::types::{
     ManagedVolumeKind, RuntimeComponent, RuntimeCustomMount, RuntimeMount, RuntimeMountSource,
-    RuntimeSpec,
+    RuntimeMountSourceSnapshot, RuntimeSpec,
 };
 use crate::config::{MountTarget, MountType, ResolvedMountConfig};
+use crate::error::{Error, Result};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 impl RuntimeSpec {
+    pub fn validate_custom_mount_sources(&self) -> Result<()> {
+        for snapshot in &self.custom_mount_sources {
+            let current = canonical_or_normalized(&snapshot.source);
+            if current != snapshot.resolved_source {
+                return Err(Error::message(format!(
+                    "host source for mount '{}' changed after runtime preparation: {}",
+                    snapshot.mount_path,
+                    snapshot.source.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn required_host_paths(&self) -> Vec<PathBuf> {
         let mut paths = BTreeSet::new();
 
@@ -144,12 +159,22 @@ pub(super) fn apply_custom_mounts(
     mounts
 }
 
+#[cfg(test)]
 pub(super) fn build_custom_mounts(
     project_root: &Path,
     runtime_root: &Path,
     project_name: &str,
     mounts: &[ResolvedMountConfig],
 ) -> Vec<RuntimeCustomMount> {
+    build_custom_mounts_with_snapshots(project_root, runtime_root, project_name, mounts).0
+}
+
+pub(super) fn build_custom_mounts_with_snapshots(
+    project_root: &Path,
+    runtime_root: &Path,
+    project_name: &str,
+    mounts: &[ResolvedMountConfig],
+) -> (Vec<RuntimeCustomMount>, Vec<RuntimeMountSourceSnapshot>) {
     let mut runtime_mounts = mounts
         .iter()
         .enumerate()
@@ -170,6 +195,7 @@ pub(super) fn build_custom_mounts(
 
     let empty_mask = runtime_root.join("runtime/empty-mask");
     let protected_root = canonical_or_normalized(project_root);
+    let mut snapshots = Vec::new();
     for mount in mounts.iter().filter(|mount| {
         !mount.ignore
             && matches!(
@@ -177,11 +203,17 @@ pub(super) fn build_custom_mounts(
                 MountType::Bind | MountType::Readonly | MountType::Copy
             )
     }) {
-        let Some(host_path) = mount.host_path.as_deref() else {
+        let Some(source) = mount.host_path.as_deref() else {
             continue;
         };
-        let host_path = canonical_or_normalized(host_path);
-        let Ok(private_path) = protected_root.strip_prefix(&host_path) else {
+        let resolved_source = canonical_or_normalized(source);
+        snapshots.push(RuntimeMountSourceSnapshot {
+            mount_path: mount.mount_path.clone(),
+            source: source.to_path_buf(),
+            resolved_source: resolved_source.clone(),
+        });
+        let host_path = &resolved_source;
+        let Ok(private_path) = protected_root.strip_prefix(host_path) else {
             continue;
         };
 
@@ -205,7 +237,7 @@ pub(super) fn build_custom_mounts(
         });
     }
 
-    runtime_mounts
+    (runtime_mounts, snapshots)
 }
 
 fn build_mount_source(

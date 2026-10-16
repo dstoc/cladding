@@ -35,6 +35,8 @@ impl OperationGroup {
 struct MetricsData {
     phases: BTreeMap<&'static str, Duration>,
     operations: BTreeMap<&'static str, (usize, Duration)>,
+    runtime_spec_builds: usize,
+    custom_mount_paths: usize,
 }
 
 thread_local! {
@@ -73,6 +75,16 @@ pub fn phase(name: &'static str) -> PhaseGuard {
         started: Instant::now(),
         data,
     }
+}
+
+/// Record one prepared runtime spec and its configured host mount paths.
+pub fn record_runtime_spec_build(custom_mount_paths: usize) {
+    let Some(data) = ACTIVE.with(|active| active.borrow().as_ref().map(Arc::clone)) else {
+        return;
+    };
+    let mut data = data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    data.runtime_spec_builds += 1;
+    data.custom_mount_paths += custom_mount_paths;
 }
 
 pub struct PhaseGuard {
@@ -247,6 +259,10 @@ fn format_summary(label: &str, total: Duration, data: &Arc<Mutex<MetricsData>>) 
         let elapsed = data.phases.get(*phase_name).copied().unwrap_or_default();
         summary.push_str(&format!(" {phase_label}={}", format_duration(elapsed)));
     }
+    summary.push_str(&format!(
+        " | preparation runtime-specs={} custom-mount-paths-prepared={}",
+        data.runtime_spec_builds, data.custom_mount_paths
+    ));
     summary.push_str(" | podman");
     for group in OperationGroup::ALL {
         let (count, elapsed) = data
@@ -301,6 +317,17 @@ mod tests {
         assert!(!summary.contains("a-secret-value"));
         assert!(!summary.contains("echo"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summary_reports_runtime_spec_and_custom_mount_preparation_counts() {
+        let metrics = start("run");
+        record_runtime_spec_build(2);
+        record_runtime_spec_build(1);
+        drop(metrics);
+
+        let summary = PENDING_SUMMARY.with(|pending| pending.borrow_mut().take().unwrap());
+        assert!(summary.contains("preparation runtime-specs=2 custom-mount-paths-prepared=3"));
     }
 
     #[test]

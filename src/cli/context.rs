@@ -8,6 +8,7 @@ use cladding::fs_utils::canonicalize_path;
 use cladding::podman::{ContainerSnapshot, list_container_snapshot};
 use cladding::runtime::{RuntimeMount, RuntimeMountSource, RuntimeSpec};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(super) struct Context {
@@ -35,7 +36,7 @@ pub(super) enum ConfigSource {
     Default,
     File(PathBuf),
     Stdin { raw: String, base_dir: PathBuf },
-    Resolved(Box<ExecutionConfig>),
+    Resolved(Arc<ExecutionConfig>),
 }
 
 impl Context {
@@ -92,8 +93,15 @@ impl Context {
             project_root: self.project_root.clone(),
             workspace_root: self.workspace_root.clone(),
             runtime_root,
-            config_source: ConfigSource::Resolved(Box::new(config)),
+            config_source: ConfigSource::Resolved(Arc::new(config)),
             run_secret_mounts: self.run_secret_mounts.clone(),
+        }
+    }
+
+    pub(super) fn resolved_config(&self) -> Option<&ExecutionConfig> {
+        match &self.config_source {
+            ConfigSource::Resolved(config) => Some(config.as_ref()),
+            ConfigSource::Default | ConfigSource::File(_) | ConfigSource::Stdin { .. } => None,
         }
     }
 
