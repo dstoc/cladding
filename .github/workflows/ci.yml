@@ -21,7 +21,7 @@ jobs:
           components: rustfmt
       - name: Format
         run: cargo fmt --check
-      - name: Test supported platform triples
+      - name: Test build script platform and helper target selection
         run: |
           rustc --edition=2024 --test build.rs -o "$RUNNER_TEMP/test-build-platforms"
           "$RUNNER_TEMP/test-build-platforms"
@@ -39,30 +39,9 @@ jobs:
       - name: Build Linux Baffle socket operation probe
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Download and verify pinned x86_64 Baffle release
-        env:
-          BAFFLE_ARCHIVE: baffle-proxy-v1.1.1-x86_64-unknown-linux-gnu.tar.gz
         run: |
           set -euo pipefail
-          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"
-          archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
-          mkdir -p "$RUNNER_TEMP/baffle"
-          curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/SHA256SUMS" "$release_url/SHA256SUMS"
-          expected=$(awk -v archive="$BAFFLE_ARCHIVE" '$2 == archive || $2 == "*" archive { print $1 }' "$RUNNER_TEMP/SHA256SUMS")
-          if [ "${#expected}" -ne 64 ]; then
-            echo "Expected one SHA256SUMS entry for $BAFFLE_ARCHIVE" >&2
-            exit 1
-          fi
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual=$(sha256sum "$archive_path" | awk '{ print $1 }')
-          elif command -v shasum >/dev/null 2>&1; then
-            actual=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
-          else
-            echo "No SHA-256 utility is available" >&2
-            exit 1
-          fi
-          test "$actual" = "$expected"
-          tar -xzf "$archive_path" -C "$RUNNER_TEMP/baffle"
+          scripts/fetch_baffle.sh x86_64 "$RUNNER_TEMP/baffle"
           chmod 0755 "$RUNNER_TEMP/baffle/baffle"
           description=$(file -b "$RUNNER_TEMP/baffle/baffle")
           printf '%s\n' "$description"
@@ -217,6 +196,7 @@ jobs:
       - name: Check Baffle validation shell syntax
         run: |
           for script in \
+            scripts/fetch_baffle.sh \
             scripts/validate_baffle_config.sh \
             scripts/validate_baffle_control_socket.sh \
             scripts/validate_baffle_runtime.sh \
@@ -257,30 +237,9 @@ jobs:
       - name: Build Linux Baffle socket operation probe
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Download and verify pinned aarch64 Baffle release
-        env:
-          BAFFLE_ARCHIVE: baffle-proxy-v1.1.1-aarch64-unknown-linux-gnu.tar.gz
         run: |
           set -euo pipefail
-          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"
-          archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
-          mkdir -p "$RUNNER_TEMP/baffle"
-          curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/SHA256SUMS" "$release_url/SHA256SUMS"
-          expected=$(awk -v archive="$BAFFLE_ARCHIVE" '$2 == archive || $2 == "*" archive { print $1 }' "$RUNNER_TEMP/SHA256SUMS")
-          if [ "${#expected}" -ne 64 ]; then
-            echo "Expected one SHA256SUMS entry for $BAFFLE_ARCHIVE" >&2
-            exit 1
-          fi
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual=$(sha256sum "$archive_path" | awk '{ print $1 }')
-          elif command -v shasum >/dev/null 2>&1; then
-            actual=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
-          else
-            echo "No SHA-256 utility is available" >&2
-            exit 1
-          fi
-          test "$actual" = "$expected"
-          tar -xzf "$archive_path" -C "$RUNNER_TEMP/baffle"
+          scripts/fetch_baffle.sh aarch64 "$RUNNER_TEMP/baffle"
           chmod 0755 "$RUNNER_TEMP/baffle/baffle"
           description=$(file -b "$RUNNER_TEMP/baffle/baffle")
           printf '%s\n' "$description"

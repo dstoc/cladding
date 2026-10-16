@@ -97,41 +97,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Download and verify pinned Baffle v1.1.1 release
-        env:
-          BAFFLE_ARCH: ${{ matrix.baffle_arch }}
-          BAFFLE_ARCHIVE: baffle-proxy-v1.1.1-${{ matrix.baffle_arch }}-unknown-linux-gnu.tar.gz
         run: |
           set -euo pipefail
-          release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"
-          archive_path="$RUNNER_TEMP/$BAFFLE_ARCHIVE"
-          mkdir -p "$RUNNER_TEMP/baffle"
-          curl --fail --location --retry 3 --output "$archive_path" "$release_url/$BAFFLE_ARCHIVE"
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/SHA256SUMS" "$release_url/SHA256SUMS"
-          expected=$(awk -v archive="$BAFFLE_ARCHIVE" '$2 == archive || $2 == "*" archive { print $1 }' "$RUNNER_TEMP/SHA256SUMS")
-          if [ "${#expected}" -ne 64 ]; then
-            echo "Expected one SHA256SUMS entry for $BAFFLE_ARCHIVE" >&2
-            exit 1
-          fi
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual=$(sha256sum "$archive_path" | awk '{ print $1 }')
-          elif command -v shasum >/dev/null 2>&1; then
-            actual=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
-          else
-            echo "No SHA-256 utility is available" >&2
-            exit 1
-          fi
-          test "$actual" = "$expected"
-          tar -xzf "$archive_path" -C "$RUNNER_TEMP/baffle"
+          scripts/fetch_baffle.sh "${{ matrix.baffle_arch }}" "$RUNNER_TEMP/baffle"
           test -s "$RUNNER_TEMP/baffle/LICENSE"
           test -s "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt"
           test -s "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt"
           chmod 0755 "$RUNNER_TEMP/baffle/baffle"
           description=$(file -b "$RUNNER_TEMP/baffle/baffle")
           printf '%s\n' "$description"
-          case "$BAFFLE_ARCH:$description" in
+          case "${{ matrix.baffle_arch }}:$description" in
             x86_64:"ELF 64-bit"*x86-64*) ;;
             aarch64:"ELF 64-bit"*aarch64*) ;;
-            *) echo "Baffle is not the expected Linux $BAFFLE_ARCH executable" >&2; exit 1 ;;
+            *) echo "Baffle is not the expected Linux ${{ matrix.baffle_arch }} executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
       - uses: dtolnay/rust-toolchain@stable

@@ -1,20 +1,32 @@
 # Embedded Baffle binary
 
-A normal local build without `CLADDING_BAFFLE_BIN` embeds `baffle-proxy`
-**1.1.1** from crates.io. The package publishes the `baffle` executable and
-declares Rust 1.96 as its minimum supported version. Cladding pins that
-version in `build.rs` and invokes Cargo with `--locked`.
+A normal Cladding build requires `CLADDING_BAFFLE_BIN`. The build script checks
+that the supplied executable is a 64-bit Linux GNU binary for the target
+architecture. It does not download or compile Baffle.
+
+Fetch the pinned Baffle **1.1.1** release before building. The script selects
+the Linux archive for the requested architecture and verifies its checksum
+against that release's `SHA256SUMS` file:
+
+```sh
+scripts/fetch_baffle.sh x86_64 /tmp/cladding-baffle-x86_64
+CLADDING_BAFFLE_BIN=/tmp/cladding-baffle-x86_64/baffle cargo build --locked
+```
+
+Use `aarch64` in both paths when the Cladding target is aarch64. CI uses the
+same fetch script for Linux tests and release builds.
 
 ## Build requirements
 
-The normal build path requires a Linux GNU host with the same architecture as
-the Cladding target. Supported architectures are `x86_64` and `aarch64`. The
-build environment needs Rust 1.96 or newer, CMake, Clang, and libclang. These
-tools are needed to build Baffle and do not belong in the proxy runtime image.
+Supported architectures are `x86_64` and `aarch64`. The fetch script verifies
+the archive checksum. The build script also checks the executable's ELF format,
+architecture, and GNU loader before it embeds the binary.
 
-For Cladding builds on macOS or other cross-build hosts, set
-`CLADDING_BAFFLE_BIN` to a prebuilt 64-bit Linux GNU executable for the matching
-Podman guest architecture. The build checks the ELF format and architecture.
+On Linux, Cladding builds its embedded helper programs with Cargo for the
+matching Linux GNU target. On macOS, it builds them in a Rust container for the
+matching Linux architecture; this path requires a working Podman installation.
+Both paths keep helper outputs under Cargo's `OUT_DIR`. Release builds may
+instead supply the three prebuilt helper paths.
 CI runs `baffle --version` on native Linux x86_64 and aarch64 runners. The
 x86_64 integration suite also starts the executable that Cladding extracts
 during `cladding build` in Cladding's default proxy image.
@@ -41,13 +53,12 @@ copy. Run `cladding build` to refresh it.
    for x86_64 and aarch64, with a `SHA256SUMS` file.
 2. Review the release archive contents for the executable, architecture,
    license, and third-party notices.
-3. Update the explicit Baffle version and archive names in the CI and release
-   workflows. Keep checksum verification before archive extraction.
+3. Update the pinned Baffle version in `build.rs` and
+   `scripts/fetch_baffle.sh`, then update the CI and release workflows. Keep
+   checksum verification before archive extraction.
 4. Update the architecture and redistribution checks in
    `scripts/test_ci_baffle_assets.py`.
-5. Update `BAFFLE_VERSION` in `build.rs` separately when changing the version
-   used by local source builds.
-6. Run the runtime smoke test against the selected proxy image for each
+5. Run the runtime smoke test against the selected proxy image for each
    supported architecture.
 
 ## Redistribution notices
