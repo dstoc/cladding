@@ -15,14 +15,12 @@ use context::{
     ConfigSource, Context, resolve_project_root, resolve_workspace_root, stdin_config_base_dir,
 };
 
+use cladding::config::DEFAULT_COMPONENT_IMAGE;
 use cladding::error::{Error, Result};
 use std::io::Read as _;
 
 pub use errors::print_error_and_exit;
 
-const DEFAULT_CLADDING_BUILD_IMAGE: &str = "localhost/cladding-default:latest";
-const DEFAULT_CLI_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
-const DEFAULT_SANDBOX_BUILD_IMAGE: &str = DEFAULT_CLADDING_BUILD_IMAGE;
 const CONTAINER_HOME_DIR: &str = "/home/user";
 
 pub fn run() -> Result<()> {

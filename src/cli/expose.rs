@@ -3,9 +3,8 @@ use super::context::{Context, project_runtime_status};
 use super::exec::agent_runtime_names;
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
-use cladding::fs_utils::is_executable;
+use cladding::fs_utils::command_exists_in_path;
 use cladding::podman::{podman_container_exists, podman_required};
-use std::env;
 use std::net::IpAddr;
 use std::process::Command;
 
@@ -45,18 +44,12 @@ pub(super) fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
 }
 
 pub(super) fn socat_required(command_name: &str) -> Result<()> {
-    if command_exists_on_path("socat") {
+    if command_exists_in_path("socat", std::env::var_os("PATH").as_deref()) {
         Ok(())
     } else {
         eprintln!("missing: socat (required for cladding {command_name})");
         Err(Error::message("missing socat"))
     }
-}
-
-fn command_exists_on_path(command: &str) -> bool {
-    env::var_os("PATH")
-        .as_deref()
-        .is_some_and(|paths| env::split_paths(paths).any(|path| is_executable(&path.join(command))))
 }
 
 fn build_blocking_expose_command(

@@ -16,7 +16,6 @@ pub use executor::{
 };
 pub use mcp::{
     AppConfig, AppError, ConfigError, DEFAULT_BIND_ADDR, McpRunServer, build_app, serve,
-    tool_error_result,
 };
 pub use policy::{PolicyEngine, PolicyMode, ValidationError};
 pub use raw::{RawEndpointState, RawErrorBody, RawStreamEvent, raw_handler};

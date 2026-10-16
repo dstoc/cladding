@@ -20,27 +20,6 @@ static BAFFLE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/baffle"));
 
 const RUN_IN_NW_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_NW_SANDBOX_SOCKET:?RUN_NW_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_NW_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
 const RUN_IN_FS_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_FS_SANDBOX_SOCKET:?RUN_FS_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_FS_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
-pub fn config_top_level_entries() -> Vec<String> {
-    let mut names = std::collections::BTreeSet::new();
-    for entry in CONFIG_DIR.dirs() {
-        if let Some(component) = entry.path().components().next()
-            && let std::path::Component::Normal(name) = component
-            && let Some(name) = name.to_str()
-        {
-            names.insert(name.to_string());
-        }
-    }
-    for entry in CONFIG_DIR.files() {
-        if let Some(component) = entry.path().components().next()
-            && let std::path::Component::Normal(name) = component
-            && let Some(name) = name.to_str()
-        {
-            names.insert(name.to_string());
-        }
-    }
-    names.into_iter().collect()
-}
-
 pub fn materialize_config(base_dir: &Path) -> Result<()> {
     materialize_config_dir(base_dir, &CONFIG_DIR)?;
     validate_baffle_config_layout(base_dir)?;

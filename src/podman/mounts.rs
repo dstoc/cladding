@@ -66,7 +66,7 @@ pub(super) fn append_mount_args(cmd: &mut Command, mounts: &[RuntimeMount]) {
 pub(super) fn generated_empty_mask_dirs(spec: &RuntimeSpec) -> Vec<std::path::PathBuf> {
     let mut paths = std::collections::BTreeSet::new();
 
-    for component in runtime_components(spec) {
+    for component in spec.components() {
         for mount in &component.container.mounts {
             if let RuntimeMountSource::GeneratedEmptyMask { path } = &mount.source {
                 paths.insert(path.clone());
@@ -75,17 +75,6 @@ pub(super) fn generated_empty_mask_dirs(spec: &RuntimeSpec) -> Vec<std::path::Pa
     }
 
     paths.into_iter().collect()
-}
-
-fn runtime_components(spec: &RuntimeSpec) -> Vec<&crate::runtime::RuntimeComponent> {
-    let mut components = vec![&spec.proxy, &spec.agent];
-    if let Some(component) = &spec.nw_sandbox {
-        components.push(component);
-    }
-    if let Some(component) = &spec.fs_sandbox {
-        components.push(component);
-    }
-    components
 }
 
 #[cfg(test)]
@@ -195,12 +184,7 @@ mod tests {
                     ignore: false,
                 }],
             };
-            let spec = RuntimeSpec::build_with_roots(
-                project_root,
-                &project_root.join(".."),
-                runtime_root,
-                &config,
-            );
+            let spec = RuntimeSpec::build_with_runtime_root(project_root, runtime_root, &config);
             let container = &spec.agent.container;
             let mut cmd = Command::new("podman");
             append_mount_args(&mut cmd, &container.mounts);

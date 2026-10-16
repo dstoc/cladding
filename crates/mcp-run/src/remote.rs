@@ -180,7 +180,7 @@ fn build_payload(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn run_remote_request<WOut: Write, WErr: Write>(
     server_url: &str,
     payload: RunCommandInput,

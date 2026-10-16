@@ -1,8 +1,9 @@
-use super::commands::{build_idle_supervisor_command, build_mcp_run_supervisor_command};
+use super::commands::build_supervisor_command;
 use super::mounts::{
-    apply_custom_mounts, build_agent_mounts, build_custom_mounts, build_fs_sandbox_mounts,
-    build_proxy_mounts, build_sandbox_mounts,
+    apply_custom_mounts, build_custom_mounts, build_execution_mounts, build_fs_sandbox_mounts,
+    build_proxy_mounts,
 };
+use super::runtime_container_name;
 use super::sockets::{
     RUNTIME_PROXY_AGENT_MOUNT_PATH, RUNTIME_PROXY_NW_SANDBOX_MOUNT_PATH,
     RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH, RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH,
@@ -10,7 +11,7 @@ use super::sockets::{
 };
 use super::types::{
     RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeNames,
-    RuntimeSpec, RuntimeUserNamespace,
+    RuntimeSpec,
 };
 use crate::config::{ExecutionConfig, MountTarget};
 use std::collections::BTreeMap;
@@ -22,21 +23,11 @@ const NETWORK_NONE: &str = "none";
 
 impl RuntimeSpec {
     pub fn build(project_root: &Path, config: &ExecutionConfig) -> Self {
-        let workspace_root = project_root.join("..");
-        Self::build_with_workspace_root(project_root, &workspace_root, config)
+        Self::build_with_runtime_root(project_root, project_root, config)
     }
 
-    pub fn build_with_workspace_root(
+    pub fn build_with_runtime_root(
         project_root: &Path,
-        _workspace_root: &Path,
-        config: &ExecutionConfig,
-    ) -> Self {
-        Self::build_with_roots(project_root, _workspace_root, project_root, config)
-    }
-
-    pub fn build_with_roots(
-        project_root: &Path,
-        _workspace_root: &Path,
         runtime_root: &Path,
         config: &ExecutionConfig,
     ) -> Self {
@@ -52,14 +43,7 @@ impl RuntimeSpec {
             build_nw_sandbox_component(&project_root, config, component_name, &custom_mounts)
         });
         let fs_sandbox = names.fs_sandbox_name.as_ref().map(|component_name| {
-            build_fs_sandbox_component(
-                &project_root,
-                &runtime_root,
-                config,
-                &names,
-                component_name,
-                &custom_mounts,
-            )
+            build_fs_sandbox_component(&project_root, config, component_name, &custom_mounts)
         });
 
         Self {
@@ -72,6 +56,17 @@ impl RuntimeSpec {
             nw_sandbox,
             fs_sandbox,
         }
+    }
+
+    pub(crate) fn components(&self) -> Vec<&RuntimeComponent> {
+        let mut components = vec![&self.proxy, &self.agent];
+        if let Some(component) = &self.nw_sandbox {
+            components.push(component);
+        }
+        if let Some(component) = &self.fs_sandbox {
+            components.push(component);
+        }
+        components
     }
 }
 
@@ -119,7 +114,6 @@ fn build_proxy_component(
             },
         ],
         mounts,
-        ports: Vec::new(),
         stdin: false,
         tty: false,
     };
@@ -132,7 +126,6 @@ fn build_proxy_component(
         labels: build_labels(&config.name, project_root, "proxy"),
         network_name: NETWORK_DEFAULT.to_string(),
         container,
-        user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
 
@@ -143,7 +136,7 @@ fn build_agent_component(
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimeComponent {
     let mut mounts = apply_custom_mounts(
-        build_agent_mounts(project_root),
+        build_execution_mounts(project_root),
         custom_mounts,
         MountTarget::Agent,
     );
@@ -224,18 +217,16 @@ fn build_agent_component(
         container: RuntimeContainer {
             name: runtime_container_name(&names.agent_name),
             image: config.agent_image().to_string(),
-            command: build_idle_supervisor_command(
+            command: build_supervisor_command(
                 "socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/cladding/proxy/agent/proxy.sock",
                 "sleep infinity",
             ),
             workdir: Some("/home/user".to_string()),
             env,
             mounts,
-            ports: Vec::new(),
             stdin: true,
             tty: true,
         },
-        user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
 
@@ -246,7 +237,7 @@ fn build_nw_sandbox_component(
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimeComponent {
     let mut mounts = apply_custom_mounts(
-        build_sandbox_mounts(project_root),
+        build_execution_mounts(project_root),
         custom_mounts,
         MountTarget::NwSandbox,
     );
@@ -322,31 +313,27 @@ fn build_nw_sandbox_component(
         container: RuntimeContainer {
             name: runtime_container_name(component_name),
             image: config.nw_sandbox_image().to_string(),
-            command: build_mcp_run_supervisor_command(
+            command: build_supervisor_command(
                 "socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/cladding/proxy/nw-sandbox/proxy.sock",
                 "chmod 0700 /run/cladding/run/nw-sandbox && umask 077 && exec mcp-run",
             ),
             workdir: Some("/home/user".to_string()),
             env,
             mounts,
-            ports: Vec::new(),
             stdin: false,
             tty: false,
         },
-        user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
 
 fn build_fs_sandbox_component(
     project_root: &Path,
-    _runtime_root: &Path,
     config: &ExecutionConfig,
-    _names: &RuntimeNames,
     component_name: &str,
     custom_mounts: &[RuntimeCustomMount],
 ) -> RuntimeComponent {
     let mut mounts = apply_custom_mounts(
-        build_fs_sandbox_mounts(project_root, custom_mounts),
+        build_fs_sandbox_mounts(project_root),
         custom_mounts,
         MountTarget::FsSandbox,
     );
@@ -398,11 +385,9 @@ fn build_fs_sandbox_component(
                 },
             ],
             mounts,
-            ports: Vec::new(),
             stdin: false,
             tty: false,
         },
-        user_namespace: RuntimeUserNamespace::KeepId,
     }
 }
 
@@ -419,10 +404,6 @@ fn build_labels(project_name: &str, project_root: &Path, app: &str) -> BTreeMap<
 
 fn build_no_proxy() -> String {
     ["localhost", LOOPBACK].join(",")
-}
-
-fn runtime_container_name(component_name: &str) -> String {
-    format!("{component_name}-instance")
 }
 
 #[cfg(test)]
@@ -539,8 +520,6 @@ mod tests {
         );
         assert_eq!(spec.proxy.network_name, "default");
         assert_eq!(spec.agent.network_name, "none");
-        assert_eq!(spec.proxy.user_namespace, RuntimeUserNamespace::KeepId);
-        assert_eq!(spec.agent.user_namespace, RuntimeUserNamespace::KeepId);
         assert_eq!(spec.proxy.container.name, "demo-proxy-instance");
         assert_eq!(
             spec.proxy.container.command,
@@ -563,7 +542,6 @@ mod tests {
                 "CLADDING_NW_SANDBOX_SESSION_CONFIG",
             ]
         );
-        assert!(spec.proxy.container.ports.is_empty());
         assert_eq!(
             spec.proxy.container.image,
             "localhost/cladding-proxy:latest"
@@ -748,13 +726,9 @@ mod tests {
     }
 
     #[test]
-    fn external_workspace_root_does_not_create_an_implicit_mount() {
+    fn build_does_not_add_an_implicit_workspace_mount() {
         let config = execution_config(true, false, Vec::new(), false);
-        let spec = RuntimeSpec::build_with_workspace_root(
-            Path::new("/tmp/other/.cladding"),
-            Path::new("/repo"),
-            &config,
-        );
+        let spec = RuntimeSpec::build(Path::new("/tmp/other/.cladding"), &config);
         let agent = container(&spec.agent, "demo-agent-instance");
         assert!(!mount_paths(agent).contains("/home/user/workspace"));
         assert_eq!(agent.workdir.as_deref(), Some("/home/user"));
@@ -934,7 +908,6 @@ mod tests {
             (spec.nw_sandbox.as_ref().expect("network sandbox"), nw),
         ] {
             assert_eq!(component.network_name, "none");
-            assert_eq!(component.user_namespace, RuntimeUserNamespace::KeepId);
             assert!(
                 container
                     .command
@@ -987,7 +960,6 @@ mod tests {
         assert!(!spec.proxy.use_runsc);
         assert_eq!(env_value(proxy, "CLADDING_SANDBOX_NAME"), None);
         assert!(spec.agent.use_runsc);
-        assert_eq!(spec.agent.user_namespace, RuntimeUserNamespace::KeepId);
     }
 
     #[test]

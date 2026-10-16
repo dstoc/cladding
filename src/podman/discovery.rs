@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::fs_utils::is_executable;
+use crate::fs_utils::command_exists_in_path;
 use crate::runtime_metrics;
 use anyhow::Context as _;
 use serde_json::Value;
@@ -58,15 +58,6 @@ pub fn runsc_available(verbose: bool, quiet_helpers: bool) -> Result<bool> {
 
 fn command_exists(command: &str) -> bool {
     command_exists_in_path(command, env::var_os("PATH").as_deref())
-}
-
-fn command_exists_in_path(command: &str, paths: Option<&std::ffi::OsStr>) -> bool {
-    paths.is_some_and(|paths| {
-        env::split_paths(paths).any(|path| {
-            let candidate = path.join(command);
-            is_executable(&candidate)
-        })
-    })
 }
 
 fn podman_info_reports_runtime_named(value: &Value, runtime_name: &str) -> bool {
@@ -340,33 +331,6 @@ mod tests {
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert_eq!(args, ["container", "ps", "--all", "--format", "json"]);
-    }
-
-    #[test]
-    fn command_exists_in_path_detects_executable_entries() {
-        let temp =
-            std::env::temp_dir().join(format!("cladding-command-exists-{}", std::process::id()));
-        if temp.exists() {
-            std::fs::remove_dir_all(&temp).expect("cleanup temp dir");
-        }
-        std::fs::create_dir_all(&temp).expect("create temp dir");
-
-        let command_path = temp.join("runsc");
-        std::fs::write(&command_path, b"#!/bin/sh\nexit 0\n").expect("write command");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&command_path)
-                .expect("metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&command_path, permissions).expect("chmod");
-        }
-
-        assert!(command_exists_in_path("runsc", Some(temp.as_os_str())));
-        assert!(!command_exists_in_path("podman", Some(temp.as_os_str())));
-
-        std::fs::remove_dir_all(&temp).expect("cleanup temp dir");
     }
 
     #[test]

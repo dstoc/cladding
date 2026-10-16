@@ -103,12 +103,8 @@ impl Context {
     }
 
     pub(super) fn runtime_spec(&self, config: &ExecutionConfig) -> Result<RuntimeSpec> {
-        let mut spec = RuntimeSpec::build_with_roots(
-            &self.project_root,
-            &self.workspace_root,
-            &self.runtime_root,
-            config,
-        );
+        let mut spec =
+            RuntimeSpec::build_with_runtime_root(&self.project_root, &self.runtime_root, config);
         if let Some(secret_mounts) = &self.run_secret_mounts {
             let proxy = &mut spec.proxy.container;
             proxy.mounts.push(RuntimeMount {
