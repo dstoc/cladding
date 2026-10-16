@@ -39,6 +39,8 @@ impl Fixture {
         let args_path = root.join("podman-args.txt");
         let podman_path = bin_dir.join("podman");
         let running_containers = serde_json::json!([{
+            "Names": ["demo-agent-instance"],
+            "State": "running",
             "Labels": {
                 "app": "agent",
                 "cladding": "demo",

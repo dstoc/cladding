@@ -5,7 +5,7 @@ use cladding::config::{
 };
 use cladding::error::{Error, Result};
 use cladding::fs_utils::canonicalize_path;
-use cladding::podman::list_running_projects;
+use cladding::podman::{ContainerSnapshot, list_container_snapshot};
 use cladding::runtime::{RuntimeMount, RuntimeMountSource, RuntimeSpec};
 use std::path::{Path, PathBuf};
 
@@ -248,11 +248,20 @@ pub(super) fn project_runtime_status(
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<ProjectRuntimeStatus> {
+    let containers = list_container_snapshot(verbose, quiet_helpers)?;
+    project_runtime_status_from_snapshot(context, config, &containers)
+}
+
+pub(super) fn project_runtime_status_from_snapshot(
+    context: &Context,
+    config: &ExecutionConfig,
+    containers: &ContainerSnapshot,
+) -> Result<ProjectRuntimeStatus> {
     let current_project_root = current_project_root(context)?;
 
     let mut conflicting_roots = Vec::new();
     let mut already_running = false;
-    for project in list_running_projects(verbose, quiet_helpers)? {
+    for project in containers.running_projects() {
         if project.name != config.name {
             continue;
         }

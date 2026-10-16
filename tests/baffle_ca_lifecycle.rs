@@ -121,12 +121,8 @@ if [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then
   project_root=$(printf '%s\n' "$row" | cut -d '|' -f 3)
   resource=$(printf '%s\n' "$row" | cut -d '|' -f 4)
   socket_volume=$(printf '%s\n' "$row" | cut -d '|' -f 5)
-  if [ "$4" = "{{json .Labels}}" ]; then
-    printf '{"cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_socket_volume":"%s"}\n' \
-      "$cladding_name" "$project_root" "$resource" "$socket_volume"
-  else
-    printf '%s\n' "$volume_name"
-  fi
+  printf '{"Name":"%s","Labels":{"cladding":"%s","project_root":"%s","cladding_resource":"%s","cladding_socket_volume":"%s"}}\n' \
+    "$volume_name" "$cladding_name" "$project_root" "$resource" "$socket_volume"
   exit 0
 fi
 if [ "$1" = "volume" ] && [ "$2" = "rm" ]; then
@@ -136,13 +132,27 @@ if [ "$1" = "volume" ] && [ "$2" = "rm" ]; then
   exit 0
 fi
 if [ "$1" = "container" ] && [ "$2" = "ps" ]; then
+  if [ "${CLADDING_TEST_FAIL_CONTAINER_PS:-}" = "1" ]; then
+    echo 'fake container listing failure' >&2
+    exit 42
+  fi
+  if [ "${CLADDING_TEST_CONTAINER_PS_JSON+x}" = "x" ]; then
+    printf '%s\n' "$CLADDING_TEST_CONTAINER_PS_JSON"
+    exit 0
+  fi
   printf '['
   separator=
   if [ -f "$state" ]; then
-    while IFS='|' read -r name project_name project_root app; do
+    while IFS='|' read -r name project_name project_root app state_status labels_mode; do
       [ -n "$name" ] || continue
-      printf '%s{"Names":["%s"],"Labels":{"app":"%s","cladding":"%s","project_root":"%s"}}' \
-        "$separator" "$name" "$app" "$project_name" "$project_root"
+      [ -n "$state_status" ] || state_status=running
+      if [ "$labels_mode" = "missing" ]; then
+        printf '%s{"Names":["%s"],"State":"%s","Labels":{}}' \
+          "$separator" "$name" "$state_status"
+      else
+        printf '%s{"Names":["%s"],"State":"%s","Labels":{"app":"%s","cladding":"%s","project_root":"%s"}}' \
+          "$separator" "$name" "$state_status" "$app" "$project_name" "$project_root"
+      fi
       separator=,
     done < "$state"
   fi
@@ -156,17 +166,17 @@ if [ "$1" = "container" ] && [ "$2" = "exists" ]; then
   exit 1
 fi
 if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
+  if [ "${CLADDING_TEST_FAIL_CONTAINER_INSPECT:-}" = "1" ]; then
+    echo 'fake container inspection failure' >&2
+    exit 42
+  fi
   row=$(awk -F '|' -v name="$5" '$1 == name { print; exit }' "$state")
   if [ -z "$row" ]; then exit 1; fi
   project_name=$(printf '%s\n' "$row" | cut -d '|' -f 2)
   project_root=$(printf '%s\n' "$row" | cut -d '|' -f 3)
   app=$(printf '%s\n' "$row" | cut -d '|' -f 4)
-  if [ "$4" = "{{json .Config.Labels}}" ]; then
-    printf '{"app":"%s","cladding":"%s","project_root":"%s"}\n' \
-      "$app" "$project_name" "$project_root"
-  else
-    printf 'running\n'
-  fi
+  printf '{"State":{"Status":"running"},"Config":{"Labels":{"app":"%s","cladding":"%s","project_root":"%s"}}}\n' \
+    "$app" "$project_name" "$project_root"
   exit 0
 fi
 if [ "$1" = "rm" ]; then
@@ -294,7 +304,7 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
       fi
       printf '%s\n' 'ONE_OFF_SECRET_SOURCE_IS_SEPARATE_AND_PRIVATE' >> "$CLADDING_PODMAN_LOG"
     fi
-    printf '%s|%s|%s|%s\n' "$name" "$project_name" "$project_root" "$app" >> "$state"
+    printf '%s|%s|%s|%s|running|present\n' "$name" "$project_name" "$project_root" "$app" >> "$state"
     exit 0
   fi
   credentials_dir=
@@ -984,6 +994,7 @@ exit 0
     );
 
     fs::write(&socket_volume_state, "cladding-kache||||\n").unwrap();
+    fs::write(&podman_log, "").unwrap();
     let mut up = cli(
         &root,
         &bin_dir,
@@ -1002,6 +1013,27 @@ exit 0
         "cladding up must not create the former default workspace mount point"
     );
     let startup_log = read_log(&podman_log);
+    assert_eq!(
+        startup_log
+            .lines()
+            .filter(|line| line.starts_with("container ps "))
+            .collect::<Vec<_>>(),
+        ["container ps --all --format json"],
+        "up should use one all-container snapshot for project and name discovery: {startup_log}"
+    );
+    for name in [
+        "demo-proxy-instance",
+        "demo-agent-instance",
+        "demo-nw-sandbox-instance",
+    ] {
+        assert!(
+            !startup_log.lines().any(|line| {
+                line == format!("container exists {name}")
+                    || line.contains("container inspect ") && line.ends_with(name)
+            }),
+            "startup must not issue per-container presence or state queries: {startup_log}"
+        );
+    }
     assert!(
         !startup_log.contains("pod create"),
         "cladding up must not create Podman pods: {startup_log}"
@@ -1075,6 +1107,144 @@ exit 0
         !agent_start.contains("-empty-empty"),
         "persistent runtime must not create or mount an implicit named volume: {agent_start}"
     );
+
+    let running_state = fs::read_to_string(&podman_state).unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut already_up = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    already_up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
+    let already_up_output = already_up.output().unwrap();
+    assert_success(already_up_output.clone());
+    assert!(String::from_utf8_lossy(&already_up_output.stdout).contains("already running"));
+    let already_up_log = read_log(&podman_log);
+    assert_eq!(
+        already_up_log
+            .lines()
+            .filter(|line| line.starts_with("container ps "))
+            .count(),
+        1,
+        "running runtime preflight should use one snapshot: {already_up_log}"
+    );
+    assert!(
+        !already_up_log.lines().any(|line| {
+            line.starts_with("container exists demo-") || line.starts_with("container inspect ")
+        }),
+        "running runtime preflight should not inspect expected names individually: {already_up_log}"
+    );
+
+    for (state, description) in [
+        (
+            format!(
+                "demo-agent-instance|demo|{}|agent|exited|present\n",
+                project_root.display()
+            ),
+            "stopped expected container",
+        ),
+        (
+            "demo-agent-instance|foreign|/tmp/foreign/.cladding|agent|running|present\n"
+                .to_string(),
+            "foreign exact-name collision",
+        ),
+        (
+            format!(
+                "demo-agent-instance|demo|{}|foreign-app|running|present\n",
+                project_root.display()
+            ),
+            "exact-name collision with foreign component labels",
+        ),
+        (
+            "demo-agent-instance||||running|missing\n".to_string(),
+            "exact-name collision with missing labels",
+        ),
+    ] {
+        fs::write(&podman_state, state).unwrap();
+        fs::write(&podman_log, "").unwrap();
+        let mut conflicting_up = cli(
+            &root,
+            &bin_dir,
+            &podman_log,
+            &certificate_source,
+            &private_key_source,
+        );
+        conflicting_up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
+        let output = conflicting_up.output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{description} must prevent startup: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !read_log(&podman_log)
+                .lines()
+                .any(|line| line.contains("run -d")),
+            "{description} must not start containers: {}",
+            read_log(&podman_log)
+        );
+    }
+
+    fs::write(&podman_state, "").unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut malformed_labels_up = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    malformed_labels_up
+        .args(["--cladding-dir", project_root.to_str().unwrap(), "up"])
+        .env(
+            "CLADDING_TEST_CONTAINER_PS_JSON",
+            r#"[{"Names":["demo-agent-instance"],"State":"running","Labels":"cladding=foreign"}]"#,
+        );
+    assert!(!malformed_labels_up.output().unwrap().status.success());
+    assert!(
+        !read_log(&podman_log)
+            .lines()
+            .any(|line| line.contains("run -d")),
+        "malformed labels on an expected name must remain a collision"
+    );
+
+    for (env_name, env_value, description) in [
+        (
+            "CLADDING_TEST_CONTAINER_PS_JSON",
+            "not-json",
+            "malformed container snapshot",
+        ),
+        (
+            "CLADDING_TEST_FAIL_CONTAINER_PS",
+            "1",
+            "container listing engine failure",
+        ),
+    ] {
+        fs::write(&podman_log, "").unwrap();
+        let mut invalid_up = cli(
+            &root,
+            &bin_dir,
+            &podman_log,
+            &certificate_source,
+            &private_key_source,
+        );
+        invalid_up
+            .args(["--cladding-dir", project_root.to_str().unwrap(), "up"])
+            .env(env_name, env_value);
+        assert!(
+            !invalid_up.output().unwrap().status.success(),
+            "{description} must fail preflight"
+        );
+        let log = read_log(&podman_log);
+        assert!(
+            !log.lines().any(|line| line.contains("run -d")),
+            "{description} must not start containers: {log}"
+        );
+    }
+
+    fs::write(&podman_state, running_state).unwrap();
 
     fs::write(&podman_log, "").unwrap();
     let mut down = cli(
@@ -1218,8 +1388,7 @@ exit 0
     let destroy_log = read_log(&podman_log);
     assert!(
         destroy_log.contains("container exists demo-agent-instance")
-            && destroy_log
-                .contains("container inspect --format {{json .Config.Labels}} demo-agent-instance")
+            && destroy_log.contains("container inspect --format {{json .}} demo-agent-instance")
             && destroy_log.contains("rm -f demo-agent-instance"),
         "destroy should verify and remove the owned standalone container: {destroy_log}"
     );
@@ -1246,13 +1415,44 @@ exit 0
     assert!(!destroy_foreign.output().unwrap().status.success());
     let destroy_foreign_log = read_log(&podman_log);
     assert!(
-        destroy_foreign_log
-            .contains("container inspect --format {{json .Config.Labels}} demo-agent-instance")
+        destroy_foreign_log.contains("container inspect --format {{json .}} demo-agent-instance")
     );
     assert!(!destroy_foreign_log.contains("rm -f demo-agent-instance"));
     assert_eq!(
         fs::read_to_string(&container_state).unwrap(),
         "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n"
+    );
+
+    fs::write(
+        &container_state,
+        format!(
+            "demo-agent-instance|demo|{}|agent|running|present\n",
+            project_root.display()
+        ),
+    )
+    .unwrap();
+    fs::write(&podman_log, "").unwrap();
+    let mut destroy_inspect_failure = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    destroy_inspect_failure
+        .args(["--cladding-dir", project_root.to_str().unwrap(), "destroy"])
+        .env("CLADDING_TEST_FAIL_CONTAINER_INSPECT", "1");
+    assert!(!destroy_inspect_failure.output().unwrap().status.success());
+    assert!(
+        !read_log(&podman_log).contains("rm -f demo-agent-instance"),
+        "inspection failure must not be treated as absence or ownership"
+    );
+    assert_eq!(
+        fs::read_to_string(&container_state).unwrap(),
+        format!(
+            "demo-agent-instance|demo|{}|agent|running|present\n",
+            project_root.display()
+        )
     );
 
     fs::remove_dir_all(root).unwrap();

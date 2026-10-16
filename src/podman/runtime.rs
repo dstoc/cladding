@@ -14,6 +14,7 @@ use super::command::{
     PodmanRuntimeOptions, ensure_success_output, ensure_success_output_with_diagnostics,
     forward_output, podman_command_with_options, run_helper_command, trace_command,
 };
+use super::discovery::{ContainerSnapshot, list_container_snapshot};
 use super::mounts::{append_mount_args, generated_empty_mask_dirs};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,7 @@ pub struct RuntimeResource {
 #[derive(Debug, Clone)]
 pub struct RuntimeInventory {
     expected_count: usize,
+    unowned_resources: usize,
     pub resources: Vec<RuntimeResource>,
 }
 
@@ -35,6 +37,12 @@ pub struct RuntimeCleanupReport {
     pub runtime_root_safe_to_remove: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ResourceInspection {
+    state: String,
+    labels: serde_json::Value,
+}
+
 impl RuntimeInventory {
     pub fn is_empty(&self) -> bool {
         self.resources.is_empty()
@@ -42,6 +50,7 @@ impl RuntimeInventory {
 
     pub fn is_fully_running(&self) -> bool {
         self.resources.len() == self.expected_count
+            && self.unowned_resources == 0
             && self
                 .resources
                 .iter()
@@ -131,43 +140,54 @@ pub fn runtime_inventory(
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<RuntimeInventory> {
+    let containers = list_container_snapshot(verbose, quiet_helpers)?;
+    Ok(runtime_inventory_from_snapshot(spec, &containers))
+}
+
+pub fn runtime_inventory_from_snapshot(
+    spec: &RuntimeSpec,
+    containers: &ContainerSnapshot,
+) -> RuntimeInventory {
     let mut expected_count = 0;
+    let mut unowned_resources = 0;
     let mut resources = Vec::new();
 
     for component in runtime_components(spec) {
         let container = &component.container;
         expected_count += 1;
-        if let Some(state) =
-            inspect_resource_state("container", &container.name, verbose, quiet_helpers)?
-        {
+        if let Some(existing) = containers.named(&container.name) {
+            if !component
+                .labels
+                .iter()
+                .all(|(key, value)| existing.labels.get(key) == Some(value))
+            {
+                unowned_resources += 1;
+            }
             resources.push(RuntimeResource {
                 kind: "container",
                 name: container.name.clone(),
-                state,
+                state: existing.state.clone(),
             });
         }
     }
 
-    Ok(RuntimeInventory {
+    RuntimeInventory {
         expected_count,
+        unowned_resources,
         resources,
-    })
+    }
 }
 
 pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cleanup_errors = CleanupErrors::default();
     for component in runtime_components(spec) {
         let container = &component.container;
-        if inspect_resource_state("container", &container.name, verbose, quiet_helpers)?.is_none() {
+        let Some(inspection) =
+            inspect_resource("container", &container.name, verbose, quiet_helpers)?
+        else {
             continue;
-        }
-        if resource_labels_match_expected(
-            "container",
-            &container.name,
-            &component.labels,
-            verbose,
-            quiet_helpers,
-        )? {
+        };
+        if resource_labels_match_expected(&inspection.labels, &component.labels) {
             cleanup_errors.record(container_rm(&container.name, verbose, quiet_helpers));
         } else {
             cleanup_errors.record(Err(Error::message(format!(
@@ -315,8 +335,8 @@ fn proxy_socket_volume_names(spec: &RuntimeSpec) -> BTreeSet<String> {
 fn ensure_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let proxy_socket_volumes = proxy_socket_volume_names(spec);
     for name in socket_volume_names(spec) {
-        if inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_some() {
-            if !socket_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
+        if let Some(inspection) = inspect_resource("volume", &name, verbose, quiet_helpers)? {
+            if !socket_volume_labels_match(&inspection, &name, spec) {
                 return Err(Error::message(format!(
                     "refusing to use Podman volume '{name}' because it is not owned by this Cladding runtime"
                 )));
@@ -358,10 +378,10 @@ fn ensure_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool)
 fn remove_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cleanup_error = None;
     for name in socket_volume_names(spec) {
-        if inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_none() {
+        let Some(inspection) = inspect_resource("volume", &name, verbose, quiet_helpers)? else {
             continue;
-        }
-        if !socket_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
+        };
+        if !socket_volume_labels_match(&inspection, &name, spec) {
             record_cleanup_result(
                 &mut cleanup_error,
                 Err(Error::message(format!(
@@ -422,19 +442,11 @@ fn socket_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, Stri
 }
 
 fn socket_volume_labels_match(
+    inspection: &ResourceInspection,
     name: &str,
     spec: &RuntimeSpec,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<bool> {
-    let labels = inspect_value("volume", name, "{{json .Labels}}", verbose, quiet_helpers)?;
-    let labels: serde_json::Value = serde_json::from_str(&labels)
-        .with_context(|| format!("failed to parse labels for Podman volume {name}"))?;
-
-    Ok(labels_match_expected(
-        &labels,
-        &socket_volume_labels(spec, name),
-    ))
+) -> bool {
+    labels_match_expected(&inspection.labels, &socket_volume_labels(spec, name))
 }
 
 fn managed_mount_volumes(spec: &RuntimeSpec) -> BTreeMap<String, ManagedVolumeKind> {
@@ -461,8 +473,12 @@ fn ensure_managed_mount_volumes(
             remove_managed_mount_seed_helper(spec, &name, false, verbose, quiet_helpers)?;
         }
 
-        let existing = inspect_resource_state("volume", &name, verbose, quiet_helpers)?.is_some();
-        if existing && !managed_mount_volume_labels_match(&name, spec, verbose, quiet_helpers)? {
+        let inspection = inspect_resource("volume", &name, verbose, quiet_helpers)?;
+        let existing = inspection.is_some();
+        if inspection
+            .as_ref()
+            .is_some_and(|inspection| !managed_mount_volume_labels_match(inspection, &name, spec))
+        {
             return Err(Error::message(format!(
                 "refusing to use Podman volume '{name}' because it is not owned by this Cladding runtime"
             )));
@@ -537,18 +553,11 @@ fn managed_mount_seed_helper_labels(
 }
 
 fn managed_mount_volume_labels_match(
+    inspection: &ResourceInspection,
     name: &str,
     spec: &RuntimeSpec,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<bool> {
-    let labels = inspect_value("volume", name, "{{json .Labels}}", verbose, quiet_helpers)?;
-    let labels: serde_json::Value = serde_json::from_str(&labels)
-        .with_context(|| format!("failed to parse labels for managed mount volume {name}"))?;
-    Ok(labels_match_expected(
-        &labels,
-        &managed_mount_volume_labels(spec, name),
-    ))
+) -> bool {
+    labels_match_expected(&inspection.labels, &managed_mount_volume_labels(spec, name))
 }
 
 fn create_managed_mount_volume(
@@ -603,11 +612,11 @@ fn remove_managed_mount_volume(
     verbose: bool,
     quiet_helpers: bool,
 ) -> Result<()> {
-    if inspect_resource_state("volume", name, verbose, quiet_helpers)?.is_none() {
+    let Some(inspection) = inspect_resource("volume", name, verbose, quiet_helpers)? else {
         remove_managed_copy_seed_marker(spec, name)?;
         return Ok(());
-    }
-    if !managed_mount_volume_labels_match(name, spec, verbose, quiet_helpers)? {
+    };
+    if !managed_mount_volume_labels_match(&inspection, name, spec) {
         return Err(Error::message(format!(
             "refusing to remove Podman volume '{name}' because it is not owned by this Cladding runtime"
         )));
@@ -765,18 +774,17 @@ fn remove_managed_mount_seed_helper(
     quiet_helpers: bool,
 ) -> Result<()> {
     let helper_name = managed_mount_seed_helper_name(volume_name);
-    let Some(state) = inspect_resource_state("container", &helper_name, verbose, quiet_helpers)?
+    let Some(inspection) = inspect_resource("container", &helper_name, verbose, quiet_helpers)?
     else {
         return Ok(());
     };
     let labels = managed_mount_seed_helper_labels(spec, volume_name);
-    if !resource_labels_match_expected("container", &helper_name, &labels, verbose, quiet_helpers)?
-    {
+    if !resource_labels_match_expected(&inspection.labels, &labels) {
         return Err(Error::message(format!(
             "refusing to remove container '{helper_name}' because it is not owned by this Cladding runtime"
         )));
     }
-    if !allow_running && state.eq_ignore_ascii_case("running") {
+    if !allow_running && inspection.state.eq_ignore_ascii_case("running") {
         return Err(Error::message(format!(
             "copy mount volume '{volume_name}' already has a running seed helper"
         )));
@@ -1010,20 +1018,10 @@ fn record_cleanup_result(target: &mut Option<crate::error::Error>, result: Resul
 }
 
 fn resource_labels_match_expected(
-    kind: &str,
-    name: &str,
+    labels: &serde_json::Value,
     expected: &BTreeMap<String, String>,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<bool> {
-    let format = match kind {
-        "container" => "{{json .Config.Labels}}",
-        _ => "{{json .Labels}}",
-    };
-    let labels = inspect_value(kind, name, format, verbose, quiet_helpers)?;
-    let labels: serde_json::Value = serde_json::from_str(&labels)
-        .with_context(|| format!("failed to parse labels for {kind} {name}"))?;
-    Ok(labels_match_expected(&labels, expected))
+) -> bool {
+    labels_match_expected(labels, expected)
 }
 
 fn labels_match_expected(
@@ -1035,32 +1033,12 @@ fn labels_match_expected(
     })
 }
 
-fn inspect_value(
-    kind: &str,
-    name: &str,
-    format: &str,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<String> {
-    let mut cmd = Command::new("podman");
-    cmd.args([kind, "inspect", "--format", format, name]);
-    trace_command(&cmd, verbose);
-    let output = runtime_metrics::output(&mut cmd)
-        .with_context(|| format!("failed to inspect {kind} {name}"))?;
-    if quiet_helpers {
-        ensure_success_output_with_diagnostics(&output, "podman inspect")?;
-    } else {
-        ensure_success_output(&output, "podman inspect")?;
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn inspect_resource_state(
+fn inspect_resource(
     kind: &'static str,
     name: &str,
     verbose: bool,
     quiet_helpers: bool,
-) -> Result<Option<String>> {
+) -> Result<Option<ResourceInspection>> {
     let mut exists_cmd = build_resource_exists_command(kind, name);
     trace_command(&exists_cmd, verbose);
     let exists_output = if quiet_helpers {
@@ -1102,9 +1080,39 @@ fn inspect_resource_state(
         return ensure_success_output(&output, "podman inspect").map(|_| None);
     }
 
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_resource_inspection(kind, &stdout).map(Some)
+}
+
+fn parse_resource_inspection(kind: &str, output: &str) -> Result<ResourceInspection> {
+    let parsed: serde_json::Value = serde_json::from_str(output)
+        .with_context(|| format!("failed to parse Podman {kind} inspection output"))?;
+    let parsed = match &parsed {
+        serde_json::Value::Array(items) if items.len() == 1 => &items[0],
+        _ => &parsed,
+    };
+    let state = match kind {
+        "container" => parsed.pointer("/State/Status"),
+        "volume" => parsed.get("Name"),
+        _ => None,
+    }
+    .and_then(serde_json::Value::as_str)
+    .filter(|state| !state.is_empty())
+    .ok_or_else(|| {
+        Error::message(format!(
+            "failed to parse Podman {kind} inspection output: missing state or name"
+        ))
+    })?
+    .to_string();
+    let labels = match kind {
+        "container" => parsed.pointer("/Config/Labels"),
+        "volume" => parsed.get("Labels"),
+        _ => None,
+    }
+    .cloned()
+    .unwrap_or(serde_json::Value::Null);
+
+    Ok(ResourceInspection { state, labels })
 }
 
 fn build_resource_exists_command(kind: &str, name: &str) -> Command {
@@ -1115,11 +1123,7 @@ fn build_resource_exists_command(kind: &str, name: &str) -> Command {
 
 fn build_resource_inspect_command(kind: &str, name: &str) -> Command {
     let mut cmd = Command::new("podman");
-    let format = match kind {
-        "volume" => "{{.Name}}",
-        _ => "{{.State.Status}}",
-    };
-    cmd.args([kind, "inspect", "--format", format, name]);
+    cmd.args([kind, "inspect", "--format", "{{json .}}", name]);
     cmd
 }
 
@@ -1853,6 +1857,7 @@ mod tests {
     fn runtime_inventory_requires_every_resource_to_be_running() {
         let complete = RuntimeInventory {
             expected_count: 1,
+            unowned_resources: 0,
             resources: vec![RuntimeResource {
                 kind: "container",
                 name: "demo-agent-instance".to_string(),
@@ -1863,18 +1868,27 @@ mod tests {
 
         let partial = RuntimeInventory {
             expected_count: 2,
+            unowned_resources: 0,
             resources: complete.resources.clone(),
         };
         assert!(!partial.is_fully_running());
 
         let stopped = RuntimeInventory {
             expected_count: 1,
+            unowned_resources: 0,
             resources: vec![RuntimeResource {
                 state: "exited".to_string(),
                 ..complete.resources[0].clone()
             }],
         };
         assert!(!stopped.is_fully_running());
+
+        let unowned = RuntimeInventory {
+            expected_count: 1,
+            unowned_resources: 1,
+            resources: complete.resources.clone(),
+        };
+        assert!(!unowned.is_fully_running());
     }
 
     #[test]
@@ -1895,14 +1909,52 @@ mod tests {
                 "container",
                 "inspect",
                 "--format",
-                "{{.State.Status}}",
+                "{{json .}}",
                 "demo-agent-instance"
             ]
         );
         assert_eq!(
             command_args(&build_resource_inspect_command("volume", "demo-cache")),
-            vec!["volume", "inspect", "--format", "{{.Name}}", "demo-cache"]
+            vec!["volume", "inspect", "--format", "{{json .}}", "demo-cache"]
         );
+    }
+
+    #[test]
+    fn resource_inspection_reads_state_and_labels_from_one_response() {
+        let container = parse_resource_inspection(
+            "container",
+            r#"{"State":{"Status":"running"},"Config":{"Labels":{"app":"agent","cladding":"demo"}}}"#,
+        )
+        .expect("container inspection");
+        assert_eq!(container.state, "running");
+        assert_eq!(
+            container.labels,
+            serde_json::json!({"app":"agent","cladding":"demo"})
+        );
+
+        let volume = parse_resource_inspection(
+            "volume",
+            r#"{"Name":"demo-cache","Labels":{"cladding":"demo"}}"#,
+        )
+        .expect("volume inspection");
+        assert_eq!(volume.state, "demo-cache");
+        assert_eq!(volume.labels, serde_json::json!({"cladding":"demo"}));
+    }
+
+    #[test]
+    fn resource_inspection_rejects_malformed_or_incomplete_output() {
+        for (kind, output) in [
+            ("container", "not-json"),
+            ("container", r#"{"Config":{"Labels":{}}}"#),
+            ("volume", r#"{"Labels":{}}"#),
+            ("volume", "[]"),
+            ("volume", "[{},{}]"),
+        ] {
+            assert!(
+                parse_resource_inspection(kind, output).is_err(),
+                "accepted {kind} inspection {output}"
+            );
+        }
     }
 
     #[test]
