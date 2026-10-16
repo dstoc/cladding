@@ -74,7 +74,12 @@ fn main() {
     });
 
     if cfg!(target_os = "linux") {
-        build_locally(workspace_root, &target_dir, &helper_target);
+        build_locally(
+            workspace_root,
+            &target_dir,
+            &helper_target,
+            &target_settings,
+        );
     } else {
         build_with_podman(
             workspace_root,
@@ -295,9 +300,15 @@ fn copy_bin(src: &Path, dst: &Path) {
     });
 }
 
-fn build_locally(workspace_root: &Path, target_dir: &Path, target: &str) {
+fn build_locally(
+    workspace_root: &Path,
+    target_dir: &Path,
+    target: &str,
+    target_settings: &[(std::ffi::OsString, std::ffi::OsString)],
+) {
     let mut cargo = Command::new("cargo");
     cargo.current_dir(workspace_root);
+    configure_nested_cargo_environment(&mut cargo, target_settings);
     cargo
         .arg("build")
         .arg("--locked")
@@ -319,6 +330,17 @@ fn build_locally(workspace_root: &Path, target_dir: &Path, target: &str) {
     if !status.success() {
         panic!("cargo build -p mcp-run failed");
     }
+}
+
+fn configure_nested_cargo_environment(
+    cargo: &mut Command,
+    target_settings: &[(std::ffi::OsString, std::ffi::OsString)],
+) {
+    // Cargo exposes this value to build scripts after resolving flags for the
+    // outer target. Let the nested Cargo process resolve flags for its own
+    // helper target from raw settings and Cargo config instead.
+    cargo.env_remove("CARGO_ENCODED_RUSTFLAGS");
+    cargo.envs(target_settings.iter().cloned());
 }
 
 fn build_with_podman(
@@ -385,27 +407,32 @@ fn podman_build_command(
 }
 
 fn cargo_target_environment(target: &str) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    cargo_target_environment_from(target, env::vars_os())
+}
+
+fn cargo_target_environment_from(
+    target: &str,
+    variables: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     let prefix = format!(
         "CARGO_TARGET_{}_",
         target.to_ascii_uppercase().replace('-', "_")
     );
-    env::vars_os()
-        .filter(|(key, _)| {
-            key == "RUSTFLAGS"
-                || key == "CARGO_ENCODED_RUSTFLAGS"
-                || key.to_string_lossy().starts_with(&prefix)
-        })
+    variables
+        .into_iter()
+        .filter(|(key, _)| key == "RUSTFLAGS" || key.to_string_lossy().starts_with(&prefix))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        helper_target_dir, is_supported_platform, linux_helper_target, podman_build_command,
-        release_dir,
+        cargo_target_environment_from, configure_nested_cargo_environment, helper_target_dir,
+        is_supported_platform, linux_helper_target, podman_build_command, release_dir,
     };
     use std::ffi::OsString;
     use std::path::Path;
+    use std::process::Command;
 
     #[test]
     fn supports_linux_and_macos_architectures() {
@@ -489,6 +516,105 @@ mod tests {
             assert!(
                 args.iter().any(|arg| arg == expected),
                 "missing {expected:?} in {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_cargo_uses_helper_target_flags_not_outer_encoded_flags() {
+        let helper_target = "aarch64-unknown-linux-gnu";
+        let outer_target = "aarch64-apple-darwin";
+        for outer_encoded_flags in ["", "--cfg=outer_encoded_flag"] {
+            let target_env_name = |target: &str| {
+                format!(
+                    "CARGO_TARGET_{}_RUSTFLAGS",
+                    target.to_ascii_uppercase().replace('-', "_")
+                )
+            };
+            let parent_environment = vec![
+                (
+                    OsString::from("CARGO_ENCODED_RUSTFLAGS"),
+                    OsString::from(outer_encoded_flags),
+                ),
+                (
+                    OsString::from(target_env_name(outer_target)),
+                    OsString::from("--cfg=outer_target_flag"),
+                ),
+                (
+                    OsString::from(target_env_name(helper_target)),
+                    OsString::from("--cfg=helper_target_flag"),
+                ),
+            ];
+            let target_settings =
+                cargo_target_environment_from(helper_target, parent_environment.clone());
+            let outer_target_key = OsString::from(target_env_name(outer_target));
+            assert!(
+                target_settings
+                    .iter()
+                    .all(|(key, _)| key != "CARGO_ENCODED_RUSTFLAGS")
+            );
+            assert!(
+                target_settings
+                    .iter()
+                    .all(|(key, _)| key != &outer_target_key)
+            );
+
+            let temp_root = std::env::temp_dir().join(format!(
+                "cladding-build-flags-{}-{}",
+                std::process::id(),
+                outer_encoded_flags.is_empty()
+            ));
+            let _ = std::fs::remove_dir_all(&temp_root);
+            std::fs::create_dir_all(temp_root.join("src")).unwrap();
+            std::fs::write(
+                temp_root.join("Cargo.toml"),
+                "[package]\nname = \"flag-probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            )
+            .unwrap();
+            std::fs::write(temp_root.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+            std::fs::create_dir_all(temp_root.join("cargo-home")).unwrap();
+
+            let mut cargo = Command::new("cargo");
+            cargo.env_clear();
+            cargo.env("CARGO_HOME", temp_root.join("cargo-home"));
+            for key in ["PATH", "HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"] {
+                if let Some(value) = std::env::var_os(key) {
+                    cargo.env(key, value);
+                }
+            }
+            cargo.env("CARGO_ENCODED_RUSTFLAGS", outer_encoded_flags);
+            configure_nested_cargo_environment(&mut cargo, &target_settings);
+            let output = cargo
+                .arg("rustc")
+                .arg("--offline")
+                .arg("--manifest-path")
+                .arg(temp_root.join("Cargo.toml"))
+                .arg("--target")
+                .arg(helper_target)
+                .arg("--lib")
+                .arg("--")
+                .arg("--print")
+                .arg("cfg")
+                .output()
+                .expect("failed to run nested Cargo flag probe");
+            let _ = std::fs::remove_dir_all(&temp_root);
+            assert!(
+                output.status.success(),
+                "nested Cargo flag probe failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cfg = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                cfg.lines().any(|line| line == "helper_target_flag"),
+                "{cfg}"
+            );
+            assert!(
+                !cfg.lines().any(|line| line == "outer_encoded_flag"),
+                "{cfg}"
+            );
+            assert!(
+                !cfg.lines().any(|line| line == "outer_target_flag"),
+                "{cfg}"
             );
         }
     }
