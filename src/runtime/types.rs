@@ -46,13 +46,6 @@ pub struct RuntimeComponent {
     pub labels: BTreeMap<String, String>,
     pub network_name: String,
     pub container: RuntimeContainer,
-    pub user_namespace: RuntimeUserNamespace,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeUserNamespace {
-    Default,
-    KeepId,
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +56,6 @@ pub struct RuntimeContainer {
     pub workdir: Option<String>,
     pub env: Vec<RuntimeEnvVar>,
     pub mounts: Vec<RuntimeMount>,
-    pub ports: Vec<u16>,
     pub stdin: bool,
     pub tty: bool,
 }

@@ -48,7 +48,7 @@ fn main() {
                     bridge_path.display()
                 )
             });
-            validate_bridge_elf(&bridge_bytes, expected_arch, &bridge_path)
+            validate_elf_architecture(&bridge_bytes, expected_arch, &bridge_path, 20, "", "")
                 .unwrap_or_else(|err| panic!("{err}"));
             copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
             return;
@@ -96,7 +96,7 @@ fn main() {
     let bridge_bytes = fs::read(&bridge_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", bridge_path.display()));
     let expected_arch = target_arch().unwrap_or_else(|err| panic!("{err}"));
-    validate_bridge_elf(&bridge_bytes, expected_arch, &bridge_path)
+    validate_elf_architecture(&bridge_bytes, expected_arch, &bridge_path, 20, "", "")
         .unwrap_or_else(|err| panic!("{err}"));
     copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
 }
@@ -118,34 +118,6 @@ fn is_supported_platform(triple: &str) -> bool {
 
     matches!(arch, "x86_64" | "aarch64")
         && (triple.contains("-linux-") || triple.ends_with("-apple-darwin"))
-}
-
-fn validate_bridge_elf(bytes: &[u8], expected_arch: &str, path: &Path) -> Result<(), String> {
-    if bytes.len() < 20
-        || &bytes[..4] != b"\x7fELF"
-        || bytes[4] != 2
-        || bytes[5] != 1
-        || !matches!(bytes[7], 0 | 3)
-    {
-        return Err(format!(
-            "{} is not a 64-bit little-endian Linux ELF executable",
-            path.display()
-        ));
-    }
-
-    let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
-    let actual_arch = match machine {
-        62 => "x86_64",
-        183 => "aarch64",
-        _ => "unsupported",
-    };
-    if actual_arch != expected_arch {
-        return Err(format!(
-            "{} contains a {actual_arch} Linux executable, but Cladding target requires {expected_arch}",
-            path.display()
-        ));
-    }
-    Ok(())
 }
 
 fn build_baffle(out_dir: &Path) {
@@ -193,15 +165,22 @@ fn target_arch_for(target: &str) -> Result<&'static str, String> {
     Ok(arch)
 }
 
-fn validate_baffle_elf(bytes: &[u8], expected_arch: &str, path: &Path) -> Result<(), String> {
-    if bytes.len() < 64
+fn validate_elf_architecture(
+    bytes: &[u8],
+    expected_arch: &str,
+    path: &Path,
+    minimum_size: usize,
+    invalid_elf_suffix: &str,
+    wrong_arch_suffix: &str,
+) -> Result<(), String> {
+    if bytes.len() < minimum_size
         || &bytes[..4] != b"\x7fELF"
         || bytes[4] != 2
         || bytes[5] != 1
         || !matches!(bytes[7], 0 | 3)
     {
         return Err(format!(
-            "{} is not a 64-bit little-endian Linux ELF executable; CLADDING_BAFFLE_BIN must point to a compatible Linux GNU binary",
+            "{} is not a 64-bit little-endian Linux ELF executable{invalid_elf_suffix}",
             path.display()
         ));
     }
@@ -214,10 +193,22 @@ fn validate_baffle_elf(bytes: &[u8], expected_arch: &str, path: &Path) -> Result
     };
     if actual_arch != expected_arch {
         return Err(format!(
-            "{} contains a {actual_arch} Linux executable, but Cladding target requires {expected_arch}; supply a matching CLADDING_BAFFLE_BIN",
+            "{} contains a {actual_arch} Linux executable, but Cladding target requires {expected_arch}{wrong_arch_suffix}",
             path.display()
         ));
     }
+    Ok(())
+}
+
+fn validate_baffle_elf(bytes: &[u8], expected_arch: &str, path: &Path) -> Result<(), String> {
+    validate_elf_architecture(
+        bytes,
+        expected_arch,
+        path,
+        64,
+        "; CLADDING_BAFFLE_BIN must point to a compatible Linux GNU binary",
+        "; supply a matching CLADDING_BAFFLE_BIN",
+    )?;
 
     let program_offset = read_u64(bytes, 32)
         .ok_or_else(|| format!("{} has an invalid ELF program header", path.display()))?
@@ -429,10 +420,21 @@ mod tests {
     use super::{
         cargo_target_environment_from, configure_nested_cargo_environment, helper_target_dir,
         is_supported_platform, linux_helper_target, podman_build_command, release_dir,
+        validate_baffle_elf, validate_elf_architecture,
     };
     use std::ffi::OsString;
     use std::path::Path;
     use std::process::Command;
+
+    fn elf_header(size: usize, machine: u16) -> Vec<u8> {
+        let mut bytes = vec![0; size];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[7] = 0;
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
 
     #[test]
     fn supports_linux_and_macos_architectures() {
@@ -457,6 +459,25 @@ mod tests {
         ] {
             assert!(!is_supported_platform(triple), "{triple}");
         }
+    }
+
+    #[test]
+    fn shared_elf_validation_keeps_bridge_and_baffle_architecture_checks() {
+        let path = Path::new("/tmp/tool");
+        let bridge = elf_header(20, 62);
+        assert!(validate_elf_architecture(&bridge, "x86_64", path, 20, "", "").is_ok());
+
+        let wrong_arch = elf_header(64, 183);
+        let bridge_error =
+            validate_elf_architecture(&wrong_arch, "x86_64", path, 20, "", "").unwrap_err();
+        assert!(bridge_error.contains("Cladding target requires x86_64"));
+
+        let baffle_error = validate_baffle_elf(&wrong_arch, "x86_64", path).unwrap_err();
+        assert!(baffle_error.contains("supply a matching CLADDING_BAFFLE_BIN"));
+
+        let baffle_without_loader = elf_header(64, 62);
+        let loader_error = validate_baffle_elf(&baffle_without_loader, "x86_64", path).unwrap_err();
+        assert!(loader_error.contains("ld-linux-x86-64.so.2"));
     }
 
     #[test]

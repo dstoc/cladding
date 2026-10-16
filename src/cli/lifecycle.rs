@@ -1,6 +1,6 @@
+use super::DEFAULT_COMPONENT_IMAGE;
 use super::check::check_project_readiness;
 use super::context::{Context, project_runtime_status_from_snapshot};
-use super::{DEFAULT_CLADDING_BUILD_IMAGE, DEFAULT_CLI_BUILD_IMAGE, DEFAULT_SANDBOX_BUILD_IMAGE};
 use anyhow::Context as _;
 use cladding::assets::{materialize_config, write_embedded_tools, write_proxy_startup_script};
 use cladding::config::{
@@ -157,7 +157,7 @@ fn add_image_build(
 ) -> Result<()> {
     let build = match custom_build {
         Some(build) => BuildDefinition::Custom(build.clone()),
-        None if image == DEFAULT_CLADDING_BUILD_IMAGE => BuildDefinition::Embedded,
+        None if image == DEFAULT_COMPONENT_IMAGE => BuildDefinition::Embedded,
         None => return Ok(()),
     };
 
@@ -283,8 +283,8 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
     } else {
         let generated = write_default_cladding_config(
             name_override,
-            DEFAULT_SANDBOX_BUILD_IMAGE,
-            DEFAULT_CLI_BUILD_IMAGE,
+            DEFAULT_COMPONENT_IMAGE,
+            DEFAULT_COMPONENT_IMAGE,
         )?;
         fs::write(&cladding_config, generated)
             .with_context(|| format!("failed to write {}", cladding_config.display()))?;
@@ -480,14 +480,14 @@ mod tests {
             agent: ExecutionComponentConfig {
                 enabled: true,
                 init: true,
-                image: DEFAULT_CLADDING_BUILD_IMAGE.to_string(),
+                image: DEFAULT_COMPONENT_IMAGE.to_string(),
                 build: None,
                 security_opts: Vec::new(),
             },
             nw_sandbox: Some(ExecutionComponentConfig {
                 enabled: true,
                 init: true,
-                image: DEFAULT_CLADDING_BUILD_IMAGE.to_string(),
+                image: DEFAULT_COMPONENT_IMAGE.to_string(),
                 build: None,
                 security_opts: Vec::new(),
             }),
@@ -557,7 +557,7 @@ mod tests {
     fn build_plan_reuses_embedded_default_image_across_components() {
         let plan = plan_image_builds(&config()).unwrap();
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].image, DEFAULT_CLADDING_BUILD_IMAGE);
+        assert_eq!(plan[0].image, DEFAULT_COMPONENT_IMAGE);
         assert_eq!(plan[0].build, BuildDefinition::Embedded);
         assert_eq!(plan[1].image, DEFAULT_PROXY_IMAGE);
         assert_eq!(plan[1].build, BuildDefinition::EmbeddedProxy);
@@ -647,7 +647,6 @@ mod tests {
             std::env::temp_dir().join(format!("cladding-run-runtime-roots-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let project_root = root.join("project/.cladding");
-        let workspace_root = root.join("project");
         let first_runtime = root.join("run-one");
         let second_runtime = root.join("run-two");
         fs::create_dir_all(project_root.join("config")).unwrap();
@@ -665,7 +664,7 @@ mod tests {
         let make_spec = |name: &str, runtime_root: &std::path::Path| {
             let mut config = config();
             config.name = name.to_string();
-            RuntimeSpec::build_with_roots(&project_root, &workspace_root, runtime_root, &config)
+            RuntimeSpec::build_with_runtime_root(&project_root, runtime_root, &config)
         };
         let first_spec = make_spec("cladding-run-one", &first_runtime);
         let second_spec = make_spec("cladding-run-two", &second_runtime);

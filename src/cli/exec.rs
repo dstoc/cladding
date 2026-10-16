@@ -7,6 +7,7 @@ use cladding::error::{Error, Result};
 use cladding::podman::podman_required;
 use cladding::runtime::{
     ManagedVolumeKind, RuntimeComponent, RuntimeMount, RuntimeMountSource, RuntimeSpec,
+    runtime_container_name,
 };
 use cladding::runtime_metrics;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
@@ -318,10 +319,6 @@ fn reload_proxy_args(project_name: &str) -> [String; 5] {
     ]
 }
 
-pub(super) fn runtime_container_name(pod_name: &str) -> String {
-    format!("{pod_name}-instance")
-}
-
 fn project_component_name(project_name: &str, component: &str) -> String {
     format!("{project_name}-{component}")
 }
@@ -584,7 +581,7 @@ mod tests {
         fs::create_dir_all(&cwd).expect("create nested workspace directory");
         fs::create_dir_all(&project_root).expect("create project root");
 
-        let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
+        let runtime = runtime_spec(&project_root, Vec::new(), false);
         let container = &runtime.agent.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
@@ -607,7 +604,7 @@ mod tests {
         fs::create_dir_all(&cwd).expect("create home directory");
         fs::create_dir_all(&project_root).expect("create project root");
 
-        let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
+        let runtime = runtime_spec(&project_root, Vec::new(), false);
         let container = &runtime.agent.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
@@ -634,7 +631,7 @@ mod tests {
         std::os::unix::fs::symlink(&real_home, project_root.join("home"))
             .expect("link configured home source");
 
-        let runtime = runtime_spec(&project_root, &workspace, Vec::new(), false);
+        let runtime = runtime_spec(&project_root, Vec::new(), false);
         let container = &runtime.agent.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
@@ -667,12 +664,7 @@ mod tests {
             targets: vec![MountTarget::Agent],
             ignore: true,
         };
-        let runtime = runtime_spec(
-            &project_root,
-            &workspace,
-            vec![ignored_workspace.clone()],
-            false,
-        );
+        let runtime = runtime_spec(&project_root, vec![ignored_workspace.clone()], false);
         let container = &runtime.agent.container;
         let resolved = resolve_target_workdir(
             &container.mounts,
@@ -695,7 +687,7 @@ mod tests {
         fs::create_dir_all(&cwd).expect("create workspace directory");
         fs::create_dir_all(&project_root).expect("create project root");
 
-        let runtime = runtime_spec(&project_root, &workspace, Vec::new(), true);
+        let runtime = runtime_spec(&project_root, Vec::new(), true);
         let component = runtime_component_for_target(&runtime, MountTarget::FsSandbox)
             .expect("filesystem sandbox component");
         let container = &component.container;
@@ -730,7 +722,7 @@ mod tests {
             targets: vec![MountTarget::Agent],
             ignore: false,
         };
-        let runtime = runtime_spec(&project_root, &workspace, vec![custom_mount.clone()], false);
+        let runtime = runtime_spec(&project_root, vec![custom_mount.clone()], false);
         let container = &runtime.agent.container;
 
         let resolved = resolve_target_workdir(
@@ -763,12 +755,7 @@ mod tests {
             targets: vec![MountTarget::Agent],
             ignore: false,
         };
-        let runtime = runtime_spec(
-            &project_root,
-            &workspace,
-            vec![explicit_mount.clone()],
-            false,
-        );
+        let runtime = runtime_spec(&project_root, vec![explicit_mount.clone()], false);
         let container = &runtime.agent.container;
 
         let resolved = resolve_target_workdir(
@@ -883,7 +870,6 @@ mod tests {
 
     fn runtime_spec(
         project_root: &Path,
-        workspace_root: &Path,
         mounts: Vec<ResolvedMountConfig>,
         fs_sandbox_enabled: bool,
     ) -> RuntimeSpec {
@@ -908,7 +894,7 @@ mod tests {
             proxy: None,
             mounts,
         };
-        RuntimeSpec::build_with_roots(project_root, workspace_root, project_root, &config)
+        RuntimeSpec::build(project_root, &config)
     }
 
     fn host_mount(mount_path: &str, host_path: PathBuf) -> RuntimeMount {

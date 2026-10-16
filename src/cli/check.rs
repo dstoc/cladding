@@ -1,4 +1,4 @@
-use super::DEFAULT_CLADDING_BUILD_IMAGE;
+use super::DEFAULT_COMPONENT_IMAGE;
 use super::context::Context;
 use cladding::assets::tool_files;
 use cladding::config::{DEFAULT_PROXY_IMAGE, ExecutionConfig};
@@ -283,7 +283,7 @@ pub(super) fn check_runsc_runtime(
 }
 
 fn image_is_buildable_by_cladding(config: &ExecutionConfig, image: &str) -> bool {
-    image == DEFAULT_CLADDING_BUILD_IMAGE
+    image == DEFAULT_COMPONENT_IMAGE
         || image == DEFAULT_PROXY_IMAGE
         || (config.agent.image == image && config.agent.build.is_some())
         || config

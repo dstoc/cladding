@@ -57,7 +57,7 @@ pub(super) fn build_proxy_mounts(project_root: &Path, runtime_root: &Path) -> Ve
     ]
 }
 
-pub(super) fn build_agent_mounts(project_root: &Path) -> Vec<RuntimeMount> {
+pub(super) fn build_execution_mounts(project_root: &Path) -> Vec<RuntimeMount> {
     vec![
         RuntimeMount {
             mount_path: "/opt/config".to_string(),
@@ -90,43 +90,7 @@ pub(super) fn build_agent_mounts(project_root: &Path) -> Vec<RuntimeMount> {
     ]
 }
 
-pub(super) fn build_sandbox_mounts(project_root: &Path) -> Vec<RuntimeMount> {
-    vec![
-        RuntimeMount {
-            mount_path: "/opt/config".to_string(),
-            read_only: true,
-            source: RuntimeMountSource::HostPath {
-                path: project_root.join("config"),
-            },
-        },
-        RuntimeMount {
-            mount_path: "/opt/tools".to_string(),
-            read_only: true,
-            source: RuntimeMountSource::HostPath {
-                path: project_root.join("tools"),
-            },
-        },
-        RuntimeMount {
-            mount_path: "/run/cladding/ca/baffle.crt".to_string(),
-            read_only: true,
-            source: RuntimeMountSource::HostPath {
-                path: project_root.join("credentials/baffle/ca.crt"),
-            },
-        },
-        RuntimeMount {
-            mount_path: "/home/user".to_string(),
-            read_only: false,
-            source: RuntimeMountSource::HostPath {
-                path: project_root.join("home"),
-            },
-        },
-    ]
-}
-
-pub(super) fn build_fs_sandbox_mounts(
-    project_root: &Path,
-    _custom_mounts: &[RuntimeCustomMount],
-) -> Vec<RuntimeMount> {
+pub(super) fn build_fs_sandbox_mounts(project_root: &Path) -> Vec<RuntimeMount> {
     vec![
         RuntimeMount {
             mount_path: "/opt/config".to_string(),
@@ -585,12 +549,12 @@ mod tests {
         ));
 
         let agent_mounts = apply_custom_mounts(
-            build_agent_mounts(project_root),
+            build_execution_mounts(project_root),
             &custom_mounts,
             MountTarget::Agent,
         );
         let nw_sandbox_mounts = apply_custom_mounts(
-            build_sandbox_mounts(project_root),
+            build_execution_mounts(project_root),
             &custom_mounts,
             MountTarget::NwSandbox,
         );
@@ -662,7 +626,7 @@ mod tests {
         assert_eq!(copy_claim_names[0], copy_claim_names[1]);
 
         let fs_mounts = apply_custom_mounts(
-            build_fs_sandbox_mounts(project_root, &custom_mounts),
+            build_fs_sandbox_mounts(project_root),
             &custom_mounts,
             MountTarget::FsSandbox,
         );
@@ -730,17 +694,17 @@ mod tests {
         assert_eq!(custom_mounts[2].targets, config.mounts[0].targets);
 
         let agent = apply_custom_mounts(
-            build_agent_mounts(project_root),
+            build_execution_mounts(project_root),
             &custom_mounts,
             MountTarget::Agent,
         );
         let nw_sandbox = apply_custom_mounts(
-            build_sandbox_mounts(project_root),
+            build_execution_mounts(project_root),
             &custom_mounts,
             MountTarget::NwSandbox,
         );
         let fs_sandbox = apply_custom_mounts(
-            build_fs_sandbox_mounts(project_root, &custom_mounts),
+            build_fs_sandbox_mounts(project_root),
             &custom_mounts,
             MountTarget::FsSandbox,
         );
@@ -848,12 +812,7 @@ mod tests {
         ] {
             let mut config = execution_config(false, false, vec![volume_mount.clone()], false);
             config.name = name.to_string();
-            let spec = RuntimeSpec::build_with_roots(
-                project_root,
-                &project_root.join(".."),
-                runtime_root,
-                &config,
-            );
+            let spec = RuntimeSpec::build_with_runtime_root(project_root, runtime_root, &config);
             let mount = spec
                 .agent
                 .container

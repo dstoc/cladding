@@ -7,7 +7,7 @@ use axum::Router;
 use axum::routing::{any_service, post};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
@@ -299,10 +299,6 @@ pub async fn serve(config: AppConfig) -> Result<(), AppError> {
         axum::serve(listener, app).await?;
     }
     Ok(())
-}
-
-pub fn tool_error_result(message: impl Into<String>) -> CallToolResult {
-    CallToolResult::structured_error(serde_json::json!({ "error": message.into() }))
 }
 
 #[cfg(test)]

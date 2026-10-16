@@ -1,18 +1,4 @@
-pub(super) fn build_idle_supervisor_command(
-    bridge_command: &str,
-    primary_command: &str,
-) -> Vec<String> {
-    build_supervisor_command(bridge_command, primary_command)
-}
-
-pub(super) fn build_mcp_run_supervisor_command(
-    bridge_command: &str,
-    primary_command: &str,
-) -> Vec<String> {
-    build_supervisor_command(bridge_command, primary_command)
-}
-
-fn build_supervisor_command(bridge_command: &str, primary_command: &str) -> Vec<String> {
+pub(super) fn build_supervisor_command(bridge_command: &str, primary_command: &str) -> Vec<String> {
     vec![
         "/bin/sh".to_string(),
         "-ec".to_string(),
@@ -97,7 +83,7 @@ exit "$primary_status"
 #[cfg(unix)]
 #[cfg(test)]
 mod tests {
-    use super::{build_idle_supervisor_command, build_mcp_run_supervisor_command};
+    use super::build_supervisor_command;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitStatus};
@@ -113,60 +99,53 @@ mod tests {
 
     #[test]
     fn supervisor_forwards_term_and_int_and_reaps_children() {
-        for builder in [
-            build_idle_supervisor_command,
-            build_mcp_run_supervisor_command,
-        ] {
-            for (signal, signal_name) in [(libc::SIGTERM, "TERM"), (libc::SIGINT, "INT")] {
-                let temp = test_temp_dir();
-                let bridge_pid_file = temp.join("bridge.pid");
-                let bridge_signal_file = temp.join("bridge.signal");
-                let primary_pid_file = temp.join("primary.pid");
-                let primary_signal_file = temp.join("primary.signal");
-                let bridge =
-                    signal_child_command(&bridge_pid_file, &bridge_signal_file, None, None);
-                let primary =
-                    signal_child_command(&primary_pid_file, &primary_signal_file, None, None);
-                let mut supervisor = start_supervisor(builder(&bridge, &primary));
+        for (signal, signal_name) in [(libc::SIGTERM, "TERM"), (libc::SIGINT, "INT")] {
+            let temp = test_temp_dir();
+            let bridge_pid_file = temp.join("bridge.pid");
+            let bridge_signal_file = temp.join("bridge.signal");
+            let primary_pid_file = temp.join("primary.pid");
+            let primary_signal_file = temp.join("primary.signal");
+            let bridge = signal_child_command(&bridge_pid_file, &bridge_signal_file, None, None);
+            let primary = signal_child_command(&primary_pid_file, &primary_signal_file, None, None);
+            let mut supervisor = start_supervisor(build_supervisor_command(&bridge, &primary));
 
-                wait_for_file(&bridge_pid_file);
-                wait_for_file(&primary_pid_file);
-                let bridge_pid = read_pid(&bridge_pid_file);
-                let primary_pid = read_pid(&primary_pid_file);
-                #[cfg(target_os = "linux")]
-                let (watcher_pid, watcher_child_pids) = {
-                    let child_pids = wait_for_process_children(supervisor.id(), 3);
-                    assert!(child_pids.contains(&bridge_pid));
-                    assert!(child_pids.contains(&primary_pid));
-                    let watcher_pid = *child_pids
-                        .iter()
-                        .find(|pid| **pid != bridge_pid && **pid != primary_pid)
-                        .expect("supervisor watcher child");
-                    let watcher_child_pids = wait_for_process_children(watcher_pid as u32, 1);
-                    (watcher_pid, watcher_child_pids)
-                };
+            wait_for_file(&bridge_pid_file);
+            wait_for_file(&primary_pid_file);
+            let bridge_pid = read_pid(&bridge_pid_file);
+            let primary_pid = read_pid(&primary_pid_file);
+            #[cfg(target_os = "linux")]
+            let (watcher_pid, watcher_child_pids) = {
+                let child_pids = wait_for_process_children(supervisor.id(), 3);
+                assert!(child_pids.contains(&bridge_pid));
+                assert!(child_pids.contains(&primary_pid));
+                let watcher_pid = *child_pids
+                    .iter()
+                    .find(|pid| **pid != bridge_pid && **pid != primary_pid)
+                    .expect("supervisor watcher child");
+                let watcher_child_pids = wait_for_process_children(watcher_pid as u32, 1);
+                (watcher_pid, watcher_child_pids)
+            };
 
-                let result = unsafe { libc::kill(supervisor.id() as libc::pid_t, signal) };
-                assert_eq!(result, 0, "failed to signal supervisor");
-                let status = wait_for_exit(&mut supervisor);
+            let result = unsafe { libc::kill(supervisor.id() as libc::pid_t, signal) };
+            assert_eq!(result, 0, "failed to signal supervisor");
+            let status = wait_for_exit(&mut supervisor);
 
-                assert!(status.success(), "supervisor exited with {status}");
-                assert_eq!(fs::read_to_string(bridge_signal_file).unwrap(), signal_name);
-                assert_eq!(
-                    fs::read_to_string(primary_signal_file).unwrap(),
-                    signal_name
-                );
-                assert_process_gone(bridge_pid);
-                assert_process_gone(primary_pid);
-                #[cfg(target_os = "linux")]
-                {
-                    assert_process_gone(watcher_pid);
-                    for pid in watcher_child_pids {
-                        assert_process_gone(pid);
-                    }
+            assert!(status.success(), "supervisor exited with {status}");
+            assert_eq!(fs::read_to_string(bridge_signal_file).unwrap(), signal_name);
+            assert_eq!(
+                fs::read_to_string(primary_signal_file).unwrap(),
+                signal_name
+            );
+            assert_process_gone(bridge_pid);
+            assert_process_gone(primary_pid);
+            #[cfg(target_os = "linux")]
+            {
+                assert_process_gone(watcher_pid);
+                for pid in watcher_child_pids {
+                    assert_process_gone(pid);
                 }
-                fs::remove_dir_all(temp).unwrap();
             }
+            fs::remove_dir_all(temp).unwrap();
         }
     }
 
@@ -185,7 +164,7 @@ mod tests {
             None,
         );
         let primary = signal_child_command(&primary_pid_file, &primary_signal_file, None, None);
-        let command = build_mcp_run_supervisor_command(&bridge, &primary);
+        let command = build_supervisor_command(&bridge, &primary);
         let mut supervisor = start_supervisor(command);
 
         wait_for_file(&bridge_pid_file);
@@ -217,7 +196,7 @@ mod tests {
             Some(&primary_stop_file),
             Some(23),
         );
-        let mut supervisor = start_supervisor(build_idle_supervisor_command(&bridge, &primary));
+        let mut supervisor = start_supervisor(build_supervisor_command(&bridge, &primary));
 
         wait_for_file(&bridge_pid_file);
         wait_for_file(&primary_pid_file);

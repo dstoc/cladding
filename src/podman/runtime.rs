@@ -1,7 +1,5 @@
 use crate::error::{Error, Result};
-use crate::runtime::{
-    ManagedVolumeKind, RuntimeComponent, RuntimeMountSource, RuntimeSpec, RuntimeUserNamespace,
-};
+use crate::runtime::{ManagedVolumeKind, RuntimeComponent, RuntimeMountSource, RuntimeSpec};
 use crate::runtime_metrics;
 use anyhow::Context as _;
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,7 +62,7 @@ pub fn runtime_create(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) ->
     ensure_socket_volumes(spec, verbose, quiet_helpers)?;
     ensure_managed_mount_volumes(spec, verbose, quiet_helpers)?;
 
-    for component in runtime_components(spec) {
+    for component in spec.components() {
         container_run(component, verbose, quiet_helpers)?;
         if should_install_baffle_ca(spec, component) {
             install_baffle_ca(component, verbose, quiet_helpers)?;
@@ -152,7 +150,7 @@ pub fn runtime_inventory_from_snapshot(
     let mut unowned_resources = 0;
     let mut resources = Vec::new();
 
-    for component in runtime_components(spec) {
+    for component in spec.components() {
         let container = &component.container;
         expected_count += 1;
         if let Some(existing) = containers.named(&container.name) {
@@ -180,7 +178,7 @@ pub fn runtime_inventory_from_snapshot(
 
 pub fn runtime_cleanup(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool) -> Result<()> {
     let mut cleanup_errors = CleanupErrors::default();
-    for component in runtime_components(spec) {
+    for component in spec.components() {
         let container = &component.container;
         let Some(inspection) =
             inspect_resource("container", &container.name, verbose, quiet_helpers)?
@@ -235,7 +233,7 @@ fn runtime_cleanup_normal_report(
     let mut errors = CleanupErrors::default();
     let mut runtime_root_safe_to_remove = true;
 
-    for component in runtime_components(spec) {
+    for component in spec.components() {
         if let Err(err) = container_rm(&component.container.name, verbose, quiet_helpers) {
             runtime_root_safe_to_remove = false;
             errors.record(Err(err));
@@ -310,7 +308,7 @@ impl CleanupErrors {
 
 fn socket_volume_names(spec: &RuntimeSpec) -> Vec<String> {
     let mut names = BTreeSet::new();
-    for component in runtime_components(spec) {
+    for component in spec.components() {
         for mount in &component.container.mounts {
             if let RuntimeMountSource::NamedVolumeChown { claim_name } = &mount.source {
                 names.insert(claim_name.clone());
@@ -462,7 +460,7 @@ fn socket_volume_labels_match(
 
 fn managed_mount_volumes(spec: &RuntimeSpec) -> BTreeMap<String, ManagedVolumeKind> {
     let mut volumes = BTreeMap::new();
-    for component in runtime_components(spec) {
+    for component in spec.components() {
         for mount in &component.container.mounts {
             if let RuntimeMountSource::ManagedVolume { claim_name, kind } = &mount.source {
                 volumes
@@ -1241,17 +1239,6 @@ fn remove_output_is_missing_container(output: &Output) -> bool {
     stderr.contains("no such container") || stderr.contains("no container with name or id")
 }
 
-fn runtime_components(spec: &RuntimeSpec) -> Vec<&RuntimeComponent> {
-    let mut components = vec![&spec.proxy, &spec.agent];
-    if let Some(component) = &spec.nw_sandbox {
-        components.push(component);
-    }
-    if let Some(component) = &spec.fs_sandbox {
-        components.push(component);
-    }
-    components
-}
-
 #[cfg(unix)]
 fn set_restrictive_dir_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -1296,7 +1283,7 @@ fn build_container_run_command(component: &RuntimeComponent) -> Command {
     append_label_args(&mut cmd, &component.labels);
     cmd.arg("--network");
     cmd.arg(&component.network_name);
-    append_user_namespace_args(&mut cmd, component.user_namespace);
+    cmd.args(["--userns", "keep-id"]);
     cmd.arg("--hostname");
     cmd.arg(&component.name);
     cmd.arg("--name");
@@ -1314,21 +1301,11 @@ fn build_container_run_command(component: &RuntimeComponent) -> Command {
 
     append_env_args(&mut cmd, &container.env);
     append_mount_args(&mut cmd, &container.mounts);
-    append_port_args(&mut cmd, &container.ports);
     append_entrypoint_arg(&mut cmd, &container.command);
 
     cmd.arg(&container.image);
     append_command_args(&mut cmd, &container.command);
     cmd
-}
-
-fn append_user_namespace_args(cmd: &mut Command, user_namespace: RuntimeUserNamespace) {
-    let mode = match user_namespace {
-        RuntimeUserNamespace::Default => return,
-        RuntimeUserNamespace::KeepId => "keep-id",
-    };
-    cmd.arg("--userns");
-    cmd.arg(mode);
 }
 
 fn build_container_rm_command(container_name: &str) -> Command {
@@ -1351,13 +1328,6 @@ fn append_env_args(cmd: &mut Command, env: &[crate::runtime::RuntimeEnvVar]) {
     }
 }
 
-fn append_port_args(cmd: &mut Command, ports: &[u16]) {
-    for port in ports {
-        cmd.arg("--expose");
-        cmd.arg(port.to_string());
-    }
-}
-
 fn append_command_args(cmd: &mut Command, command: &[String]) {
     for arg in command.iter().skip(1) {
         cmd.arg(arg);
@@ -1377,7 +1347,6 @@ mod tests {
     use crate::config::{ExecutionComponentConfig, ExecutionConfig};
     use crate::runtime::{
         RuntimeComponent, RuntimeContainer, RuntimeEnvVar, RuntimeMount, RuntimeMountSource,
-        RuntimeUserNamespace,
     };
 
     fn command_args(cmd: &Command) -> Vec<String> {
@@ -1415,7 +1384,6 @@ mod tests {
             workdir: None,
             env: Vec::new(),
             mounts: Vec::new(),
-            ports: Vec::new(),
             stdin: false,
             tty: false,
         }
@@ -1429,7 +1397,6 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             container,
-            user_namespace: RuntimeUserNamespace::KeepId,
             security_opts: Vec::new(),
         }
     }
@@ -1617,11 +1584,9 @@ mod tests {
                 workdir: None,
                 env: Vec::new(),
                 mounts: Vec::new(),
-                ports: Vec::new(),
                 stdin: false,
                 tty: false,
             },
-            user_namespace: RuntimeUserNamespace::KeepId,
             security_opts: Vec::new(),
         };
         let empty_component = |name: &str| {
@@ -1730,7 +1695,7 @@ mod tests {
             mounts: Vec::new(),
         };
         let spec = RuntimeSpec::build(Path::new("/tmp/demo/.cladding"), &config);
-        let components = runtime_components(&spec);
+        let components = spec.components();
 
         assert_eq!(components.len(), 4);
         for component in components {
@@ -2262,7 +2227,6 @@ mod tests {
             workdir: None,
             env: Vec::new(),
             mounts: Vec::new(),
-            ports: Vec::new(),
             stdin: false,
             tty: false,
         };
@@ -2280,7 +2244,6 @@ mod tests {
             ]),
             network_name: "none".to_string(),
             container,
-            user_namespace: RuntimeUserNamespace::KeepId,
             security_opts: Vec::new(),
         };
 
@@ -2374,7 +2337,6 @@ mod tests {
                     },
                 },
             ],
-            ports: vec![3000],
             stdin: true,
             tty: true,
         };
@@ -2386,7 +2348,6 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             container,
-            user_namespace: RuntimeUserNamespace::Default,
             security_opts: Vec::new(),
         };
 
@@ -2399,6 +2360,8 @@ mod tests {
                 "--init",
                 "--network",
                 "default",
+                "--userns",
+                "keep-id",
                 "--hostname",
                 "demo-agent",
                 "--name",
@@ -2421,8 +2384,6 @@ mod tests {
                 "/tmp/demo/workspace:/home/user/workspace",
                 "--volume",
                 "/tmp/demo/runtime/empty-mask:/home/user/workspace/.cladding:ro",
-                "--expose",
-                "3000",
                 "--entrypoint",
                 "sleep",
                 "demo:image",
@@ -2447,7 +2408,6 @@ mod tests {
             workdir: None,
             env: Vec::new(),
             mounts: Vec::new(),
-            ports: Vec::new(),
             stdin: false,
             tty: false,
         };
@@ -2459,7 +2419,6 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "default".to_string(),
             container,
-            user_namespace: RuntimeUserNamespace::Default,
             security_opts: Vec::new(),
         };
 
@@ -2478,6 +2437,8 @@ mod tests {
                 "--init",
                 "--network",
                 "default",
+                "--userns",
+                "keep-id",
                 "--hostname",
                 "demo-agent",
                 "--name",
@@ -2499,7 +2460,6 @@ mod tests {
             workdir: None,
             env: Vec::new(),
             mounts: Vec::new(),
-            ports: Vec::new(),
             stdin: false,
             tty: false,
         };
@@ -2510,7 +2470,6 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             network_name: "none".to_string(),
             container,
-            user_namespace: RuntimeUserNamespace::KeepId,
             security_opts: Vec::new(),
         };
         let cmd = build_container_run_command(&component);
