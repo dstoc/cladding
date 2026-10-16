@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BAFFLE_VERSION: &str = "1.1.1";
-const BAFFLE_MIN_RUST_VERSION: (u32, u32) = (1, 96);
 
 fn main() {
     ensure_supported_platforms();
@@ -60,22 +59,31 @@ fn main() {
         ),
     }
 
-    let target_triple = env::var("TARGET").ok();
-    let build_target = env::var("CARGO_BUILD_TARGET").ok();
-    let effective_target = build_target.or(target_triple);
+    let target = env::var("TARGET").unwrap_or_default();
+    let helper_target = linux_helper_target(&target).unwrap_or_else(|err| panic!("{err}"));
+    let target_settings = cargo_target_environment(&helper_target);
+    for (key, _) in &target_settings {
+        println!("cargo:rerun-if-env-changed={}", key.to_string_lossy());
+    }
+    let target_dir = helper_target_dir(&out_dir);
+    fs::create_dir_all(&target_dir).unwrap_or_else(|err| {
+        panic!(
+            "failed to create helper target directory {}: {err}",
+            target_dir.display()
+        )
+    });
 
-    let (target_dir, release_target) = if cfg!(target_os = "linux") {
-        let target_dir = out_dir.join("mcp-run-target");
-        build_locally(workspace_root, &target_dir, effective_target.as_deref());
-        (target_dir, effective_target.as_deref())
+    if cfg!(target_os = "linux") {
+        build_locally(workspace_root, &target_dir, &helper_target);
     } else {
-        let crate_dir = workspace_root.join("crates").join("mcp-run");
-        let target_dir = crate_dir.join("target");
-        build_with_podman(workspace_root);
-        (target_dir, None)
-    };
-
-    let release_dir = release_dir(&target_dir, release_target);
+        build_with_podman(
+            workspace_root,
+            &target_dir,
+            &helper_target,
+            &target_settings,
+        );
+    }
+    let release_dir = release_dir(&target_dir, &helper_target);
 
     copy_bin(&release_dir.join("mcp-run"), &out_dir.join("mcp-run"));
     copy_bin(&release_dir.join("run-remote"), &out_dir.join("run-remote"));
@@ -139,69 +147,31 @@ fn build_baffle(out_dir: &Path) {
     let expected_arch = target_arch().unwrap_or_else(|err| panic!("{err}"));
     let out_path = out_dir.join("baffle");
 
-    if let Some(prebuilt) = env::var_os("CLADDING_BAFFLE_BIN") {
-        let prebuilt = PathBuf::from(prebuilt);
-        let bytes = fs::read(&prebuilt).unwrap_or_else(|err| {
-            panic!(
-                "failed to read CLADDING_BAFFLE_BIN at {}: {err}",
-                prebuilt.display()
-            )
-        });
-        validate_baffle_elf(&bytes, expected_arch, &prebuilt).unwrap_or_else(|err| panic!("{err}"));
-        copy_bin(&prebuilt, &out_path);
-        println!(
-            "cargo:warning=Using prebuilt Linux Baffle binary from {}",
-            prebuilt.display()
-        );
-        return;
-    }
-
-    let host = env::var("HOST").unwrap_or_default();
-    let target = env::var("TARGET").unwrap_or_default();
-    let host_arch = host.split('-').next().unwrap_or_default();
-    if !host.contains("-unknown-linux-gnu") || host_arch != expected_arch {
+    let prebuilt = env::var_os("CLADDING_BAFFLE_BIN").map(PathBuf::from).unwrap_or_else(|| {
         panic!(
-            "cannot build Linux Baffle for Cladding target {target} on host {host}; set CLADDING_BAFFLE_BIN to a compatible 64-bit Linux GNU executable (expected {expected_arch})"
-        );
-    }
-
-    check_baffle_build_environment();
-
-    let install_root = out_dir.join("baffle-install");
-    let status = Command::new("cargo")
-        .current_dir(env::var_os("CARGO_MANIFEST_DIR").unwrap())
-        .env("CARGO_TARGET_DIR", out_dir.join("baffle-target"))
-        .arg("install")
-        .arg("baffle-proxy")
-        .arg("--version")
-        .arg(format!("={BAFFLE_VERSION}"))
-        .arg("--locked")
-        .arg("--force")
-        .arg("--bin")
-        .arg("baffle")
-        .arg("--root")
-        .arg(&install_root)
-        .status()
-        .expect("failed to run cargo install for baffle-proxy");
-    if !status.success() {
-        panic!(
-            "cargo install for baffle-proxy {BAFFLE_VERSION} failed; install Rust 1.96 or newer, CMake, Clang and libclang, or set CLADDING_BAFFLE_BIN to a compatible prebuilt Linux binary"
-        );
-    }
-
-    let installed = install_root.join("bin").join("baffle");
-    let bytes = fs::read(&installed).unwrap_or_else(|err| {
-        panic!(
-            "cargo install completed but could not read {}: {err}",
-            installed.display()
+            "CLADDING_BAFFLE_BIN is required; acquire the pinned Baffle {BAFFLE_VERSION} release with scripts/fetch_baffle.sh {expected_arch} <destination> and set CLADDING_BAFFLE_BIN to <destination>/baffle"
         )
     });
-    validate_baffle_elf(&bytes, expected_arch, &installed).unwrap_or_else(|err| panic!("{err}"));
-    copy_bin(&installed, &out_path);
+    let bytes = fs::read(&prebuilt).unwrap_or_else(|err| {
+        panic!(
+            "failed to read CLADDING_BAFFLE_BIN at {}: {err}",
+            prebuilt.display()
+        )
+    });
+    validate_baffle_elf(&bytes, expected_arch, &prebuilt).unwrap_or_else(|err| panic!("{err}"));
+    copy_bin(&prebuilt, &out_path);
+    println!(
+        "cargo:warning=Using prebuilt Linux Baffle binary from {}",
+        prebuilt.display()
+    );
 }
 
 fn target_arch() -> Result<&'static str, String> {
     let target = env::var("TARGET").unwrap_or_default();
+    target_arch_for(&target)
+}
+
+fn target_arch_for(target: &str) -> Result<&'static str, String> {
     let arch = match target.split('-').next().unwrap_or_default() {
         "x86_64" => Ok("x86_64"),
         "aarch64" => Ok("aarch64"),
@@ -216,60 +186,6 @@ fn target_arch() -> Result<&'static str, String> {
         ));
     }
     Ok(arch)
-}
-
-fn check_baffle_build_environment() {
-    let rustc = Command::new("rustc")
-        .arg("--version")
-        .output()
-        .expect("failed to check rustc version for baffle-proxy");
-    if !rustc.status.success() {
-        panic!("failed to check rustc version for baffle-proxy");
-    }
-    let rustc_version = String::from_utf8_lossy(&rustc.stdout);
-    let version = rustc_version
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or_default()
-        .split('.')
-        .take(2)
-        .filter_map(|part| part.parse::<u32>().ok())
-        .collect::<Vec<_>>();
-    let found = match version.as_slice() {
-        [major, minor] => (*major, *minor),
-        _ => panic!("could not parse rustc version: {}", rustc_version.trim()),
-    };
-    if found < BAFFLE_MIN_RUST_VERSION {
-        panic!(
-            "baffle-proxy {BAFFLE_VERSION} requires Rust {}.{} or newer (found {}); upgrade Rust or set CLADDING_BAFFLE_BIN",
-            BAFFLE_MIN_RUST_VERSION.0,
-            BAFFLE_MIN_RUST_VERSION.1,
-            rustc_version.trim()
-        );
-    }
-
-    for program in ["cmake", "clang"] {
-        let available = Command::new(program).arg("--version").output();
-        if !available.is_ok_and(|output| output.status.success()) {
-            panic!(
-                "baffle-proxy {BAFFLE_VERSION} requires {program} and libclang to build; install the native build dependencies or set CLADDING_BAFFLE_BIN"
-            );
-        }
-    }
-
-    let libclang = Command::new("clang")
-        .arg("-print-file-name=libclang.so")
-        .output()
-        .expect("failed to check for libclang");
-    let libclang_path = String::from_utf8_lossy(&libclang.stdout).trim().to_string();
-    if !libclang.status.success()
-        || libclang_path == "libclang.so"
-        || !Path::new(&libclang_path).exists()
-    {
-        panic!(
-            "baffle-proxy {BAFFLE_VERSION} requires libclang development files; install libclang-dev or set CLADDING_BAFFLE_BIN"
-        );
-    }
 }
 
 fn validate_baffle_elf(bytes: &[u8], expected_arch: &str, path: &Path) -> Result<(), String> {
@@ -356,11 +272,17 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     ]))
 }
 
-fn release_dir(target_dir: &Path, target: Option<&str>) -> PathBuf {
-    match target {
-        Some(target) => target_dir.join(target).join("release"),
-        None => target_dir.join("release"),
-    }
+fn release_dir(target_dir: &Path, target: &str) -> PathBuf {
+    target_dir.join(target).join("release")
+}
+
+fn helper_target_dir(out_dir: &Path) -> PathBuf {
+    out_dir.join("mcp-run-target")
+}
+
+fn linux_helper_target(cladding_target: &str) -> Result<String, String> {
+    let arch = target_arch_for(cladding_target)?;
+    Ok(format!("{arch}-unknown-linux-gnu"))
 }
 
 fn copy_bin(src: &Path, dst: &Path) {
@@ -373,7 +295,7 @@ fn copy_bin(src: &Path, dst: &Path) {
     });
 }
 
-fn build_locally(workspace_root: &Path, target_dir: &Path, target: Option<&str>) {
+fn build_locally(workspace_root: &Path, target_dir: &Path, target: &str) {
     let mut cargo = Command::new("cargo");
     cargo.current_dir(workspace_root);
     cargo
@@ -388,10 +310,8 @@ fn build_locally(workspace_root: &Path, target_dir: &Path, target: Option<&str>)
     cargo.arg("--bin").arg("run-remote");
     cargo.arg("--bin").arg("cladding-bridge");
     cargo.arg("--target-dir").arg(target_dir);
-
-    if let Some(target) = target {
-        cargo.arg("--target").arg(target);
-    }
+    cargo.arg("--target").arg(target);
+    cargo.env("CARGO_BUILD_TARGET", target);
 
     let status = cargo
         .status()
@@ -401,29 +321,13 @@ fn build_locally(workspace_root: &Path, target_dir: &Path, target: Option<&str>)
     }
 }
 
-fn build_with_podman(workspace_root: &Path) {
-    let status = Command::new("podman")
-        .arg("run")
-        .arg("--rm")
-        .arg("-e")
-        .arg("CARGO_TARGET_DIR=/work/crates/mcp-run/target")
-        .arg("-v")
-        .arg(format!("{}:/work", workspace_root.display()))
-        .arg("-w")
-        .arg("/work")
-        .arg("docker.io/library/rust:latest")
-        .arg("cargo")
-        .arg("build")
-        .arg("--manifest-path")
-        .arg("/work/Cargo.toml")
-        .arg("--release")
-        .arg("--locked")
-        .arg("--bin")
-        .arg("mcp-run")
-        .arg("--bin")
-        .arg("run-remote")
-        .arg("--bin")
-        .arg("cladding-bridge")
+fn build_with_podman(
+    workspace_root: &Path,
+    target_dir: &Path,
+    target: &str,
+    target_settings: &[(std::ffi::OsString, std::ffi::OsString)],
+) {
+    let status = podman_build_command(workspace_root, target_dir, target, target_settings)
         .status()
         .expect("failed to run podman build for mcp-run");
 
@@ -432,9 +336,76 @@ fn build_with_podman(workspace_root: &Path) {
     }
 }
 
+fn podman_build_command(
+    workspace_root: &Path,
+    target_dir: &Path,
+    target: &str,
+    target_settings: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Command {
+    let arch = target.split('-').next().unwrap_or_default();
+    let mut command = Command::new("podman");
+    command
+        .arg("run")
+        .arg("--rm")
+        .arg("--platform")
+        .arg(format!("linux/{arch}"))
+        .arg("-e")
+        .arg("CARGO_TARGET_DIR=/out")
+        .arg("-e")
+        .arg(format!("CARGO_BUILD_TARGET={target}"));
+    for (key, value) in target_settings {
+        let mut setting = key.clone();
+        setting.push("=");
+        setting.push(value);
+        command.arg("-e").arg(setting);
+    }
+    command
+        .arg("-v")
+        .arg(format!("{}:/work:ro", workspace_root.display()))
+        .arg("-v")
+        .arg(format!("{}:/out:rw", target_dir.display()))
+        .arg("-w")
+        .arg("/work")
+        .arg("docker.io/library/rust:1.96.0")
+        .arg("cargo")
+        .arg("build")
+        .arg("--manifest-path")
+        .arg("/work/Cargo.toml")
+        .arg("--release")
+        .arg("--locked")
+        .arg("--target")
+        .arg(target)
+        .arg("--bin")
+        .arg("mcp-run")
+        .arg("--bin")
+        .arg("run-remote")
+        .arg("--bin")
+        .arg("cladding-bridge");
+    command
+}
+
+fn cargo_target_environment(target: &str) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let prefix = format!(
+        "CARGO_TARGET_{}_",
+        target.to_ascii_uppercase().replace('-', "_")
+    );
+    env::vars_os()
+        .filter(|(key, _)| {
+            key == "RUSTFLAGS"
+                || key == "CARGO_ENCODED_RUSTFLAGS"
+                || key.to_string_lossy().starts_with(&prefix)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_supported_platform;
+    use super::{
+        helper_target_dir, is_supported_platform, linux_helper_target, podman_build_command,
+        release_dir,
+    };
+    use std::ffi::OsString;
+    use std::path::Path;
 
     #[test]
     fn supports_linux_and_macos_architectures() {
@@ -458,6 +429,67 @@ mod tests {
             "x86_64-apple-ios",
         ] {
             assert!(!is_supported_platform(triple), "{triple}");
+        }
+    }
+
+    #[test]
+    fn selects_linux_helper_target_from_each_supported_cladding_target() {
+        for (target, helper) in [
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"),
+            ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"),
+            ("x86_64-apple-darwin", "x86_64-unknown-linux-gnu"),
+            ("aarch64-apple-darwin", "aarch64-unknown-linux-gnu"),
+        ] {
+            assert_eq!(linux_helper_target(target).unwrap(), helper);
+        }
+    }
+
+    #[test]
+    fn helper_artifacts_stay_under_cargo_output_directory() {
+        let out_dir = Path::new("target/debug/build/cladding-abc/out");
+        let target_dir = helper_target_dir(out_dir);
+        assert_eq!(target_dir, out_dir.join("mcp-run-target"));
+        assert!(target_dir.starts_with(out_dir));
+        assert_eq!(
+            release_dir(&target_dir, "aarch64-unknown-linux-gnu"),
+            target_dir.join("aarch64-unknown-linux-gnu/release")
+        );
+    }
+
+    #[test]
+    fn podman_build_targets_the_selected_linux_architecture_and_output_dir() {
+        let target_dir = Path::new("/cargo/out/mcp-run-target");
+        let settings = vec![(
+            OsString::from("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS"),
+            OsString::from("-C target-feature=+crt-static"),
+        )];
+        let command = podman_build_command(
+            Path::new("/workspace/cladding"),
+            target_dir,
+            "aarch64-unknown-linux-gnu",
+            &settings,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "--platform",
+            "linux/aarch64",
+            "CARGO_TARGET_DIR=/out",
+            "CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu",
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C target-feature=+crt-static",
+            "/workspace/cladding:/work:ro",
+            "/cargo/out/mcp-run-target:/out:rw",
+            "docker.io/library/rust:1.96.0",
+            "--target",
+            "aarch64-unknown-linux-gnu",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == expected),
+                "missing {expected:?} in {args:?}"
+            );
         }
     }
 }

@@ -13,6 +13,7 @@ TEXT = WORKFLOW.read_text()
 RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github/workflows/release-please.yml"
 RELEASE_TEXT = RELEASE_WORKFLOW.read_text()
 BUILD_SCRIPT = Path(__file__).parents[1] / "build.rs"
+BAFFLE_FETCH_SCRIPT = Path(__file__).parents[1] / "scripts/fetch_baffle.sh"
 EMBEDDED_BAFFLE_DOC = (
     Path(__file__).parents[1] / "docs/features/baffle-integration/embedded-baffle.md"
 )
@@ -410,46 +411,43 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("  build-baffle:\n", TEXT)
         self.assertNotRegex(TEXT, r"(?m)^\s*run: cargo install .*baffle-proxy")
 
-    def test_local_build_pins_locked_baffle_crate_and_matching_rust_requirement(self):
+    def test_local_build_requires_pinned_verified_baffle_binary(self):
         build = BUILD_SCRIPT.read_text()
         self.assertIn('const BAFFLE_VERSION: &str = "1.1.1";', build)
-        self.assertIn('const BAFFLE_MIN_RUST_VERSION: (u32, u32) = (1, 96);', build)
-        install = build.split('.arg("install")', 1)[1].split('.status()', 1)[0]
-        self.assertIn('.arg("baffle-proxy")', install)
-        self.assertIn('.arg(format!("={BAFFLE_VERSION}"))', install)
-        self.assertIn('.arg("--locked")', install)
+        self.assertIn('env::var_os("CLADDING_BAFFLE_BIN")', build)
+        self.assertIn("scripts/fetch_baffle.sh", build)
+        self.assertNotIn('.arg("install")', build)
+        self.assertNotIn("baffle-proxy", build)
+
+        fetch = BAFFLE_FETCH_SCRIPT.read_text()
+        self.assertIn("BAFFLE_VERSION=1.1.1", fetch)
+        self.assertIn('archive="baffle-proxy-v${BAFFLE_VERSION}-${arch}-unknown-linux-gnu.tar.gz"', fetch)
+        self.assertIn('"$release_url/SHA256SUMS"', fetch)
+        self.assertIn('if [ "$actual" != "$expected" ]', fetch)
+        self.assertLess(fetch.index('if [ "$actual" != "$expected" ]'), fetch.index("tar -xzf"))
 
     def test_complete_embedded_linux_tools_are_built_once_per_architecture(self):
         cases = {
             "embedded-linux-tools-x86_64": (
                 "x86_64",
                 "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target-dir target/mcp-run",
-                "baffle-proxy-v1.1.1-x86_64-unknown-linux-gnu.tar.gz",
                 "x86-64",
             ),
             "embedded-linux-tools-aarch64": (
                 "aarch64",
                 "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/mcp-run",
-                "baffle-proxy-v1.1.1-aarch64-unknown-linux-gnu.tar.gz",
                 "aarch64",
             ),
         }
-        for job, (arch, build, archive, machine) in cases.items():
+        for job, (arch, build, machine) in cases.items():
             with self.subTest(job=job):
                 block = job_block(job)
                 self.assertIn(build, block)
+                self.assertIn(f"scripts/fetch_baffle.sh {arch}", block)
                 self.assertIn(
                     "cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c",
                     block,
                 )
-                self.assertIn(f"BAFFLE_ARCHIVE: {archive}", block)
-                self.assertIn(
-                    'release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"',
-                    block,
-                )
-                self.assertIn('"$release_url/SHA256SUMS"', block)
-                self.assertIn('test "$actual" = "$expected"', block)
-                self.assertIn('tar -xzf "$archive_path"', block)
                 self.assertIn('"$RUNNER_TEMP/baffle/baffle" --version', block)
                 self.assertIn('cp "$RUNNER_TEMP/baffle/baffle"', block)
                 for name in (
@@ -598,23 +596,18 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "- name: Download and verify pinned Baffle v1.1.1 release", 1
         )[1].split("- uses: dtolnay/rust-toolchain@stable", 1)[0]
         self.assertIn(
-            "BAFFLE_ARCHIVE: baffle-proxy-v1.1.1-${{ matrix.baffle_arch }}-unknown-linux-gnu.tar.gz",
+            'scripts/fetch_baffle.sh "${{ matrix.baffle_arch }}" "$RUNNER_TEMP/baffle"',
             download,
         )
-        self.assertIn(
-            'release_url="https://github.com/dstoc/baffle/releases/download/v1.1.1"',
-            download,
-        )
-        self.assertIn('"$release_url/$BAFFLE_ARCHIVE"', download)
-        self.assertIn('"$release_url/SHA256SUMS"', download)
-        self.assertIn("awk -v archive=", download)
-        self.assertIn('test "$actual" = "$expected"', download)
-        self.assertLess(
-            download.index('test "$actual" = "$expected"'),
-            download.index("tar -xzf"),
-        )
-        self.assertIn("sha256sum", download)
-        self.assertIn("shasum -a 256", download)
+        fetch = BAFFLE_FETCH_SCRIPT.read_text()
+        self.assertIn('release_url="https://github.com/dstoc/baffle/releases/download/v${BAFFLE_VERSION}"', fetch)
+        self.assertIn('"$release_url/$archive"', fetch)
+        self.assertIn('"$release_url/SHA256SUMS"', fetch)
+        self.assertIn("awk -v archive=", fetch)
+        self.assertIn('if [ "$actual" != "$expected" ]', fetch)
+        self.assertLess(fetch.index('if [ "$actual" != "$expected" ]'), fetch.index("tar -xzf"))
+        self.assertIn("sha256sum", fetch)
+        self.assertIn("shasum -a 256", fetch)
         self.assertIn('test -s "$RUNNER_TEMP/baffle/LICENSE"', download)
         self.assertIn(
             'test -s "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt"',
@@ -648,11 +641,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("THIRD_PARTY_NOTICES.md", package)
         self.assertNotIn("baffle-Cargo.lock", package)
 
-    def test_baffle_docs_describe_source_builds_and_published_release_assets(self):
+    def test_baffle_docs_describe_explicit_fetch_and_published_release_assets(self):
         guide = EMBEDDED_BAFFLE_DOC.read_text()
         prd = BAFFLE_PRD.read_text()
         self.assertIn("pinned Baffle v1.1.1 Linux archive", guide)
         self.assertIn("`SHA256SUMS` before extraction", guide)
+        self.assertIn("requires `CLADDING_BAFFLE_BIN`", guide)
+        self.assertIn("scripts/fetch_baffle.sh", guide)
+        self.assertIn("It does not download or compile Baffle.", guide)
         self.assertIn("under `licenses/baffle/`", guide)
         self.assertNotIn("Do not use Baffle's GitHub release assets", guide)
         self.assertIn(
