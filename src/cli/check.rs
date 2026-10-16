@@ -4,7 +4,6 @@ use cladding::assets::tool_files;
 use cladding::config::{DEFAULT_PROXY_IMAGE, ExecutionConfig};
 use cladding::error::{Error, Result};
 use cladding::fs_utils::is_executable;
-use cladding::identity::invoking_uid;
 use cladding::podman::runsc_available;
 use cladding::runtime::RuntimeSpec;
 use cladding::runtime_metrics;
@@ -97,28 +96,12 @@ pub(super) fn check_required_config_files(
 ) -> Result<()> {
     let dst = context.project_root.join("config");
     let mut missing = false;
-    let mut invalid_sessions = false;
 
     for name in required_config_entries(config) {
         let path = dst.join(&name);
         if !path.exists() {
             eprintln!("missing: config/{name} ({})", path.display());
             missing = true;
-        }
-    }
-
-    let mut session_configs = vec![("agent", config.agent_session_config(), "agent/proxy.sock")];
-    if config.nw_sandbox_enabled() {
-        session_configs.push((
-            "network sandbox",
-            config.nw_sandbox_session_config(),
-            "nw-sandbox/proxy.sock",
-        ));
-    }
-    for (component, name, expected_socket_name) in session_configs {
-        if let Err(reason) = validate_selected_session_config(&dst, name, expected_socket_name) {
-            eprintln!("invalid: {component} Baffle session config '{name}': {reason}");
-            invalid_sessions = true;
         }
     }
 
@@ -129,114 +112,14 @@ pub(super) fn check_required_config_files(
         );
         return Err(Error::message("missing config files"));
     }
-    if invalid_sessions {
+    if let Err(reason) = cladding::config::validate_baffle_session_files(&dst, config) {
+        eprintln!("invalid: {reason}");
         eprintln!(
             "hint: select a valid version 2 Baffle session TOML file under config/proxy/sessions"
         );
         return Err(Error::message("invalid Baffle session config"));
     }
 
-    Ok(())
-}
-
-fn validate_selected_session_config(
-    config_dir: &Path,
-    name: &str,
-    expected_socket_name: &str,
-) -> anyhow::Result<()> {
-    cladding::config::validate_session_config_path(name)
-        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
-
-    let config_metadata = fs::symlink_metadata(config_dir)
-        .map_err(|error| anyhow::anyhow!("cannot inspect {}: {error}", config_dir.display()))?;
-    if config_metadata.file_type().is_symlink() || !config_metadata.is_dir() {
-        anyhow::bail!(
-            "config path is not a real directory: {}",
-            config_dir.display()
-        );
-    }
-    validate_baffle_session_path_metadata(&config_metadata, true)?;
-
-    let sessions_dir = config_dir.join("proxy/sessions");
-    let mut current = config_dir.to_path_buf();
-    for component in ["proxy", "sessions"] {
-        current.push(component);
-        let metadata = fs::symlink_metadata(&current)
-            .map_err(|error| anyhow::anyhow!("cannot inspect {}: {error}", current.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            anyhow::bail!(
-                "session config directory is not a real directory: {}",
-                current.display()
-            );
-        }
-        validate_baffle_session_path_metadata(&metadata, true)?;
-    }
-
-    let canonical_sessions_dir = fs::canonicalize(&sessions_dir)
-        .map_err(|error| anyhow::anyhow!("cannot resolve {}: {error}", sessions_dir.display()))?;
-    let relative = Path::new(name);
-    let mut selected = sessions_dir.clone();
-    for (index, component) in relative.components().enumerate() {
-        let std::path::Component::Normal(component) = component else {
-            anyhow::bail!("session config path contains an unsafe component");
-        };
-        selected.push(component);
-        let metadata = fs::symlink_metadata(&selected)
-            .map_err(|error| anyhow::anyhow!("cannot inspect {}: {error}", selected.display()))?;
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("session config path contains a symlink");
-        }
-        if index + 1 == relative.components().count() {
-            if !metadata.is_file() {
-                anyhow::bail!("selected session config is not a regular file");
-            }
-            validate_baffle_session_path_metadata(&metadata, false)?;
-        } else if !metadata.is_dir() {
-            anyhow::bail!("session config parent is not a directory");
-        } else {
-            validate_baffle_session_path_metadata(&metadata, true)?;
-        }
-    }
-
-    let canonical_selected = fs::canonicalize(&selected)
-        .map_err(|error| anyhow::anyhow!("cannot resolve {}: {error}", selected.display()))?;
-    if !canonical_selected.starts_with(&canonical_sessions_dir) {
-        anyhow::bail!("selected session config resolves outside the sessions directory");
-    }
-    let contents = fs::read_to_string(&canonical_selected)
-        .map_err(|error| anyhow::anyhow!("cannot read selected session config: {error}"))?;
-    cladding::config::validate_baffle_session_config_for_socket(&contents, expected_socket_name)
-}
-
-fn validate_baffle_session_path_metadata(
-    metadata: &fs::Metadata,
-    is_directory: bool,
-) -> anyhow::Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    let uid = metadata.uid();
-    validate_baffle_session_owner(uid, invoking_uid())?;
-
-    let mode = metadata.permissions().mode();
-    if mode & 0o022 != 0 {
-        anyhow::bail!("Baffle session paths must not be group- or world-writable");
-    }
-    let has_read_access = if is_directory {
-        mode & 0o500 == 0o500
-    } else {
-        mode & 0o444 != 0
-    };
-    if !has_read_access {
-        anyhow::bail!("Baffle session path does not have the required read access");
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn validate_baffle_session_owner(uid: u32, trusted_uid: u32) -> anyhow::Result<()> {
-    if uid != 0 && uid != trusted_uid {
-        anyhow::bail!("Baffle session paths must be owned by root or the current user");
-    }
     Ok(())
 }
 
@@ -428,18 +311,6 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    #[cfg(unix)]
-    #[test]
-    fn session_ownership_uses_real_uid_and_keeps_root_trusted() {
-        let real_uid = 1000;
-        let effective_uid = 2000;
-        let trusted_uid = real_uid;
-
-        assert!(validate_baffle_session_owner(real_uid, trusted_uid).is_ok());
-        assert!(validate_baffle_session_owner(0, trusted_uid).is_ok());
-        assert!(validate_baffle_session_owner(effective_uid, trusted_uid).is_err());
-    }
 
     #[test]
     fn readiness_requires_a_project_ca_without_initializing_it() {

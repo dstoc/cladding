@@ -22,6 +22,7 @@ use std::fs;
 
 pub(super) fn cmd_build(context: &Context) -> Result<()> {
     let config = context.load_config()?;
+    cladding::config::validate_baffle_session_files(&context.project_root.join("config"), &config)?;
 
     let host_uid = invoking_uid();
     let host_gid = unsafe { libc::getgid() };
@@ -773,6 +774,29 @@ mod tests {
                 .join("runtime/scripts/proxy_startup.sh")
                 .is_file()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_rejects_malformed_sessions_before_build_side_effects() {
+        let root = std::env::temp_dir().join(format!(
+            "cladding-build-invalid-session-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let project_root = root.join(".cladding");
+        let context = super::super::context::Context::default_for_project(project_root.clone());
+
+        cmd_init(&context, Some("demo")).unwrap();
+        fs::write(
+            project_root.join("config/proxy/sessions/agent.toml"),
+            "version = [\n",
+        )
+        .unwrap();
+
+        let error = cmd_build(&context).expect_err("build must reject malformed session data");
+        assert!(error.to_string().contains("agent Baffle session config"));
+        assert!(!project_root.join("tools/bin").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

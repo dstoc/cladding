@@ -27,12 +27,15 @@ Cladding selects `sessions/agent.toml` for the agent and
 rejects absolute paths, `.` and `..` path components, and symlinks. The two
 components have independent selections.
 
-`cladding check` validates the selected version 2 Baffle session file for each
-enabled component. A disabled network sandbox does not require its selected
-file. `cladding run` uses the selected files directly from the project config
-directory. `cladding reload-proxy` reloads the active sessions from their
-selected files. To change a selection, recreate the proxy runtime with
-`cladding down` and `cladding up`.
+`cladding build` and `cladding check` apply the same filesystem checks to the
+Baffle configuration tree and validate the selected version 2 session file
+and component socket name for each enabled component. A disabled network
+sandbox does not require its selected file. Baffle validates the session
+policy schema and rules when it creates or reloads a session. `cladding run`
+uses the selected files directly from the project config directory.
+`cladding reload-proxy` reloads the active sessions from their selected files.
+To change a selection, recreate the proxy runtime with `cladding down` and
+`cladding up`.
 
 Example `cladding.json`:
 
@@ -74,6 +77,8 @@ fail.
 ## File ownership and access
 
 The proxy configuration uses Baffle's `file_only` create mode. Initialization creates directories with mode `0755` and TOML files with mode `0644`, owned by the user who runs `cladding init`. Rootless Podman maps the host user's files to the proxy container's trusted UID. Initialization rejects symlinks on the managed configuration paths because Baffle's file-only mode requires real files and directories.
+
+`cladding build` and `cladding check` require these paths to be owned by root or the invoking user. They reject group- or world-writable paths, unreadable files, directories without owner read and execute access, symbolic links, and non-regular entries.
 
 Cladding mounts `config/` read-only into the agent and network sandbox. They can read the non-secret Baffle TOML by design. Store symbolic secret names in `[secrets].allowed`; do not put secret values, private keys, or control-socket paths with access capabilities in TOML. In phase one, execution containers do not mount the Baffle control socket.
 

@@ -1,6 +1,6 @@
+use crate::config::validate_baffle_config_layout;
 use crate::error::Result;
 use crate::fs_utils::set_permissions;
-use crate::identity::invoking_uid;
 use anyhow::Context as _;
 use include_dir::{Dir, include_dir};
 use std::fs;
@@ -222,90 +222,6 @@ fn ensure_config_directory(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_baffle_config_layout(config_dir: &Path) -> anyhow::Result<()> {
-    for path in [
-        config_dir.to_path_buf(),
-        config_dir.join("proxy"),
-        config_dir.join("proxy/sessions"),
-    ] {
-        validate_baffle_config_path(&path, true)?;
-    }
-    validate_baffle_config_path(&config_dir.join("proxy/daemon.toml"), false)?;
-    validate_baffle_config_tree(&config_dir.join("proxy/sessions"))
-}
-
-fn validate_baffle_config_tree(directory: &Path) -> anyhow::Result<()> {
-    for entry in fs::read_dir(directory)
-        .with_context(|| format!("failed to read {}", directory.display()))?
-    {
-        let entry = entry.with_context(|| format!("failed to read {}", directory.display()))?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to inspect {}", path.display()))?;
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!(
-                "Baffle file-only configuration cannot contain symbolic links: {}",
-                path.display()
-            );
-        }
-        if metadata.is_dir() {
-            validate_baffle_config_path(&path, true)?;
-            validate_baffle_config_tree(&path)?;
-        } else if metadata.is_file() {
-            validate_baffle_config_path(&path, false)?;
-        } else {
-            anyhow::bail!(
-                "Baffle file-only configuration requires regular files and directories: {}",
-                path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_baffle_config_path(path: &Path, directory: bool) -> anyhow::Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!(
-            "Baffle file-only configuration cannot contain symbolic links: {}",
-            path.display()
-        );
-    }
-    if directory && !metadata.is_dir() || !directory && !metadata.is_file() {
-        anyhow::bail!(
-            "Baffle file-only configuration requires a {} at {}",
-            if directory {
-                "directory"
-            } else {
-                "regular file"
-            },
-            path.display()
-        );
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = metadata.permissions().mode() & 0o777;
-        if mode & 0o022 != 0 {
-            anyhow::bail!(
-                "Baffle file-only configuration cannot be group- or world-writable: {}",
-                path.display()
-            );
-        }
-        let owner = invoking_uid();
-        if metadata.uid() != owner {
-            anyhow::bail!(
-                "Baffle file-only configuration must be owned by the user running cladding: {}",
-                path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
 pub fn containerfile() -> &'static str {
     CONTAINERFILE_CLADDING
 }
@@ -439,7 +355,7 @@ unmatched = "deny"
         assert_eq!(daemon_file.permissions().mode() & 0o777, 0o644);
         assert_eq!(session_file.permissions().mode() & 0o777, 0o644);
         use std::os::unix::fs::MetadataExt as _;
-        let current_uid = invoking_uid();
+        let current_uid = crate::identity::invoking_uid();
         assert_eq!(daemon_dir.uid(), current_uid);
         assert_eq!(sessions_dir.uid(), current_uid);
         assert_eq!(daemon_file.uid(), current_uid);
