@@ -6,7 +6,7 @@ mod types;
 
 pub use types::{
     ManagedVolumeKind, RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar,
-    RuntimeMount, RuntimeMountSource, RuntimeSpec,
+    RuntimeMount, RuntimeMountSource, RuntimeMountSourceSnapshot, RuntimeSpec,
 };
 
 pub fn runtime_container_name(component_name: &str) -> String {

@@ -106,6 +106,11 @@ pub(super) fn cmd_run(
         Some(secret_mounts) => context.with_run_secret_mounts(secret_mounts),
         None => context,
     };
+    let config = context
+        .resolved_config()
+        .expect("one-off run context stores its resolved configuration");
+    let spec = context.runtime_spec(config)?;
+    let mut resource_attempts = cladding::podman::RuntimeResourceAttempts::for_spec(&spec);
 
     if let Err(setup_error) = lifecycle::prepare_run_runtime_root(&runtime_root) {
         drop(preparation);
@@ -132,12 +137,19 @@ pub(super) fn cmd_run(
     }
 
     drop(preparation);
-    let (startup_result, runtime_create_attempted) = lifecycle::cmd_up_ephemeral(&context, verbose);
+    let (startup_result, runtime_create_attempted) =
+        lifecycle::cmd_up_ephemeral(&context, config, &spec, &mut resource_attempts, verbose);
 
     if let Err(startup_error) = startup_result {
         let _cleanup = cladding::runtime_metrics::phase("cleanup");
         let cleanup_error = if runtime_create_attempted {
-            cleanup_ephemeral_runtime(&context, &runtime_root, &instance_name, verbose)
+            cleanup_ephemeral_runtime(
+                &spec,
+                &resource_attempts,
+                &runtime_root,
+                &instance_name,
+                verbose,
+            )
         } else {
             remove_private_runtime_root(&runtime_root).map_err(Error::from)
         };
@@ -160,12 +172,20 @@ pub(super) fn cmd_run(
         let _command = cladding::runtime_metrics::phase("user command");
         match signals.received() {
             Some(signal) => Err(signal_status_error(signal)),
-            None => exec::cmd_run_command(&context, env_vars, args, !config_uses_stdin),
+            None => {
+                exec::cmd_run_command(&context, config, &spec, env_vars, args, !config_uses_stdin)
+            }
         }
     };
     let cleanup_error = {
         let _cleanup = cladding::runtime_metrics::phase("cleanup");
-        cleanup_ephemeral_runtime(&context, &runtime_root, &instance_name, verbose)
+        cleanup_ephemeral_runtime(
+            &spec,
+            &resource_attempts,
+            &runtime_root,
+            &instance_name,
+            verbose,
+        )
     };
     let signal = signals.finish();
 
@@ -481,7 +501,8 @@ fn write_private_run_secret(path: &Path, contents: &[u8]) -> anyhow::Result<()> 
 }
 
 fn cleanup_ephemeral_runtime(
-    context: &Context,
+    spec: &cladding::runtime::RuntimeSpec,
+    resource_attempts: &cladding::podman::RuntimeResourceAttempts,
     runtime_root: &Path,
     instance_name: &str,
     verbose: bool,
@@ -490,7 +511,7 @@ fn cleanup_ephemeral_runtime(
         eprintln!("cleaning up one-off instance: {instance_name}");
     }
     let (runtime_cleanup, runtime_root_safe_to_remove) =
-        lifecycle::cmd_down_ephemeral(context, verbose);
+        lifecycle::cmd_down_ephemeral(spec, resource_attempts, verbose);
     let local_cleanup = if runtime_root_safe_to_remove {
         remove_private_runtime_root(runtime_root)
             .with_context(|| {

@@ -1,7 +1,7 @@
 use super::commands::build_supervisor_command;
 use super::mounts::{
-    apply_custom_mounts, build_custom_mounts, build_execution_mounts, build_fs_sandbox_mounts,
-    build_proxy_mounts,
+    apply_custom_mounts, build_custom_mounts_with_snapshots, build_execution_mounts,
+    build_fs_sandbox_mounts, build_proxy_mounts,
 };
 use super::runtime_container_name;
 use super::sockets::{
@@ -33,8 +33,13 @@ impl RuntimeSpec {
     ) -> Self {
         let project_root = project_root.to_path_buf();
         let runtime_root = runtime_root.to_path_buf();
-        let custom_mounts =
-            build_custom_mounts(&project_root, &runtime_root, &config.name, &config.mounts);
+        let (custom_mounts, custom_mount_sources) = build_custom_mounts_with_snapshots(
+            &project_root,
+            &runtime_root,
+            &config.name,
+            &config.mounts,
+        );
+        crate::runtime_metrics::record_runtime_spec_build(custom_mount_sources.len());
         let names = RuntimeNames::from_config(config);
 
         let proxy = build_proxy_component(&project_root, &runtime_root, config, &names);
@@ -55,6 +60,7 @@ impl RuntimeSpec {
             agent,
             nw_sandbox,
             fs_sandbox,
+            custom_mount_sources,
         }
     }
 

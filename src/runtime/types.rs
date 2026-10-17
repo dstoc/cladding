@@ -12,6 +12,14 @@ pub struct RuntimeSpec {
     pub agent: RuntimeComponent,
     pub nw_sandbox: Option<RuntimeComponent>,
     pub fs_sandbox: Option<RuntimeComponent>,
+    pub custom_mount_sources: Vec<RuntimeMountSourceSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeMountSourceSnapshot {
+    pub mount_path: String,
+    pub source: PathBuf,
+    pub resolved_source: PathBuf,
 }
 
 #[derive(Debug, Clone)]

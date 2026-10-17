@@ -6,7 +6,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use time::{Duration, OffsetDateTime};
 
@@ -42,12 +42,55 @@ case "$1:$2" in
 esac
 if [ -n "${CLADDING_TEST_PODMAN_DELAY:-}" ]; then sleep "$CLADDING_TEST_PODMAN_DELAY"; fi
 printf '%s\n' "$*" >> "$CLADDING_PODMAN_LOG"
-if [ "$1" = "run" ] && [ "${CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP:-}" = "1" ]; then
+if [ "$1" = "run" ]; then
+  helper_name=
+  helper_project=
+  helper_root=
+  helper_app=
+  socket_helper=
+  copy_seed_helper=
+  next=
   for argument in "$@"; do
+    if [ -n "$next" ]; then
+      case "$next" in
+        name) helper_name=$argument ;;
+        label)
+          case "$argument" in
+            app=*) helper_app=${argument#app=} ;;
+            cladding=*) helper_project=${argument#cladding=} ;;
+            project_root=*) helper_root=${argument#project_root=} ;;
+          esac
+          ;;
+        volume)
+          case "$argument" in
+            *:/socket:U|*:/socket/*:U) socket_helper=yes ;;
+            *:/source:ro) copy_seed_helper=yes ;;
+          esac
+          ;;
+      esac
+      next=
+      continue
+    fi
     case "$argument" in
-      *:/socket:U|*:/socket/*:U) exit 44 ;;
+      --name) next=name ;;
+      --label) next=label ;;
+      --volume) next=volume ;;
     esac
   done
+  if [ "${CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP:-}" = "1" ] && [ -n "$socket_helper" ]; then
+    if [ -n "$helper_name" ]; then
+      printf '%s|%s|%s|%s|running|present\n' \
+        "$helper_name" "$helper_project" "$helper_root" "$helper_app" >> "$CLADDING_PODMAN_STATE"
+    fi
+    exit 44
+  fi
+  if [ "${CLADDING_TEST_FAIL_COPY_SEED:-}" = "1" ] && [ -n "$copy_seed_helper" ]; then
+    if [ -n "$helper_name" ]; then
+      printf '%s|%s|%s|%s|running|present\n' \
+        "$helper_name" "$helper_project" "$helper_root" "$helper_app" >> "$CLADDING_PODMAN_STATE"
+    fi
+    exit 45
+  fi
 fi
 case "$1:$2" in
   run:*|exec:--user|rm:-f)
@@ -434,6 +477,8 @@ exit 0
     )
     .unwrap();
     let config_path = project_root.join("cladding.json");
+    let run_mount_source = root.join("run-mount-source");
+    fs::create_dir_all(&run_mount_source).unwrap();
     let mut project_config: serde_json::Value =
         serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     project_config["proxy"]["agent"]["session_config"] = "custom/agent.toml".into();
@@ -446,6 +491,11 @@ exit 0
         },
         {
             "mount": "/empty",
+            "targets": ["agent"]
+        },
+        {
+            "mount": "/runtime-mount",
+            "hostPath": run_mount_source.to_str().unwrap(),
             "targets": ["agent"]
         }
     ]);
@@ -637,6 +687,7 @@ exit 0
     )
     .unwrap();
     fs::write(&socket_volume_state, "cladding-kache||||\n").unwrap();
+    fs::write(&podman_log, "").unwrap();
     let mut run = cli(
         &root,
         &bin_dir,
@@ -674,6 +725,11 @@ exit 0
     assert!(verbose_stderr.contains("helper stderr:"));
     assert!(verbose_stderr.contains("cleaning up one-off instance:"));
     assert!(verbose_stderr.contains("user-error"));
+    let run_calls = read_log(&podman_log);
+    assert!(
+        !run_calls.contains("volume ls"),
+        "one-off cleanup must use its prepared resource record without a stale-volume scan: {run_calls}"
+    );
     let metrics_line = verbose_stderr
         .lines()
         .find(|line| line.starts_with("runtime metrics: run "))
@@ -695,6 +751,10 @@ exit 0
             "missing {operation}: {metrics_line}"
         );
     }
+    assert!(
+        metrics_line.contains("preparation runtime-specs=1 custom-mount-paths-prepared=1"),
+        "one-off run should prepare its runtime spec once: {metrics_line}"
+    );
     for operation in ["discovery/inspect=", "removal="] {
         let count = metrics_line
             .split(operation)
@@ -864,6 +924,7 @@ exit 0
     if podman_state.exists() {
         fs::remove_file(&podman_state).unwrap();
     }
+    fs::write(&podman_log, "").unwrap();
     let mut failing_run = cli(
         &root,
         &bin_dir,
@@ -890,6 +951,27 @@ exit 0
     assert!(failure_stderr.contains("stdout:\nhelper stdout: exec --user"));
     assert!(failure_stderr.contains("stderr:\nhelper stderr: exec --user"));
     assert!(!failure_stderr.contains("user-error"));
+    let failed_start_log = read_log(&podman_log);
+    let removed_run_containers: Vec<_> = failed_start_log
+        .lines()
+        .filter_map(|line| line.strip_prefix("rm -f "))
+        .filter(|name| name.starts_with("cladding-run-") && name.ends_with("-instance"))
+        .collect();
+    assert_eq!(
+        removed_run_containers.len(),
+        3,
+        "failed one-off startup must clean each component exactly once, including components that never started: {failed_start_log}"
+    );
+    for component in ["proxy", "agent", "nw-sandbox"] {
+        assert_eq!(
+            removed_run_containers
+                .iter()
+                .filter(|name| name.ends_with(&format!("-{component}-instance")))
+                .count(),
+            1,
+            "failed one-off startup must remove the {component} component once: {failed_start_log}"
+        );
+    }
     assert_eq!(
         fs::read_to_string(&socket_volume_state).unwrap(),
         "",
@@ -921,6 +1003,108 @@ exit 0
         .expect("failed startup prints runtime metrics");
     assert!(startup_metrics.contains("startup="));
     assert!(startup_metrics.contains("cleanup="));
+
+    let mut copy_failure_config = project_config.clone();
+    copy_failure_config["mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "mount": "/run-copy",
+            "hostPath": run_mount_source.to_str().unwrap(),
+            "type": "copy",
+            "targets": ["agent"]
+        }));
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&copy_failure_config).unwrap(),
+    )
+    .unwrap();
+    if podman_state.exists() {
+        fs::remove_file(&podman_state).unwrap();
+    }
+    fs::write(&podman_log, "").unwrap();
+    let mut copy_seed_failure = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    copy_seed_failure
+        .args([
+            "--cladding-dir",
+            project_root.to_str().unwrap(),
+            "run",
+            "-v",
+            "true",
+        ])
+        .env("CLADDING_TEST_FAIL_COPY_SEED", "1");
+    let copy_seed_failure_output = copy_seed_failure.output().unwrap();
+    assert!(!copy_seed_failure_output.status.success());
+    let copy_seed_failure_stderr = String::from_utf8_lossy(&copy_seed_failure_output.stderr);
+    assert!(
+        copy_seed_failure_stderr.contains("copy mount volume seeding"),
+        "unexpected managed copy seed failure: {copy_seed_failure_stderr}"
+    );
+    let copy_seed_failure_log = read_log(&podman_log);
+    let copy_volume = copy_seed_failure_log
+        .lines()
+        .find(|line| line.starts_with("volume create ") && line.contains("managed-mount"))
+        .and_then(|line| line.split_whitespace().last())
+        .expect("failed copy startup created a managed volume");
+    let copy_seed_helper = format!("{copy_volume}-seed");
+    assert!(
+        copy_seed_failure_log.contains(&format!("--name {copy_seed_helper}")),
+        "seed helper identity must be present in its create command: {copy_seed_failure_log}"
+    );
+    assert_eq!(
+        copy_seed_failure_log
+            .lines()
+            .filter(|line| line.trim() == format!("rm -f {copy_seed_helper}"))
+            .count(),
+        1,
+        "failed copy seed helper must be retired once: {copy_seed_failure_log}"
+    );
+    assert!(
+        copy_seed_failure_log.contains(&format!("volume rm {copy_volume}")),
+        "failed copy startup must remove the volume it attempted to create: {copy_seed_failure_log}"
+    );
+    assert!(
+        !copy_seed_failure_log.contains("volume ls"),
+        "complete one-off attempt records should avoid stale volume discovery: {copy_seed_failure_log}"
+    );
+    let copy_instance = String::from_utf8_lossy(&copy_seed_failure_output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("starting one-off instance: "))
+        .expect("verbose copy run reports its instance name")
+        .to_string();
+    assert!(
+        !project_root
+            .join("runtime/runs")
+            .join(copy_instance)
+            .exists(),
+        "failed copy startup should remove its private runtime root"
+    );
+    for component in ["proxy", "agent", "nw-sandbox"] {
+        assert_eq!(
+            copy_seed_failure_log
+                .lines()
+                .filter(|line| {
+                    line.strip_prefix("rm -f ").is_some_and(|name| {
+                        name.starts_with("cladding-run-")
+                            && name.ends_with(&format!("-{component}-instance"))
+                    })
+                })
+                .count(),
+            1,
+            "failed copy startup must clean the {component} component once, even though startup did not reach it: {copy_seed_failure_log}"
+        );
+    }
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&project_config).unwrap(),
+    )
+    .unwrap();
 
     if podman_state.exists() {
         fs::remove_file(&podman_state).unwrap();
@@ -955,7 +1139,27 @@ exit 0
     assert!(cleanup_failure_stderr.contains("podman rm failed (exit code 43)"));
     assert!(cleanup_failure_stderr.contains("stdout:\nhelper stdout: rm -f"));
     assert!(cleanup_failure_stderr.contains("stderr:\nhelper stderr: rm -f"));
+    assert!(
+        cleanup_failure_stderr
+            .matches("podman rm failed (exit code 43)")
+            .count()
+            >= 3,
+        "cleanup should aggregate failures across component removals: {cleanup_failure_stderr}"
+    );
     assert!(!cleanup_failure_stderr.contains("runtime metrics:"));
+    let cleanup_failure_log = read_log(&podman_log);
+    let cleanup_failure_script = cleanup_failure_log
+        .lines()
+        .find_map(|line| line.strip_prefix("RUNTIME_SCRIPT_SOURCE="))
+        .expect("failed cleanup ran a component with the private startup script");
+    let retained_runtime_root = Path::new(cleanup_failure_script)
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    assert!(
+        retained_runtime_root.exists(),
+        "private runtime root must remain while container removal fails"
+    );
 
     if podman_state.exists() {
         fs::remove_file(&podman_state).unwrap();
@@ -1036,6 +1240,10 @@ exit 0
             .contains("cladding-demo-socket-baffle-nw-sandbox:/socket/1:U")
     );
     assert!(
+        failed_socket_prepare_helpers[0].contains("--name demo-baffle-socket-volume-permissions")
+    );
+    assert!(failed_socket_prepare_log.contains("rm -f demo-baffle-socket-volume-permissions"));
+    assert!(
         !failed_socket_prepare_log.contains("--name demo-proxy-instance"),
         "a failed socket preparation must stop before runtime consumers start: {failed_socket_prepare_log}"
     );
@@ -1049,6 +1257,73 @@ exit 0
         fs::read_to_string(&socket_volume_state).unwrap(),
         "cladding-kache||||\n",
         "failed socket preparation must clean up every created socket volume"
+    );
+
+    fs::write(&podman_log, "").unwrap();
+    let mut failed_socket_run = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    failed_socket_run
+        .args([
+            "--cladding-dir",
+            project_root.to_str().unwrap(),
+            "run",
+            "-v",
+            "true",
+        ])
+        .env("CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP", "1");
+    let failed_socket_run_output = failed_socket_run.output().unwrap();
+    assert!(!failed_socket_run_output.status.success());
+    let failed_socket_instance = String::from_utf8_lossy(&failed_socket_run_output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("starting one-off instance: "))
+        .expect("verbose failed run reports its instance name")
+        .to_string();
+    let failed_socket_helper = format!("{failed_socket_instance}-baffle-socket-volume-permissions");
+    let failed_socket_run_log = read_log(&podman_log);
+    assert!(failed_socket_run_log.contains(&format!("--name {failed_socket_helper}")));
+    assert_eq!(
+        failed_socket_run_log
+            .lines()
+            .filter(|line| line.trim() == format!("rm -f {failed_socket_helper}"))
+            .count(),
+        1,
+        "one-off cleanup must consume the recorded socket helper identity: {failed_socket_run_log}"
+    );
+    assert!(
+        !failed_socket_run_log.contains("volume ls"),
+        "complete one-off attempt records should avoid stale volume discovery: {failed_socket_run_log}"
+    );
+    for component in ["proxy", "agent", "nw-sandbox"] {
+        assert_eq!(
+            failed_socket_run_log
+                .lines()
+                .filter(|line| {
+                    line.strip_prefix("rm -f ").is_some_and(|name| {
+                        name.starts_with("cladding-run-")
+                            && name.ends_with(&format!("-{component}-instance"))
+                    })
+                })
+                .count(),
+            1,
+            "failed permission setup must clean the {component} component once: {failed_socket_run_log}"
+        );
+    }
+    assert!(
+        !project_root
+            .join("runtime/runs")
+            .join(failed_socket_instance)
+            .exists(),
+        "failed socket preparation should remove its private runtime root"
+    );
+    assert_eq!(
+        fs::read_to_string(&socket_volume_state).unwrap(),
+        "cladding-kache||||\n",
+        "failed one-off socket preparation should preserve external volumes"
     );
 
     fs::write(&podman_log, "").unwrap();
@@ -1111,10 +1386,16 @@ exit 0
         .lines()
         .position(|line| line.contains("--name demo-proxy-instance"))
         .expect("proxy start command is logged");
-    let helper_command = "run --rm --network none --userns keep-id --volume cladding-demo-socket-baffle-agent:/socket/0:U --volume cladding-demo-socket-baffle-nw-sandbox:/socket/1:U --entrypoint /bin/sh localhost/cladding-proxy:latest -ec mkdir -p /socket/0 /socket/1 && chmod 0700 /socket/0 /socket/1";
     let helper_index = startup_log
         .lines()
-        .position(|line| line == helper_command)
+        .position(|line| {
+            line.contains("run --rm --network none --userns keep-id --name demo-baffle-socket-volume-permissions")
+                && line.contains("app=baffle-socket-volume-permissions")
+                && line.contains("cladding=demo")
+                && line.contains("cladding-demo-socket-baffle-agent:/socket/0:U")
+                && line.contains("cladding-demo-socket-baffle-nw-sandbox:/socket/1:U")
+                && line.ends_with("mkdir -p /socket/0 /socket/1 && chmod 0700 /socket/0 /socket/1")
+        })
         .unwrap_or_else(|| panic!("missing batched Baffle volume preparation: {startup_log}"));
     assert!(
         helper_index < proxy_start_index,
@@ -1513,6 +1794,76 @@ exit 0
             project_root.display()
         )
     );
+
+    fs::write(&container_state, "").unwrap();
+    fs::write(&socket_volume_state, "").unwrap();
+    let parallel_logs = [root.join("parallel-a.log"), root.join("parallel-b.log")];
+    let mut parallel_a = cli(
+        &root,
+        &bin_dir,
+        &parallel_logs[0],
+        &certificate_source,
+        &private_key_source,
+    );
+    parallel_a
+        .args([
+            "--cladding-dir",
+            project_root.to_str().unwrap(),
+            "run",
+            "-v",
+            "true",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("CLADDING_TEST_PODMAN_DELAY", "0.01");
+    let mut parallel_b = cli(
+        &root,
+        &bin_dir,
+        &parallel_logs[1],
+        &certificate_source,
+        &private_key_source,
+    );
+    parallel_b
+        .args([
+            "--cladding-dir",
+            project_root.to_str().unwrap(),
+            "run",
+            "-v",
+            "true",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("CLADDING_TEST_PODMAN_DELAY", "0.01");
+    let parallel_a = parallel_a.spawn().unwrap();
+    let parallel_b = parallel_b.spawn().unwrap();
+    let parallel_a_output = parallel_a.wait_with_output().unwrap();
+    let parallel_b_output = parallel_b.wait_with_output().unwrap();
+    assert_success(parallel_a_output.clone());
+    assert_success(parallel_b_output.clone());
+    let parallel_instances: Vec<_> = parallel_logs
+        .iter()
+        .map(|log_path| {
+            let log = read_log(log_path);
+            let proxy_start = log
+                .lines()
+                .find(|line| line.contains("run -d") && line.contains("--name "))
+                .expect("parallel run starts its proxy container");
+            proxy_start
+                .split("--name ")
+                .nth(1)
+                .and_then(|name| name.split_whitespace().next())
+                .and_then(|name| name.strip_suffix("-proxy-instance"))
+                .expect("parallel proxy name includes the run identity")
+                .to_string()
+        })
+        .collect();
+    assert_ne!(parallel_instances[0], parallel_instances[1]);
+    for instance in parallel_instances {
+        assert!(
+            !project_root.join("runtime/runs").join(instance).exists(),
+            "successful concurrent run should remove its private runtime root"
+        );
+    }
 
     fs::remove_dir_all(root).unwrap();
 }
