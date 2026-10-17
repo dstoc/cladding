@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.7](https://github.com/dstoc/cladding/compare/v0.4.6...v0.4.7) (2026-10-17)
+
+
+### Features
+
+* **cli:** report verbose runtime metrics ([#128](https://github.com/dstoc/cladding/issues/128)) ([5354d67](https://github.com/dstoc/cladding/commit/5354d6736e15e0c544771e453e6ba9f0938b60cf))
+
+
+### Bug Fixes
+
+* **build:** make embedded helper builds target-aware ([#134](https://github.com/dstoc/cladding/issues/134)) ([5054f18](https://github.com/dstoc/cladding/commit/5054f189160ab040e276d0621a10735de6c1ea55))
+
+
+### Performance Improvements
+
+* **runtime:** batch Baffle socket volume preparation ([#130](https://github.com/dstoc/cladding/issues/130)) ([07f81f3](https://github.com/dstoc/cladding/commit/07f81f3f19c1ad29fa51df12cfb1e456c97cf2b9))
+* **runtime:** consolidate startup container discovery ([#131](https://github.com/dstoc/cladding/issues/131)) ([e5ca18b](https://github.com/dstoc/cladding/commit/e5ca18b1955728cfe1bcaba5998ef9d3f38d4dae))
+* **runtime:** reuse prepared one-off runtime state ([#136](https://github.com/dstoc/cladding/issues/136)) ([44b7046](https://github.com/dstoc/cladding/commit/44b7046077ce9b8f52becdcb39d6dbaf20d0e4a6))
+
 ## [0.4.6](https://github.com/dstoc/cladding/compare/v0.4.5...v0.4.6) (2026-10-15)
 
 
