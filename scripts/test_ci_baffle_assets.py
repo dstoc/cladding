@@ -126,8 +126,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
         self.assertLess(
             cleanup.index('cleanup_origin_container "$run_origin_name"'),
-            cleanup.index('touch "$temp_root/workspace/.run-origin-ready"'),
+            cleanup.index('touch "$temp_root/workspace/.run-abort"'),
         )
+        self.assertIn('"$temp_root/workspace/.cross-run-abort"', cleanup)
         self.assertIn('"$temp_root/workspace/.failure-run-finish"', cleanup)
         self.assertIn('wait_for_process_exit "$run_pid" 600', cleanup)
         self.assertIn('kill -KILL "$run_pid"', cleanup)
@@ -148,6 +149,8 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn(".failure-run-finish", probe)
         self.assertNotIn("while :; do sleep", probe)
         self.assertNotIn('wait "$run_child"', validator)
+        self.assertIn("/workspace/.run-command-ready", validator)
+        self.assertIn("/workspace/.cross-run-command-ready", validator)
 
     def test_baffle_runtime_proves_fake_credential_substitution_and_session_isolation(self):
         validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
