@@ -4,7 +4,7 @@ A normal Cladding build requires `CLADDING_BAFFLE_BIN`. The build script checks
 that the supplied executable is a 64-bit Linux GNU binary for the target
 architecture. It does not download or compile Baffle.
 
-Fetch the pinned Baffle **1.1.1** release before building. The script selects
+Fetch the pinned Baffle **2.1.0** release before building. The script selects
 the Linux archive for the requested architecture and verifies its checksum
 against that release's `SHA256SUMS` file:
 
@@ -26,7 +26,7 @@ On Linux, Cladding builds its embedded helper programs with Cargo for the
 matching Linux GNU target. On macOS, it builds them in a Rust container for the
 matching Linux architecture; this path requires a working Podman installation.
 Both paths keep helper outputs under Cargo's `OUT_DIR`. Release builds may
-instead supply the three prebuilt helper paths.
+instead supply the four prebuilt helper paths.
 CI runs `baffle --version` on native Linux x86_64 and aarch64 runners. The
 x86_64 integration suite also starts the executable that Cladding extracts
 during `cladding build` in Cladding's default proxy image.
@@ -34,7 +34,7 @@ during `cladding build` in Cladding's default proxy image.
 Published release archives are built for Linux x86_64, Linux aarch64, and
 Apple Silicon macOS. Each archive embeds the Linux GNU Baffle executable for
 the matching Podman guest architecture. The release workflow downloads the
-pinned Baffle v1.1.1 Linux archive and checks its checksum against that
+pinned Baffle v2.1.0 Linux archive and checks its checksum against that
 release's `SHA256SUMS` before extraction. It uses the x86_64 archive for the
 x86_64 Linux package and the aarch64 archive for the aarch64 Linux and Apple
 Silicon macOS packages. CI verifies the same published binaries and runs the
@@ -53,9 +53,10 @@ copy. Run `cladding build` to refresh it.
    for x86_64 and aarch64, with a `SHA256SUMS` file.
 2. Review the release archive contents for the executable, architecture,
    license, and third-party notices.
-3. Update the pinned Baffle version in `build.rs` and
-   `scripts/fetch_baffle.sh`, then update the CI and release workflows. Keep
-   checksum verification before archive extraction.
+3. Update the published Baffle binary pin in `build.rs` and
+   `scripts/fetch_baffle.sh`. Update the published `baffle-client` dependency
+   when Cladding uses a new client API. Then update CI and release workflows.
+   Keep checksum verification before archive extraction.
 4. Update the architecture and redistribution checks in
    `scripts/test_ci_baffle_assets.py`.
 5. Run the runtime smoke test against the selected proxy image for each
@@ -71,7 +72,7 @@ files from the checksum-verified upstream archive under `licenses/baffle/`.
 
 ## Session file migration
 
-Baffle 1.0 accepts session files in version 2 format. Cladding's generated
+Baffle 2.1.0 accepts session files in version 2 format. Cladding's generated
 files use this format. `cladding init` does not rewrite files that already
 exist, so migrate existing version 1 session files before you start or reload
 the proxy after upgrading Cladding.

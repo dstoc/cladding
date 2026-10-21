@@ -22,6 +22,8 @@ BAFFLE_CONFIG_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_baffle_c
 BAFFLE_RUNTIME_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_baffle_runtime.sh"
 )
+PROXY_STARTUP_SCRIPT = Path(__file__).parents[1] / "scripts/proxy_startup.sh"
+RUN_IMPLEMENTATION = Path(__file__).parents[1] / "src/cli/run.rs"
 RUNTIME_TOPOLOGY_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_runtime_topology.sh"
 )
@@ -108,7 +110,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('podman rm "$origin_name"', validator)
         self.assertIn('podman rm "$run_origin_name"', validator)
         self.assertEqual(validator.count('stop_origin_container "$origin_name"'), 2)
-        self.assertEqual(validator.count('stop_origin_container "$run_origin_name"'), 1)
+        self.assertEqual(validator.count('stop_origin_container "$run_origin_name"'), 2)
         self.assertIn('cleanup_origin_container "$origin_name"', validator)
         self.assertIn('cleanup_origin_container "$run_origin_name"', validator)
         self.assertNotIn('podman rm -f "$origin_name"', validator)
@@ -146,6 +148,25 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn(".failure-run-finish", probe)
         self.assertNotIn("while :; do sleep", probe)
         self.assertNotIn('wait "$run_child"', validator)
+
+    def test_baffle_runtime_proves_fake_credential_substitution_and_session_isolation(self):
+        validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
+        startup = PROXY_STARTUP_SCRIPT.read_text()
+        run = RUN_IMPLEMENTATION.read_text()
+
+        self.assertIn("write_agent_substitution_policy() {", validator)
+        self.assertIn("[credentials.overrides.$token]", validator)
+        self.assertIn('mode = "substitute"', validator)
+        self.assertGreaterEqual(validator.count("--fake-credential-env FAKE_RUN_TOKEN=run-token"), 2)
+        self.assertIn('jq -e \'.authorization == "old"\'', validator)
+        self.assertIn('jq -e \'.authorization == "client"\'', validator)
+        self.assertIn('test "$FAKE_RUN_TOKEN" != "$CROSS_SESSION_FAKE"', validator)
+        self.assertIn('test ! -e /run/baffle/cladding-fake-credentials/agent.seed', validator)
+        self.assertIn("fake credential substitution/isolation", validator)
+        self.assertIn('"$FAKE_CREDENTIAL_BIN" create-agent-session', startup)
+        self.assertIn("else\n            status=$?", startup)
+        self.assertIn("attempt=0; while", run)
+        self.assertIn("Baffle agent session did not publish its credential seed", run)
 
     def test_baffle_config_validator_prepares_managed_socket_volume_permissions(self):
         validator = BAFFLE_CONFIG_VALIDATOR.read_text()
@@ -343,7 +364,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
     def test_baffle_runtime_uses_project_run_roots_even_with_tmpdir_override(self):
         validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
-        self.assertEqual(validator.count('find "$project_root/runtime/runs"'), 2)
+        self.assertEqual(validator.count('find "$project_root/runtime/runs"'), 3)
         self.assertIn('export TMPDIR="$temp_root/run-tmp"', validator)
         self.assertIn('stat_mode "$project_root/runtime/runs"', validator)
         self.assertNotIn('find "$temp_root/run-tmp"', validator)
@@ -413,14 +434,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
     def test_local_build_requires_pinned_verified_baffle_binary(self):
         build = BUILD_SCRIPT.read_text()
-        self.assertIn('const BAFFLE_VERSION: &str = "1.1.1";', build)
+        self.assertIn('const BAFFLE_VERSION: &str = "2.1.0";', build)
         self.assertIn('env::var_os("CLADDING_BAFFLE_BIN")', build)
         self.assertIn("scripts/fetch_baffle.sh", build)
         self.assertNotIn('.arg("install")', build)
         self.assertNotIn("baffle-proxy", build)
 
         fetch = BAFFLE_FETCH_SCRIPT.read_text()
-        self.assertIn("BAFFLE_VERSION=1.1.1", fetch)
+        self.assertIn("BAFFLE_VERSION=2.1.0", fetch)
         self.assertIn('archive="baffle-proxy-v${BAFFLE_VERSION}-${arch}-unknown-linux-gnu.tar.gz"', fetch)
         self.assertIn('"$release_url/SHA256SUMS"', fetch)
         self.assertIn('if [ "$actual" != "$expected" ]', fetch)
@@ -430,12 +451,12 @@ class BaffleCiAssetsTests(unittest.TestCase):
         cases = {
             "embedded-linux-tools-x86_64": (
                 "x86_64",
-                "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target-dir target/mcp-run",
+                "cargo build --locked --release -p mcp-run -p cladding-bridge -p cladding-fake-credentials --bin mcp-run --bin run-remote --bin cladding-bridge --bin cladding-fake-credentials --target-dir target/mcp-run",
                 "x86-64",
             ),
             "embedded-linux-tools-aarch64": (
                 "aarch64",
-                "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/mcp-run",
+                "cargo build --locked --release -p mcp-run -p cladding-bridge -p cladding-fake-credentials --bin mcp-run --bin run-remote --bin cladding-bridge --bin cladding-fake-credentials --target aarch64-unknown-linux-gnu --target-dir target/mcp-run",
                 "aarch64",
             ),
         }
@@ -455,6 +476,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
                     "mcp-run",
                     "run-remote",
                     "cladding-bridge",
+                    "cladding-fake-credentials",
                     "baffle-socket-probe",
                 ):
                     self.assertIn(f'"$asset_dir/{name}"', block)
@@ -510,6 +532,10 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
         self.assertIn(
             "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote",
+            test,
+        )
+        self.assertIn(
+            "CLADDING_FAKE_CREDENTIALS_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-fake-credentials",
             test,
         )
         for job in (
@@ -585,15 +611,16 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
 
         helpers = job_block("build-helpers", RELEASE_TEXT)
-        self.assertIn("-p mcp-run -p cladding-bridge", helpers)
+        self.assertIn("-p mcp-run -p cladding-bridge -p cladding-fake-credentials", helpers)
         self.assertIn('cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/', helpers)
+        self.assertIn('cp "target/${{ matrix.target }}/release/cladding-fake-credentials" helpers/', helpers)
         self.assertIn('name: cladding-linux-helpers-${{ matrix.arch }}', helpers)
         self.assertIn('name: cladding-linux-helpers-${{ matrix.helper_arch }}', upload)
         self.assertIn('x86_64:"ELF 64-bit"*x86-64*) ;;', helpers)
         self.assertIn('aarch64:"ELF 64-bit"*aarch64*) ;;', helpers)
 
         download = upload.split(
-            "- name: Download and verify pinned Baffle v1.1.1 release", 1
+            "- name: Download and verify pinned Baffle v2.1.0 release", 1
         )[1].split("- uses: dtolnay/rust-toolchain@stable", 1)[0]
         self.assertIn(
             'scripts/fetch_baffle.sh "${{ matrix.baffle_arch }}" "$RUNNER_TEMP/baffle"',
@@ -644,7 +671,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
     def test_baffle_docs_describe_explicit_fetch_and_published_release_assets(self):
         guide = EMBEDDED_BAFFLE_DOC.read_text()
         prd = BAFFLE_PRD.read_text()
-        self.assertIn("pinned Baffle v1.1.1 Linux archive", guide)
+        self.assertIn("pinned Baffle v2.1.0 Linux archive", guide)
         self.assertIn("`SHA256SUMS` before extraction", guide)
         self.assertIn("requires `CLADDING_BAFFLE_BIN`", guide)
         self.assertIn("scripts/fetch_baffle.sh", guide)
@@ -652,11 +679,11 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("under `licenses/baffle/`", guide)
         self.assertNotIn("Do not use Baffle's GitHub release assets", guide)
         self.assertIn(
-            "Do not download GitHub release assets for this source-build path.",
+            "For CI and Cladding release builds, set `CLADDING_BAFFLE_BIN`",
             prd,
         )
         self.assertIn(
-            "The workflows use the explicit v1.1.1 release archives", prd
+            "The workflows use the explicit v2.1.0 release archives", prd
         )
 
     def test_required_test_path_waits_only_for_x86_64_asset_prep(self):

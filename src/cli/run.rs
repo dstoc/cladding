@@ -5,11 +5,12 @@ use cladding::error::{Error, Result};
 use cladding::identity::invoking_uid;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};
@@ -18,6 +19,7 @@ pub(super) fn cmd_run(
     source_context: &Context,
     env_vars: &[String],
     secret_overrides: &[String],
+    fake_credential_overrides: &[String],
     args: &[String],
     config_uses_stdin: bool,
     verbose: bool,
@@ -34,6 +36,7 @@ pub(super) fn cmd_run(
         |name| std::env::var_os(name),
         read_run_secret_file,
     )?;
+    let fake_credential_overrides = parse_fake_credential_overrides(fake_credential_overrides)?;
 
     let instance_name = format!("cladding-run-{}", generate_uuid_v4()?);
     if verbose {
@@ -46,6 +49,17 @@ pub(super) fn cmd_run(
         ))
     })?;
     config.name = instance_name.clone();
+    let fake_mappings = effective_fake_credential_mappings(
+        &config.fake_credential_env,
+        &fake_credential_overrides,
+        env_vars,
+    );
+    validate_fake_credential_mappings(
+        &source_context.project_root,
+        &config,
+        &fake_mappings,
+        &secret_overrides,
+    )?;
 
     cladding::podman::podman_required("podman (required for cladding run)").map_err(|err| {
         Error::message(format!(
@@ -101,11 +115,14 @@ pub(super) fn cmd_run(
             )));
         }
     };
-    let context = source_context.with_resolved_config(runtime_root.clone(), config);
-    let context = match secret_mounts {
+    let mut context = source_context.with_resolved_config(runtime_root.clone(), config);
+    context = match secret_mounts {
         Some(secret_mounts) => context.with_run_secret_mounts(secret_mounts),
         None => context,
     };
+    if !fake_mappings.is_empty() {
+        context = context.with_fake_credential_seed();
+    }
     let config = context
         .resolved_config()
         .expect("one-off run context stores its resolved configuration");
@@ -172,9 +189,18 @@ pub(super) fn cmd_run(
         let _command = cladding::runtime_metrics::phase("user command");
         match signals.received() {
             Some(signal) => Err(signal_status_error(signal)),
-            None => {
-                exec::cmd_run_command(&context, config, &spec, env_vars, args, !config_uses_stdin)
-            }
+            None => match derive_fake_environment(&spec.proxy.container.name, &fake_mappings) {
+                Ok(fake_environment) => exec::cmd_run_command(
+                    &context,
+                    config,
+                    &spec,
+                    env_vars,
+                    &fake_environment,
+                    args,
+                    !config_uses_stdin,
+                ),
+                Err(error) => Err(error),
+            },
         }
     };
     let cleanup_error = {
@@ -196,6 +222,194 @@ pub(super) fn cmd_run(
         cleanup_error,
         signal,
     )
+}
+
+fn parse_fake_credential_overrides(
+    raw_overrides: &[String],
+) -> Result<BTreeMap<String, Option<String>>> {
+    let mut overrides = BTreeMap::new();
+    for raw in raw_overrides {
+        let Some((environment_name, credential_name)) = raw.split_once('=') else {
+            return Err(Error::message(
+                "fake credential environment override must use NAME=CREDENTIAL or NAME=none",
+            ));
+        };
+        if !is_environment_variable_name(environment_name) {
+            return Err(Error::message(
+                "fake credential environment override requires a valid environment variable name",
+            ));
+        }
+        let mapping = if credential_name == "none" {
+            None
+        } else if cladding_fake_credentials::is_credential_identifier(credential_name) {
+            Some(credential_name.to_string())
+        } else {
+            return Err(Error::message(format!(
+                "fake credential mapping for '{environment_name}' requires a valid Baffle credential identifier or 'none'"
+            )));
+        };
+        if overrides
+            .insert(environment_name.to_string(), mapping)
+            .is_some()
+        {
+            return Err(Error::message(format!(
+                "duplicate fake credential environment override for '{environment_name}'"
+            )));
+        }
+    }
+    Ok(overrides)
+}
+
+fn effective_fake_credential_mappings(
+    configured: &BTreeMap<String, String>,
+    overrides: &BTreeMap<String, Option<String>>,
+    explicit_environment: &[String],
+) -> BTreeMap<String, String> {
+    let mut mappings = configured.clone();
+    for (environment_name, credential_name) in overrides {
+        match credential_name {
+            Some(credential_name) => {
+                mappings.insert(environment_name.clone(), credential_name.clone());
+            }
+            None => {
+                mappings.remove(environment_name);
+            }
+        }
+    }
+    for value in explicit_environment {
+        let environment_name = value.split_once('=').map(|(name, _)| name).unwrap_or(value);
+        mappings.remove(environment_name);
+    }
+    mappings
+}
+
+fn validate_fake_credential_mappings(
+    project_root: &Path,
+    config: &cladding::config::ExecutionConfig,
+    mappings: &BTreeMap<String, String>,
+    run_secret_overrides: &[ResolvedRunSecret],
+) -> Result<()> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let config_dir = project_root.join("config");
+    validate_fake_credential_allowlist(&config_dir, mappings)?;
+    cladding::config::validate_baffle_session_files(&config_dir, config).map_err(|error| {
+        Error::message(format!(
+            "cannot validate Baffle agent session config: {error}"
+        ))
+    })?;
+    let session_path = config_dir
+        .join("proxy/sessions")
+        .join(config.agent_session_config());
+    let session_toml = fs::read_to_string(&session_path).map_err(|error| {
+        Error::message(format!(
+            "cannot read selected Baffle agent session config '{}': {error}",
+            config.agent_session_config()
+        ))
+    })?;
+
+    let run_secret_names = run_secret_overrides
+        .iter()
+        .map(|secret| secret.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let secret_directory = project_root.join("credentials/baffle/secrets");
+    let mut available = BTreeSet::new();
+    for (environment_name, credential_name) in mappings {
+        if run_secret_names.contains(credential_name.as_str()) {
+            available.insert(credential_name.clone());
+            continue;
+        }
+        let secret_path = secret_directory.join(credential_name);
+        let metadata = fs::symlink_metadata(&secret_path).map_err(|error| {
+            Error::message(format!(
+                "fake credential mapping for '{environment_name}' references unavailable Baffle credential '{credential_name}' ({})",
+                error.kind()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(Error::message(format!(
+                "fake credential mapping for '{environment_name}' requires a regular Baffle credential file for '{credential_name}'"
+            )));
+        }
+        File::open(&secret_path).map_err(|error| {
+            Error::message(format!(
+                "fake credential mapping for '{environment_name}' references unavailable Baffle credential '{credential_name}' ({})",
+                error.kind()
+            ))
+        })?;
+        available.insert(credential_name.clone());
+    }
+
+    cladding_fake_credentials::validate_mappings(&session_toml, mappings, &available)
+        .map_err(Error::message)
+}
+
+fn derive_fake_environment(
+    proxy_container: &str,
+    mappings: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    if mappings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut wait = Command::new("podman");
+    wait.args([
+        "exec",
+        proxy_container,
+        "/bin/sh",
+        "-c",
+        "attempt=0; while [ ! -s \"$1\" ]; do attempt=$((attempt + 1)); [ \"$attempt\" -lt 600 ] || exit 1; sleep 0.1; done",
+        "cladding-wait-for-seed",
+        "/run/baffle/cladding-fake-credentials/agent.seed",
+    ]);
+    let wait_output = cladding::runtime_metrics::output(&mut wait).map_err(|error| {
+        Error::message(format!(
+            "failed to wait for the Baffle agent session: {error}"
+        ))
+    })?;
+    if !wait_output.status.success() {
+        return Err(Error::message(
+            "Baffle agent session did not publish its credential seed before startup timed out",
+        ));
+    }
+
+    let mut command = Command::new("podman");
+    command.args([
+        "exec",
+        proxy_container,
+        "/opt/tools/bin/cladding-fake-credentials",
+        "derive",
+        "/run/baffle/cladding-fake-credentials/agent.seed",
+    ]);
+    command.args(mappings.iter().map(|(environment_name, credential_name)| {
+        format!("{environment_name}={credential_name}")
+    }));
+    let output = cladding::runtime_metrics::output(&mut command).map_err(|error| {
+        Error::message(format!("failed to run Baffle credential helper: {error}"))
+    })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::message(format!(
+            "failed to derive per-session fake credentials: {}",
+            detail.trim()
+        )));
+    }
+
+    let values =
+        serde_json::from_slice::<BTreeMap<String, String>>(&output.stdout).map_err(|_| {
+            Error::message("Baffle credential helper returned invalid environment data")
+        })?;
+    if values.len() != mappings.len() || mappings.keys().any(|name| !values.contains_key(name)) {
+        return Err(Error::message(
+            "Baffle credential helper returned incomplete environment data",
+        ));
+    }
+    Ok(values
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect())
 }
 
 enum RunSecretSource {
@@ -500,6 +714,37 @@ fn write_private_run_secret(path: &Path, contents: &[u8]) -> anyhow::Result<()> 
     Ok(())
 }
 
+fn validate_fake_credential_allowlist(
+    config_dir: &Path,
+    mappings: &BTreeMap<String, String>,
+) -> Result<()> {
+    let daemon_path = config_dir.join("proxy/daemon.toml");
+    let daemon_contents = fs::read_to_string(&daemon_path).map_err(|error| {
+        Error::message(format!(
+            "cannot read Baffle daemon config '{}': {error}",
+            daemon_path.display()
+        ))
+    })?;
+    let daemon: toml::Value = toml::from_str(&daemon_contents)
+        .map_err(|error| Error::message(format!("cannot parse Baffle daemon config: {error}")))?;
+    let allowed = daemon
+        .get("secrets")
+        .and_then(|secrets| secrets.get("allowed"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    for credential_name in mappings.values().collect::<BTreeSet<_>>() {
+        if !allowed.contains(credential_name.as_str()) {
+            return Err(Error::message(format!(
+                "Baffle daemon does not allow mapped credential '{credential_name}'; add it to secrets.allowed"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn cleanup_ephemeral_runtime(
     spec: &cladding::runtime::RuntimeSpec,
     resource_attempts: &cladding::podman::RuntimeResourceAttempts,
@@ -783,7 +1028,7 @@ mod tests {
             ConfigSource::File(external_config),
         );
 
-        let error = cmd_run(&context, &[], &[], &["echo".to_string()], false, false)
+        let error = cmd_run(&context, &[], &[], &[], &["echo".to_string()], false, false)
             .expect_err("run must require the project config created by init");
 
         assert!(
@@ -809,6 +1054,75 @@ mod tests {
             uuid.chars()
                 .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch) || ch == '-')
         );
+    }
+
+    #[test]
+    fn fake_credential_run_overrides_support_addition_and_suppression() {
+        let raw = vec![
+            "GITHUB_TOKEN=github-alt".to_string(),
+            "OPENAI_API_KEY=none".to_string(),
+            "CUSTOM_TOKEN=custom".to_string(),
+        ];
+        let overrides = parse_fake_credential_overrides(&raw).unwrap();
+        let configured = BTreeMap::from([
+            ("GITHUB_TOKEN".to_string(), "github-api".to_string()),
+            ("OPENAI_API_KEY".to_string(), "openai-api".to_string()),
+            ("ANTHROPIC_API_KEY".to_string(), "anthropic-api".to_string()),
+        ]);
+        let explicit = vec![
+            "OPENAI_API_KEY=ordinary-value".to_string(),
+            "ANTHROPIC_API_KEY=other-value".to_string(),
+        ];
+
+        let effective = effective_fake_credential_mappings(&configured, &overrides, &explicit);
+
+        assert_eq!(
+            effective,
+            BTreeMap::from([
+                ("CUSTOM_TOKEN".to_string(), "custom".to_string()),
+                ("GITHUB_TOKEN".to_string(), "github-alt".to_string()),
+            ])
+        );
+        assert_eq!(
+            explicit,
+            [
+                "OPENAI_API_KEY=ordinary-value",
+                "ANTHROPIC_API_KEY=other-value"
+            ]
+        );
+    }
+
+    #[test]
+    fn fake_credential_overrides_reject_invalid_names_and_duplicates() {
+        for invalid in [
+            vec!["BAD-NAME=github-api".to_string()],
+            vec!["TOKEN=not..valid".to_string()],
+            vec!["TOKEN".to_string()],
+            vec!["TOKEN=one".to_string(), "TOKEN=two".to_string()],
+        ] {
+            assert!(parse_fake_credential_overrides(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn fake_credential_mappings_require_daemon_allowlist_entitlements() {
+        let temp = std::env::temp_dir().join(format!(
+            "cladding-fake-credential-allowlist-{}",
+            generate_uuid_v4().unwrap()
+        ));
+        let config_dir = temp.join("config");
+        fs::create_dir_all(config_dir.join("proxy")).unwrap();
+        fs::write(
+            config_dir.join("proxy/daemon.toml"),
+            "[secrets]\nallowed = [\"github-api\"]\n",
+        )
+        .unwrap();
+        let mappings = BTreeMap::from([("TOKEN".to_string(), "github-api".to_string())]);
+        assert!(validate_fake_credential_allowlist(&config_dir, &mappings).is_ok());
+        let disallowed = BTreeMap::from([("TOKEN".to_string(), "other-api".to_string())]);
+        let error = validate_fake_credential_allowlist(&config_dir, &disallowed).unwrap_err();
+        assert!(error.to_string().contains("secrets.allowed"));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

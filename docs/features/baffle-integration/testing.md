@@ -1,16 +1,16 @@
 # Baffle integration test matrix
 
-The Baffle tests use the pinned **baffle-proxy 1.1.1** executable. They run
+The Baffle tests use the pinned **baffle-proxy 2.1.0** executable. They run
 from the **linux-integration** GitHub Actions job with rootless Podman.
 
 | Environment | Coverage |
 | --- | --- |
-| Ubuntu, default Podman runtime | Actual Cladding proxy, agent, and network-sandbox containers. The suite checks version 2 file-backed session startup, exact host, port, and path policy, plaintext HTTP rejection, separate component policies, disabled network-sandbox lifecycle, trust installation, curl, Git, Node.js, token replacement, secret and control-socket isolation, reload snapshots, invalid reloads, persistent CA reuse, shutdown, and run cleanup after a nonzero command. |
+| Ubuntu, default Podman runtime | Actual Cladding proxy, agent, and network-sandbox containers. The suite checks version 2 file-backed session startup, exact host, port, and path policy, plaintext HTTP rejection, separate component policies, disabled network-sandbox lifecycle, trust installation, curl, Git, Node.js, token replacement, same-session fake credential substitution, cross-session fake rejection, secret and control-socket isolation, reload snapshots, invalid reloads, persistent CA reuse, shutdown, and run cleanup after a nonzero command. |
 | Ubuntu, runsc execution runtime | The same Cladding policy and client suite, with the agent and network sandbox running under runsc. The startup validator also checks scoped UDS access under runsc. |
 | Ubuntu, rootless Podman Machine | The Linux x86_64 guest uses the validated Baffle and helper assets. CI checks four host and VM bind combinations, then runs the shared runtime topology validator against the Machine. |
 | Apple Silicon macOS build | Cladding embeds and tests a Linux aarch64 Baffle executable on an ARM64 macOS host. |
 
-The CI asset jobs download the published Linux GNU Baffle 1.1.1 archives on
+The CI asset jobs download the published Linux GNU Baffle 2.1.0 archives on
 native x86_64 and aarch64 runners. Each job verifies the archive checksum and
 ELF architecture, then runs `baffle --version`. The x86_64 integration job
 starts the binary in Cladding's default proxy image and runs the policy and

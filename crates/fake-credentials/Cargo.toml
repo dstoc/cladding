@@ -1,0 +1,15 @@
+[package]
+name = "cladding-fake-credentials"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[dependencies]
+anyhow = "1.0.102"
+base64 = "0.23.1"
+baffle-client = "=2.1.0"
+libc = "0.2.170"
+ring = "0.17.14"
+serde_json = "1.0.149"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt"] }

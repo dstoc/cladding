@@ -384,6 +384,7 @@ mod tests {
         ExecutionConfig {
             name: "demo".to_string(),
             use_runsc,
+            fake_credential_env: std::collections::BTreeMap::new(),
             agent: ExecutionComponentConfig {
                 enabled: true,
                 init: true,

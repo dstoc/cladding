@@ -17,6 +17,7 @@ pub(super) struct Context {
     pub(super) runtime_root: PathBuf,
     config_source: ConfigSource,
     run_secret_mounts: Option<RunSecretMounts>,
+    capture_agent_credential_seed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ impl Context {
             workspace_root,
             config_source,
             run_secret_mounts: None,
+            capture_agent_credential_seed: false,
         }
     }
 
@@ -95,6 +97,7 @@ impl Context {
             runtime_root,
             config_source: ConfigSource::Resolved(Arc::new(config)),
             run_secret_mounts: self.run_secret_mounts.clone(),
+            capture_agent_credential_seed: self.capture_agent_credential_seed,
         }
     }
 
@@ -107,6 +110,11 @@ impl Context {
 
     pub(super) fn with_run_secret_mounts(mut self, mounts: RunSecretMounts) -> Self {
         self.run_secret_mounts = Some(mounts);
+        self
+    }
+
+    pub(super) fn with_fake_credential_seed(mut self) -> Self {
+        self.capture_agent_credential_seed = true;
         self
     }
 
@@ -134,6 +142,22 @@ impl Context {
                         },
                     }),
             );
+        }
+        if self.capture_agent_credential_seed {
+            let proxy = &mut spec.proxy.container;
+            proxy.env.push(cladding::runtime::RuntimeEnvVar {
+                name: "CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED".to_string(),
+                value: "true".to_string(),
+            });
+            proxy.mounts.push(RuntimeMount {
+                mount_path: "/opt/tools/bin/cladding-fake-credentials".to_string(),
+                read_only: true,
+                source: RuntimeMountSource::HostPath {
+                    path: self
+                        .project_root
+                        .join("tools/bin/cladding-fake-credentials"),
+                },
+            });
         }
         Ok(spec)
     }
@@ -337,6 +361,50 @@ mod tests {
     }
 
     #[test]
+    fn fake_seed_capture_is_proxy_only_and_mounts_the_embedded_helper() {
+        let temp = create_temp_dir("fake-seed-context");
+        let project_root = temp.join(".cladding");
+        fs::create_dir_all(&project_root).unwrap();
+        let config_path = temp.join("custom.json");
+        fs::write(&config_path, r#"{"name":"custom","agent":{}}"#).unwrap();
+        let source = Context::new(
+            project_root.clone(),
+            temp.clone(),
+            ConfigSource::File(config_path),
+        );
+        let config = source.load_config().unwrap();
+        let context = source
+            .with_resolved_config(project_root.join("runtime/runs/run"), config)
+            .with_fake_credential_seed();
+        let spec = context
+            .runtime_spec(context.resolved_config().unwrap())
+            .unwrap();
+
+        assert!(spec.proxy.container.env.iter().any(|value| {
+            value.name == "CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED" && value.value == "true"
+        }));
+        assert!(
+            spec.proxy
+                .container
+                .mounts
+                .iter()
+                .any(|mount| { mount.mount_path == "/opt/tools/bin/cladding-fake-credentials" })
+        );
+        assert!(!spec.agent.container.mounts.iter().any(|mount| {
+            mount.mount_path.contains("credential-seed") || mount.mount_path == "/run/baffle"
+        }));
+        assert!(
+            !spec
+                .agent
+                .container
+                .env
+                .iter()
+                .any(|value| { value.name == "CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED" })
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn stdin_config_references_use_the_provided_base_directory() {
         let temp = create_temp_dir("stdin-config");
         let runtime_dir = temp.join("runtime/.cladding");
@@ -395,6 +463,7 @@ mod tests {
                 verbose: false,
                 env: Vec::new(),
                 secret: Vec::new(),
+                fake_credential_env: Vec::new(),
                 args: vec!["echo".to_string()],
             },
         )

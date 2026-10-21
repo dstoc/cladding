@@ -67,6 +67,8 @@ object_document!(CladdingConfigDocument, CladdingConfigDocumentFields {
     proxy: Option<ProxyDocument>,
     #[serde(default)]
     mounts: Vec<MountDocument>,
+    #[serde(default)]
+    fake_credential_env: BTreeMap<String, String>,
 });
 
 object_document!(AgentDocument, AgentDocumentFields {

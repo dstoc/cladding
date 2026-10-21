@@ -44,7 +44,13 @@ pub(super) fn check_required_binaries(context: &Context, config: &ExecutionConfi
     let mut missing = false;
     let bin_dir = context.project_root.join("tools/bin");
 
-    let mut required = vec!["mcp-run", "run-remote", "cladding-bridge", "baffle"];
+    let mut required = vec![
+        "mcp-run",
+        "run-remote",
+        "cladding-bridge",
+        "cladding-fake-credentials",
+        "baffle",
+    ];
     if config.nw_sandbox_enabled() {
         required.push("run-in-nw-sandbox");
     }
@@ -540,6 +546,7 @@ mod tests {
         ExecutionConfig {
             name: "demo".to_string(),
             use_runsc: false,
+            fake_credential_env: std::collections::BTreeMap::new(),
             agent: ExecutionComponentConfig {
                 enabled: true,
                 init: true,

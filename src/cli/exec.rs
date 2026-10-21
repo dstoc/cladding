@@ -65,10 +65,13 @@ pub(super) fn cmd_run_command(
     config: &ExecutionConfig,
     runtime_spec: &RuntimeSpec,
     env_vars: &[String],
+    fake_env_vars: &[String],
     args: &[String],
     forward_stdin: bool,
 ) -> Result<()> {
     let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
+    let mut effective_env = env_vars.to_vec();
+    effective_env.extend(fake_env_vars.iter().cloned());
     run_podman_exec(
         context,
         config,
@@ -77,7 +80,7 @@ pub(super) fn cmd_run_command(
             command_name: "run",
             mount_target: MountTarget::Agent,
             container_name: &container_name,
-            env_vars,
+            env_vars: &effective_env,
             args,
             allow_interactive: forward_stdin,
             forward_stdin,
@@ -935,6 +938,7 @@ mod tests {
         let config = ExecutionConfig {
             name: "demo".to_string(),
             use_runsc: false,
+            fake_credential_env: std::collections::BTreeMap::new(),
             agent: ExecutionComponentConfig {
                 enabled: true,
                 init: true,

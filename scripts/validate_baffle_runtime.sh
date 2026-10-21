@@ -245,6 +245,8 @@ cleanup() {
     # Stop any fixture first, then let the one-off command exit through its gates.
     touch "$temp_root/workspace/.run-origin-ready" \
       "$temp_root/workspace/.run-finish" \
+      "$temp_root/workspace/.cross-origin-ready" \
+      "$temp_root/workspace/.cross-run-finish" \
       "$temp_root/workspace/.failure-run-finish" 2>/dev/null || true
     # Let Podman finish runsc teardown before the forced-kill fallback.
     if ! wait_for_process_exit "$run_pid" 600; then
@@ -475,6 +477,28 @@ version = 2
 persistent = true
 socket_name = "agent/proxy.sock"
 unmatched = "deny"
+
+[rules."localhost"]
+ports = [8443]
+paths = ["$path"]
+
+[[rules."localhost".inject]]
+header = "Authorization"
+secret = "$token"
+format = "bearer"
+EOF
+}
+write_agent_substitution_policy() {
+  token=$1
+  path=$2
+  cat > "$project_root/config/proxy/sessions/$agent_session_config" <<EOF
+version = 2
+persistent = true
+socket_name = "agent/proxy.sock"
+unmatched = "deny"
+
+[credentials.overrides.$token]
+mode = "substitute"
 
 [rules."localhost"]
 ports = [8443]
@@ -1193,7 +1217,7 @@ fi
 "$cladding_bin" --cladding-dir "$project_root" down
 test ! -e "$project_root/runtime/sockets"
 
-phase="verify one-off shared project state and isolated runtime cleanup"
+phase="verify one-off fake credentials authenticate in their Baffle session"
 mkdir -m 0700 "$temp_root/run-tmp"
 run_secret_value="cladding-test-old-value"
 run_secret_name="run-token"
@@ -1207,7 +1231,7 @@ fi
 phase="verify one-off shared project state and isolated runtime cleanup"
 run_persistent_secret_before=$(sha256_file \
   "$project_root/credentials/baffle/secrets/$run_persistent_secret_name")
-write_agent_policy "$run_secret_name" "/replacement/**"
+write_agent_substitution_policy "$run_secret_name" "/replacement/**"
 run_session_before=$(sha256_file \
   "$project_root/config/proxy/sessions/$agent_session_config")
 test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
@@ -1216,10 +1240,14 @@ test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
   export CLADDING_RUN_SECRET_OVERRIDE="$run_secret_value"
   export TMPDIR="$temp_root/run-tmp"
   exec "$cladding_bin" --cladding-dir "$project_root" run -v \
-    --secret "$run_secret_name=env:CLADDING_RUN_SECRET_OVERRIDE" -- \
-    /bin/sh -ec 'test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
+    --secret "$run_secret_name=env:CLADDING_RUN_SECRET_OVERRIDE" \
+    --fake-credential-env FAKE_RUN_TOKEN=run-token -- \
+    /bin/sh -ec 'test -n "$FAKE_RUN_TOKEN"
+      test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
       while [ ! -f /workspace/.run-origin-ready ]; do sleep 1; done
+      printf %s "$FAKE_RUN_TOKEN" > /workspace/.run-fake-token
       curl --fail --silent --show-error --proxy http://127.0.0.1:3128 --noproxy "" \
+        -H "Authorization: Bearer $FAKE_RUN_TOKEN" \
         https://localhost:8443/replacement/run-secret \
         > /workspace/.run-secret-response
       touch /workspace/.run-request-done
@@ -1326,7 +1354,12 @@ if podman inspect "$run_agent" | jq -e \
 fi
 podman exec "$run_agent" /bin/sh -ec \
   'test -x /opt/tools/bin/baffle && test -f /opt/tools/run-symlink-marker'
-podman exec "$run_agent" /bin/sh -ec 'test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"'
+podman exec "$run_agent" /bin/sh -ec \
+  'test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
+   test -z "${CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED+x}"
+   test ! -e /run/baffle/cladding-fake-credentials/agent.seed'
+podman exec "$run_proxy" /bin/sh -ec \
+  'test ! -e /run/baffle/cladding-fake-credentials/agent.seed'
 podman exec "$run_proxy" /bin/sh -ec \
   'test -s /opt/credentials/baffle/ca.crt
    test -f /opt/credentials/baffle/secrets/test-token-old
@@ -1359,7 +1392,7 @@ while ! podman exec "$run_origin_name" curl --insecure --fail --silent \
   sleep 1
 done
 touch "$temp_root/workspace/.run-origin-ready"
-phase="verify Baffle resolves the run-only secret override"
+phase="verify Baffle substitutes the matching session fake credential"
 attempt=0
 while [ ! -f "$temp_root/workspace/.run-request-done" ]; do
   if [ "$attempt" -ge 60 ] || reap_finished_run; then
@@ -1370,6 +1403,11 @@ while [ ! -f "$temp_root/workspace/.run-request-done" ]; do
   sleep 1
 done
 jq -e '.authorization == "old"' "$temp_root/workspace/.run-secret-response" >/dev/null
+run_fake_token=$(cat "$temp_root/workspace/.run-fake-token")
+case "$run_fake_token" in
+  baffle_v1_*) ;;
+  *) echo "one-off environment did not receive a Baffle fake credential" >&2; exit 1 ;;
+esac
 if [ "$(sha256_file "$project_root/config/proxy/sessions/$agent_session_config")" \
   != "$run_session_before" ]; then
   echo "one-off run changed the persistent Baffle session configuration" >&2
@@ -1420,6 +1458,137 @@ if [ "$ca_after_run" != "$ca_before" ]; then
   echo "one-off run changed the persistent project CA" >&2
   exit 1
 fi
+phase="verify a fake credential from another session is not substituted"
+run_root=
+run_proxy=
+run_name=
+rm -f "$temp_root/workspace/.cross-origin-ready" \
+  "$temp_root/workspace/.cross-run-done" \
+  "$temp_root/workspace/.cross-run-finish" \
+  "$temp_root/workspace/.cross-session-response" \
+  "$temp_root/workspace/.cross-session-fake-token"
+(
+  cd "$temp_root/workspace"
+  export CLADDING_RUN_SECRET_OVERRIDE="$run_secret_value"
+  export TMPDIR="$temp_root/run-tmp"
+  exec "$cladding_bin" --cladding-dir "$project_root" run -v \
+    --secret "$run_secret_name=env:CLADDING_RUN_SECRET_OVERRIDE" \
+    --env "CROSS_SESSION_FAKE=$run_fake_token" \
+    --fake-credential-env FAKE_RUN_TOKEN=run-token -- \
+    /bin/sh -ec 'test -n "$FAKE_RUN_TOKEN"
+      test -n "$CROSS_SESSION_FAKE"
+      test "$FAKE_RUN_TOKEN" != "$CROSS_SESSION_FAKE"
+      test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
+      while [ ! -f /workspace/.cross-origin-ready ]; do sleep 1; done
+      printf %s "$FAKE_RUN_TOKEN" > /workspace/.cross-session-fake-token
+      curl --fail --silent --show-error --proxy http://127.0.0.1:3128 --noproxy "" \
+        -H "Authorization: Bearer $CROSS_SESSION_FAKE" \
+        https://localhost:8443/replacement/cross-session \
+        > /workspace/.cross-session-response
+      touch /workspace/.cross-run-done
+      while [ ! -f /workspace/.cross-run-finish ]; do sleep 1; done' \
+    > "$temp_root/cross-run.log" 2>&1
+) &
+run_pid=$!
+run_root=
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+  run_root=$(find "$project_root/runtime/runs" -mindepth 4 -maxdepth 4 \
+    -path '*/runtime/scripts/proxy_startup.sh' -print -quit \
+    | sed 's|/runtime/scripts/proxy_startup.sh$||')
+  if [ -n "$run_root" ]; then
+    break
+  fi
+  if reap_finished_run; then
+    echo "cross-session one-off runtime exited before creating its private runtime root" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+if [ -z "$run_root" ]; then
+  echo "cross-session one-off runtime did not create its private startup script" >&2
+  exit 1
+fi
+run_name=${run_root##*/}
+attempt=0
+while ! podman container exists "$run_name-proxy-instance" >/dev/null 2>&1 \
+  || ! podman container exists "$run_name-agent-instance" >/dev/null 2>&1; do
+  if [ "$attempt" -ge 60 ] || reap_finished_run; then
+    echo "cross-session one-off runtime did not start its proxy and agent containers" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+run_proxy="$run_name-proxy-instance"
+run_agent="$run_name-agent-instance"
+require_socket_volume_count 2
+podman exec "$run_agent" /bin/sh -ec \
+  'test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
+   test -z "${CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED+x}"
+   test ! -e /run/baffle/cladding-fake-credentials/agent.seed'
+run_origin_name="$project_name-cross-session-run-origin"
+phase="start TLS origin in the cross-session proxy network"
+podman run --detach --name "$run_origin_name" --network "container:$run_proxy" "$origin_image" >/dev/null
+attempt=0
+while ! podman exec "$run_origin_name" curl --insecure --fail --silent \
+  https://localhost:8443/health >/dev/null 2>&1; do
+  if [ "$attempt" -ge 60 ]; then
+    echo "cross-session TLS origin did not become ready" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+touch "$temp_root/workspace/.cross-origin-ready"
+phase="verify Baffle leaves a foreign session fake unchanged"
+attempt=0
+while [ ! -f "$temp_root/workspace/.cross-run-done" ]; do
+  if [ "$attempt" -ge 60 ] || reap_finished_run; then
+    echo "cross-session one-off command did not complete its Baffle request" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+jq -e '.authorization == "client"' \
+  "$temp_root/workspace/.cross-session-response" >/dev/null
+cross_run_fake_token=$(cat "$temp_root/workspace/.cross-session-fake-token")
+if [ "$cross_run_fake_token" = "$run_fake_token" ]; then
+  echo "two one-off Baffle sessions derived the same fake credential" >&2
+  exit 1
+fi
+if grep -F "$run_secret_value" "$temp_root/cross-run.log" >/dev/null; then
+  echo "cross-session verbose log contains the run secret value" >&2
+  exit 1
+fi
+phase="stop cross-session TLS origin before runtime cleanup"
+stop_origin_container "$run_origin_name"
+podman rm "$run_origin_name" >/dev/null
+run_origin_name=
+phase="release cross-session command and verify cleanup"
+touch "$temp_root/workspace/.cross-run-finish"
+if ! wait_for_process_exit "$run_pid" 600; then
+  echo "cross-session one-off command did not exit after its workload gate was released" >&2
+  exit 1
+fi
+if ! reap_finished_run || [ "$run_status" -ne 0 ]; then
+  echo "cross-session one-off command exited with status ${run_status:-unknown}; expected 0" >&2
+  exit 1
+fi
+if [ -e "$run_root" ]; then
+  echo "cross-session runtime root remains after the command exits: $run_root" >&2
+  exit 1
+fi
+if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sandbox)(-instance)?$" >/dev/null; then
+  echo "cross-session one-off runtime left a Podman resource behind" >&2
+  exit 1
+fi
+run_root=
+run_proxy=
+run_name=
+require_socket_volume_count 0
 phase="restore persistent Baffle session after run-only override"
 write_agent_policy test-token-new "/replacement/**"
 phase="verify one-off Podman resource cleanup"
@@ -1428,7 +1597,7 @@ if podman ps -a --format '{{.Names}}' | grep -E "^$run_name-(proxy|agent|nw-sand
   exit 1
 fi
 
-echo "Baffle policy, HTTPS clients, reload, trust, project-state reuse, CA reuse, and run cleanup passed ($runtime runtime)"
+echo "Baffle policy, HTTPS clients, fake credential substitution/isolation, reload, trust, project-state reuse, CA reuse, and run cleanup passed ($runtime runtime)"
 
 phase="start one-off runtime for failure-trap cleanup check"
 (

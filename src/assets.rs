@@ -16,6 +16,8 @@ static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/config-template")
 static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
 static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
 static CLADDING_BRIDGE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cladding-bridge"));
+static CLADDING_FAKE_CREDENTIALS_BIN: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/cladding-fake-credentials"));
 static BAFFLE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/baffle"));
 
 const RUN_IN_NW_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_NW_SANDBOX_SOCKET:?RUN_NW_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_NW_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
@@ -31,6 +33,7 @@ pub fn tool_files() -> Vec<(&'static str, &'static [u8])> {
         ("mcp-run", MCP_RUN_BIN),
         ("run-remote", RUN_REMOTE_BIN),
         ("cladding-bridge", CLADDING_BRIDGE_BIN),
+        ("cladding-fake-credentials", CLADDING_FAKE_CREDENTIALS_BIN),
         ("baffle", BAFFLE_BIN),
         ("run-in-nw-sandbox", RUN_IN_NW_SANDBOX),
         ("run-in-fs-sandbox", RUN_IN_FS_SANDBOX),
@@ -428,6 +431,25 @@ unmatched = "deny"
         );
         assert_eq!(
             fs::metadata(&bridge).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        fs::remove_dir_all(temp).expect("remove temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_credential_helper_is_materialized_as_an_executable_tool() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = create_temp_dir("cladding-fake-credentials");
+        write_embedded_tools(&temp).expect("write tools");
+        let helper = temp.join("cladding-fake-credentials");
+        assert_eq!(
+            fs::read(&helper).expect("read fake credential helper"),
+            CLADDING_FAKE_CREDENTIALS_BIN
+        );
+        assert_eq!(
+            fs::metadata(&helper).unwrap().permissions().mode() & 0o777,
             0o755
         );
         fs::remove_dir_all(temp).expect("remove temporary directory");

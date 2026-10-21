@@ -616,6 +616,7 @@ mod tests {
         ExecutionConfig {
             name: "demo".to_string(),
             use_runsc: false,
+            fake_credential_env: std::collections::BTreeMap::new(),
             agent: component(true),
             nw_sandbox: Some(component(nw_sandbox_enabled)),
             fs_sandbox: Some(component(fs_sandbox_enabled)),

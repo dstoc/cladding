@@ -2,6 +2,7 @@
 set -eu
 
 BAFFLE_BIN=${BAFFLE_BIN:-/opt/tools/bin/baffle}
+FAKE_CREDENTIAL_BIN=${CLADDING_FAKE_CREDENTIAL_BIN:-/opt/tools/bin/cladding-fake-credentials}
 CONFIG_DIR=${BAFFLE_CONFIG_DIR:-/opt/config/proxy}
 CREDENTIALS_DIR=${BAFFLE_CREDENTIALS_DIR:-/opt/credentials/baffle}
 CONTROL_SOCKET=${BAFFLE_CONTROL_SOCKET:-/run/baffle/control.sock}
@@ -10,6 +11,8 @@ SOCKET_DIR=${BAFFLE_SOCKET_DIR:-/run/cladding/proxy}
 NW_SANDBOX_ENABLED=${CLADDING_NW_SANDBOX_ENABLED:-false}
 AGENT_SESSION_CONFIG=${CLADDING_AGENT_SESSION_CONFIG:-agent.toml}
 NW_SANDBOX_SESSION_CONFIG=${CLADDING_NW_SANDBOX_SESSION_CONFIG:-nw-sandbox.toml}
+CAPTURE_AGENT_CREDENTIAL_SEED=${CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED:-false}
+AGENT_CREDENTIAL_SEED=/run/baffle/cladding-fake-credentials/agent.seed
 daemon_pid=
 control_socket_dir=
 private_control_dir=
@@ -85,6 +88,10 @@ case "$NW_SANDBOX_ENABLED" in
     true|false) ;;
     *) fail "CLADDING_NW_SANDBOX_ENABLED must be true or false" ;;
 esac
+case "$CAPTURE_AGENT_CREDENTIAL_SEED" in
+    true|false) ;;
+    *) fail "CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED must be true or false" ;;
+esac
 validate_session_config_name() {
     session_config_name=$1
     case "$session_config_name" in
@@ -96,6 +103,9 @@ validate_session_config_name() {
 
 if [ ! -x "$BAFFLE_BIN" ]; then
     fail "Baffle executable is missing or not executable: $BAFFLE_BIN"
+fi
+if [ "$CAPTURE_AGENT_CREDENTIAL_SEED" = true ] && [ ! -x "$FAKE_CREDENTIAL_BIN" ]; then
+    fail "Cladding fake credential helper is missing or not executable: $FAKE_CREDENTIAL_BIN"
 fi
 
 require_file "$CONFIG_DIR/daemon.toml"
@@ -360,10 +370,22 @@ create_session() {
     fi
 
     log "creating persistent session from $session_file"
-    if "$BAFFLE_BIN" create "$session_file"; then
+    if [ "$component" = agent ] && [ "$CAPTURE_AGENT_CREDENTIAL_SEED" = true ]; then
+        if BAFFLE_CONTROL_SOCKET="$CONTROL_SOCKET" \
+            "$FAKE_CREDENTIAL_BIN" create-agent-session "$session_file" "$AGENT_CREDENTIAL_SEED"; then
+            log "created persistent session from $session_file"
+            return 0
+        else
+            status=$?
+        fi
+    elif "$BAFFLE_BIN" create "$session_file"; then
         log "created persistent session from $session_file"
+        return 0
     else
         status=$?
+    fi
+
+    if [ "$status" -ne 0 ]; then
         log "session socket bind context: uid=$proxy_uid socket_dir=$baffle_socket_dir"
         grep '^socket_dir = ' "$runtime_config" >&2 || true
         for socket_path in "$private_control_dir" "$baffle_socket_dir" \
