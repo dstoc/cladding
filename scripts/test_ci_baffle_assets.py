@@ -876,18 +876,36 @@ class BaffleCiAssetsTests(unittest.TestCase):
             'cancel_command="touch $cancel_ready; sleep 3; touch $cancel_complete"',
             validator,
         )
-        self.assertIn('input.args == ["-c", "$cancel_command"]', validator)
+        self.assertIn(
+            'cancel_command_rego=$(jq -Rn --arg command "$cancel_command" \'$command\')',
+            validator,
+        )
+        self.assertIn('input.args == ["-c", $cancel_command_rego]', validator)
         self.assertIn(
             'phase="verify Gantry client cancellation cleans up a wrapped workload"',
             validator,
         )
         self.assertIn("podman exec --detach", validator)
         self.assertIn(
-            'exec run-in-nw-sandbox -- /bin/sh -c "$CLADDING_CANCEL_COMMAND"',
+            'exec run-in-nw-sandbox -- sh -c "$CLADDING_CANCEL_COMMAND"',
             validator,
         )
         self.assertIn('kill -TERM "$cancel_client_pid_value"', validator)
         self.assertIn('test -e "$cancel_complete"', validator)
+
+    def test_baffle_runtime_gantry_policies_use_command_packages(self):
+        validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
+        self.assertNotIn('input.command == "/bin/echo"', validator)
+        for component, command in (
+            ("nw_sandbox", "run-in-nw-sandbox -- echo nw-sandbox-uds-ok"),
+            ("fs_sandbox", "run-in-fs-sandbox -- echo fs-sandbox-uds-ok"),
+        ):
+            with self.subTest(component=component):
+                self.assertIn(
+                    f'config/{component}/echo.rego" <<\'EOF\'\npackage sandbox.echo',
+                    validator,
+                )
+                self.assertIn(command, validator)
 
 
 class InjectProcessCleanupTests(unittest.TestCase):

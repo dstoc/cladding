@@ -381,16 +381,36 @@ jq --arg image "$client_image" --arg runtime "$runtime" \
    | .proxy.nw_sandbox.session_config = $nw_sandbox_session_config' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
-cat >> "$project_root/config/nw_sandbox/main.rego" <<'EOF'
+cat > "$project_root/config/nw_sandbox/echo.rego" <<'EOF'
+package sandbox.echo
+
+default allow = false
+default allow_env = false
 
 allow if {
-  input.command == "/bin/echo"
+  input.args == ["nw-sandbox-uds-ok"]
+}
+
+allow if {
+  input.args == ["nw-check-ok"]
 }
 EOF
-cat >> "$project_root/config/fs_sandbox/main.rego" <<'EOF'
+cat > "$project_root/config/fs_sandbox/echo.rego" <<'EOF'
+package sandbox.echo
+
+default allow = false
+default allow_env = false
 
 allow if {
-  input.command == "/bin/echo"
+  input.args == ["fs-sandbox-uds-ok"]
+}
+
+allow if {
+  input.args == ["fs-check-ok"]
+}
+
+allow if {
+  input.args == ["one-off-fs-gantry-ok"]
 }
 EOF
 
@@ -990,19 +1010,19 @@ fi
 
 phase="verify agent-to-sandbox UDS communication"
 nw_socket_output=$(podman exec "$agent" sh -ec \
-  'cd /home/user && run-in-nw-sandbox -- /bin/echo nw-sandbox-uds-ok')
+  'cd /home/user && run-in-nw-sandbox -- echo nw-sandbox-uds-ok')
 test "$nw_socket_output" = "nw-sandbox-uds-ok"
 fs_socket_output=$(podman exec "$agent" sh -ec \
-  'cd /home/user && run-in-fs-sandbox -- /bin/echo fs-sandbox-uds-ok')
+  'cd /home/user && run-in-fs-sandbox -- echo fs-sandbox-uds-ok')
 test "$fs_socket_output" = "fs-sandbox-uds-ok"
 phase="verify Gantry Direct checks over both sandbox UDS clients"
 nw_check=$(podman exec "$agent" sh -ec \
-  'run-in-nw-sandbox --check -- /bin/echo nw-check-ok')
+  'run-in-nw-sandbox --check -- echo nw-check-ok')
 printf '%s\n' "$nw_check" | jq -e \
   '.allowed == true and .backend == "direct" and .filesystem == null and .baffle_session == null' \
   >/dev/null
 fs_check=$(podman exec "$agent" sh -ec \
-  'run-in-fs-sandbox --check -- /bin/echo fs-check-ok')
+  'run-in-fs-sandbox --check -- echo fs-check-ok')
 printf '%s\n' "$fs_check" | jq -e \
   '.allowed == true and .backend == "direct" and .filesystem == null and .baffle_session == null' \
   >/dev/null
@@ -1270,7 +1290,7 @@ test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
     -- \
     /bin/sh -ec 'test -n "$FAKE_RUN_TOKEN"
       test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
-      test "$(run-in-fs-sandbox -- /bin/echo one-off-fs-gantry-ok)" = one-off-fs-gantry-ok
+      test "$(run-in-fs-sandbox -- echo one-off-fs-gantry-ok)" = one-off-fs-gantry-ok
       touch /workspace/.run-command-ready
       while [ ! -f /workspace/.run-origin-ready ] && [ ! -f /workspace/.run-abort ]; do sleep 1; done
       test ! -f /workspace/.run-abort

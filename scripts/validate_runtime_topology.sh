@@ -189,26 +189,7 @@ jq --arg image "$topology_image" \
      }]' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
-cat >> "$project_root/config/nw_sandbox/main.rego" <<'EOF'
-
-allow if {
-  input.command == "/bin/echo"
-}
-
-allow if {
-  input.command == "/bin/pwd"
-}
-
-allow if {
-  input.command == "/bin/sh"
-  input.args == ["-c", "printf stdout; printf stderr >&2; exit 7"]
-}
-
-allow if {
-  input.command == "/bin/sh"
-  input.args == ["-c", "$cancel_command"]
-}
-EOF
+cancel_command_rego=$(jq -Rn --arg command "$cancel_command" '$command')
 cat > "$project_root/config/nw_sandbox/echo.rego" <<'EOF'
 package sandbox.echo
 
@@ -216,7 +197,35 @@ default allow = false
 default allow_env = false
 
 allow if {
+  input.args == ["nw-sandbox-uds-ok"]
+}
+
+allow if {
   count(input.args) == 0
+}
+EOF
+cat > "$project_root/config/nw_sandbox/pwd.rego" <<'EOF'
+package sandbox.pwd
+
+default allow = false
+default allow_env = false
+
+allow if {
+  count(input.args) == 0
+}
+EOF
+cat > "$project_root/config/nw_sandbox/sh.rego" <<EOF
+package sandbox.sh
+
+default allow = false
+default allow_env = false
+
+allow if {
+  input.args == ["-c", "printf stdout; printf stderr >&2; exit 7"]
+}
+
+allow if {
+  input.args == ["-c", $cancel_command_rego]
 }
 EOF
 cat > "$project_root/config/nw_sandbox/env.rego" <<'EOF'
@@ -374,7 +383,7 @@ assert_denied_connect "$nw_sandbox" nw-sandbox
 
 phase="verify agent-to-sandbox UDS communication"
 nw_output=$(podman exec "$agent" sh -ec \
-  'cd /home/user && run-in-nw-sandbox -- /bin/echo nw-sandbox-uds-ok')
+  'cd /home/user && run-in-nw-sandbox -- echo nw-sandbox-uds-ok')
 test "$nw_output" = nw-sandbox-uds-ok
 phase="verify Gantry Direct check response and policy decisions"
 allowed_check=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- echo')
@@ -427,13 +436,13 @@ printf '%s\n' "$invalid_decision" | jq -e \
 mv "$decision_file.valid" "$decision_file"
 phase="verify Gantry preserves working directory and streams command output and status"
 cwd_output=$(podman exec "$agent" sh -ec \
-  'cd /home/user && run-in-nw-sandbox -- /bin/pwd')
+  'cd /home/user && run-in-nw-sandbox -- pwd')
 test "$cwd_output" = /home/user
 command_output="$temp_root/gantry-command.stdout"
 command_error="$temp_root/gantry-command.stderr"
 set +e
 podman exec "$agent" sh -ec \
-  'run-in-nw-sandbox -- /bin/sh -c "printf stdout; printf stderr >&2; exit 7"' \
+  'run-in-nw-sandbox -- sh -c "printf stdout; printf stderr >&2; exit 7"' \
   >"$command_output" 2>"$command_error"
 command_status=$?
 set -e
@@ -441,7 +450,7 @@ test "$command_status" -eq 7
 test "$(cat "$command_output")" = stdout
 grep -Fx stderr "$command_error" >/dev/null
 phase="verify denied Gantry command does not start"
-if podman exec "$agent" sh -ec 'run-in-nw-sandbox -- /bin/touch /shared/denied-command-marker'; then
+if podman exec "$agent" sh -ec 'run-in-nw-sandbox -- touch /shared/denied-command-marker'; then
   echo "Gantry unexpectedly executed a denied command" >&2
   exit 1
 fi
@@ -454,7 +463,7 @@ podman exec --detach \
   --env "CLADDING_CANCEL_CLIENT_PID=$cancel_client_pid" \
   "$agent" sh -ec '
     printf "%s\n" "$$" > "$CLADDING_CANCEL_CLIENT_PID"
-    exec run-in-nw-sandbox -- /bin/sh -c "$CLADDING_CANCEL_COMMAND"
+    exec run-in-nw-sandbox -- sh -c "$CLADDING_CANCEL_COMMAND"
   '
 cancel_ready_seen=false
 cancel_client_pid_value=
