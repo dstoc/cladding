@@ -209,8 +209,8 @@ allow if {
   input.args == ["-c", "$cancel_command"]
 }
 EOF
-cat > "$project_root/config/nw_sandbox/true.rego" <<'EOF'
-package sandbox.true
+cat > "$project_root/config/nw_sandbox/echo.rego" <<'EOF'
+package sandbox.echo
 
 default allow = false
 default allow_env = false
@@ -377,13 +377,13 @@ nw_output=$(podman exec "$agent" sh -ec \
   'cd /home/user && run-in-nw-sandbox -- /bin/echo nw-sandbox-uds-ok')
 test "$nw_output" = nw-sandbox-uds-ok
 phase="verify Gantry Direct check response and policy decisions"
-allowed_check=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- true')
+allowed_check=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- echo')
 printf '%s\n' "$allowed_check" | jq -e \
   '.allowed == true and .backend == "direct" and .filesystem == null and .baffle_session == null' \
   >/dev/null
 denied_env_check=$(podman exec --env CLADDING_POLICY_TEST=forwarded "$agent" sh -ec '
   set +e
-  output=$(run-in-nw-sandbox --check --keep-env=CLADDING_POLICY_TEST -- true)
+  output=$(run-in-nw-sandbox --check --keep-env=CLADDING_POLICY_TEST -- echo)
   status=$?
   set -e
   test "$status" -eq 1
@@ -403,7 +403,7 @@ printf '%s\n' "$forwarded_env" | grep -Fx 'CLADDING_POLICY_TEST=forwarded' >/dev
 phase="verify missing and invalid Gantry decisions fail closed"
 decision_file="$project_root/config/nw_sandbox/decision.rego"
 mv "$decision_file" "$decision_file.disabled"
-if missing_decision=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- true'); then
+if missing_decision=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- echo'); then
   missing_decision_status=0
 else
   missing_decision_status=$?
@@ -415,7 +415,7 @@ printf '%s\n' "$missing_decision" | jq -e \
 mv "$decision_file.disabled" "$decision_file"
 cp "$decision_file" "$decision_file.valid"
 printf 'package sandbox.main\nthis is invalid rego\n' > "$decision_file"
-if invalid_decision=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- true'); then
+if invalid_decision=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- echo'); then
   invalid_decision_status=0
 else
   invalid_decision_status=$?
