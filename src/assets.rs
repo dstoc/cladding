@@ -13,10 +13,13 @@ const PROXY_STARTUP_SCRIPT: &str = include_str!("../scripts/proxy_startup.sh");
 
 static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/config-template");
 
-static MCP_RUN_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcp-run"));
+static GANTRY_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gantry"));
 static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
 static CLADDING_BRIDGE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cladding-bridge"));
 static BAFFLE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/baffle"));
+static GANTRY_LICENSE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gantry-LICENSE"));
+static GANTRY_README: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gantry-README.md"));
+static GANTRY_REFERENCE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gantry-reference.md"));
 
 const RUN_IN_NW_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_NW_SANDBOX_SOCKET:?RUN_NW_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_NW_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
 const RUN_IN_FS_SANDBOX: &[u8] = b"#!/bin/sh\nset -eu\n: \"${RUN_FS_SANDBOX_SOCKET:?RUN_FS_SANDBOX_SOCKET must be set}\"\nRUN_REMOTE_SOCKET=\"$RUN_FS_SANDBOX_SOCKET\" exec \"$(dirname \"$0\")/run-remote\" \"$@\"\n";
@@ -28,7 +31,7 @@ pub fn materialize_config(base_dir: &Path) -> Result<()> {
 
 pub fn tool_files() -> Vec<(&'static str, &'static [u8])> {
     vec![
-        ("mcp-run", MCP_RUN_BIN),
+        ("gantry", GANTRY_BIN),
         ("run-remote", RUN_REMOTE_BIN),
         ("cladding-bridge", CLADDING_BRIDGE_BIN),
         ("baffle", BAFFLE_BIN),
@@ -45,7 +48,36 @@ pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
         set_permissions(&path, 0o755)?;
     }
 
+    let tools_dir = if bin_dir.file_name().is_some_and(|name| name == "bin")
+        && bin_dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "tools")
+    {
+        bin_dir.parent().expect("tools/bin has a tools parent")
+    } else {
+        bin_dir
+    };
+    for (name, contents) in gantry_document_files() {
+        let path = tools_dir.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        set_permissions(&path, 0o644)?;
+    }
+
     Ok(())
+}
+
+fn gantry_document_files() -> Vec<(&'static str, &'static [u8])> {
+    vec![
+        ("share/doc/gantry/LICENSE", GANTRY_LICENSE),
+        ("share/doc/gantry/README.md", GANTRY_README),
+        ("share/doc/gantry/docs/reference.md", GANTRY_REFERENCE),
+    ]
 }
 
 pub fn proxy_containerfile() -> &'static str {
@@ -389,6 +421,53 @@ unmatched = "deny"
             arch => panic!("unsupported Cladding target architecture: {arch}"),
         };
         assert_eq!(machine, expected, "Baffle architecture must match Cladding");
+    }
+
+    #[test]
+    fn gantry_and_run_remote_are_embedded_as_linux_binaries() {
+        let expected = match std::env::consts::ARCH {
+            "x86_64" => 62,
+            "aarch64" => 183,
+            arch => panic!("unsupported Cladding target architecture: {arch}"),
+        };
+        for name in ["gantry", "run-remote"] {
+            let (_, binary) = tool_files()
+                .into_iter()
+                .find(|(tool_name, _)| *tool_name == name)
+                .unwrap_or_else(|| panic!("embedded {name} tool"));
+            assert!(binary.len() >= 20, "{name} ELF header is truncated");
+            assert_eq!(&binary[..4], b"\x7fELF", "{name} must be ELF");
+            assert_eq!(binary[4], 2, "{name} must be 64-bit");
+            assert_eq!(binary[5], 1, "{name} must be little-endian");
+            assert_eq!(
+                u16::from_le_bytes([binary[18], binary[19]]),
+                expected,
+                "{name} architecture must match Cladding"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upstream_gantry_documents_are_installed_with_the_tools() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = create_temp_dir("gantry-documents");
+        let bin_dir = temp.join("tools/bin");
+        fs::create_dir_all(&bin_dir).expect("create tool directory");
+        write_embedded_tools(&bin_dir).expect("write embedded tools and documents");
+        for (name, expected) in gantry_document_files() {
+            let path = temp.join("tools").join(name);
+            assert_eq!(
+                fs::read(&path).expect("read installed Gantry document"),
+                expected
+            );
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+        fs::remove_dir_all(temp).expect("remove temporary documents");
     }
 
     #[test]

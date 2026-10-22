@@ -1,10 +1,10 @@
-# Rego Pattern Examples (mcp-run)
+# Rego Pattern Examples (Gantry Direct)
 
-## Router Contract
+## Structured Decision Contract
 
-- Query: `data.sandbox.main.allow`
-- Router expects `package sandbox.main` with `allow` boolean.
-- Typical router delegates to `data.sandbox[input.command].allow` and enforces env constraints.
+- Query: `data.sandbox.main.decision`
+- The decision adapter reads command-specific `allow` and `allow_env` rules from the package named by `input.command`.
+- Keep `main.rego` as `package sandbox.main` without the old dynamic `allow` router. Gantry can report recursion when that router wraps the structured decision.
 
 ## Example Policies
 

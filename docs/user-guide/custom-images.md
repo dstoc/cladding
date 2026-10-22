@@ -53,6 +53,8 @@ Cladding runs the certificate installation command with container UID 0. It does
 
 The default proxy image is built from Debian trixie slim and includes the embedded Baffle binary at runtime. A custom proxy image must provide `/bin/sh`, GNU libc compatible with the embedded Baffle executable, `mkdir`, `chmod`, `dirname`, `sleep`, and `socat`. The startup script uses `socat` to verify the scoped socket bind. Keep `/run/baffle` sticky and writable so the proxy startup process can create a private control-socket directory. See [Proxy policy, CA, and credentials](../features/proxy/summary.md) for runtime details.
 
+Custom network- and filesystem-sandbox images must provide `/bin/sh` and GNU libc 2.35 or later for the pinned Gantry executables. They do not need Bubblewrap or `gantry-supervisor` because Cladding selects Gantry's Direct backend.
+
 ## Execution options
 
 Execution components use Podman's `--init` by default. Set `init` to `false` on an individual `agent`, `nw_sandbox`, or `fs_sandbox` object to omit that component's `--init` flag. Proxy containers always use `--init`.

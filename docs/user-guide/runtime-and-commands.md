@@ -61,6 +61,45 @@ cladding exec --target fs-sandbox ls /opt/config/fs_sandbox
 
 Host-initiated `exec --target nw-sandbox` or `exec --target fs-sandbox` runs directly in the sandbox and bypasses the agent's delegation and policy checks. For policy-checked delegation, run `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` inside the agent. `fs-sandbox` has no workspace mount or proxy access by default. Add an explicit target mount when it needs host files.
 
+## Sandbox command policies
+
+Cladding embeds the pinned Gantry v0.4.8 `gantry` server and `run-remote` client. Both sandboxes start Gantry with the Direct backend. Gantry executes allowed commands inside the existing Podman sandbox, so Podman's network and filesystem boundaries remain in effect.
+
+The default policy templates include `decision.rego`. It returns Gantry's structured decision and sets `filesystem` and `baffle_session` to `null`. It reads each command's `allow` and `allow_env` rules directly from the command package. Keep `main.rego` as the `sandbox.main` package file, but do not add the old dynamic `allow` router there. Gantry can report recursion when that router wraps the structured decision.
+
+Cladding does not rewrite existing policy files. For each sandbox policy directory in an existing project, replace the old `main.rego` router with `package sandbox.main` and add this `decision.rego` adapter. Keep command-specific `allow` and `allow_env` rules unchanged:
+
+```rego
+package sandbox.main
+
+default decision := {
+  "allow": false,
+  "filesystem": null,
+  "baffle_session": null,
+}
+
+decision := {
+  "allow": true,
+  "filesystem": null,
+  "baffle_session": null,
+} if {
+  data.sandbox[input.command].allow
+  count(object.keys(input.env)) == 0
+}
+
+decision := {
+  "allow": true,
+  "filesystem": null,
+  "baffle_session": null,
+} if {
+  data.sandbox[input.command].allow
+  count(object.keys(input.env)) > 0
+  data.sandbox[input.command].allow_env
+}
+```
+
+Without a valid `data.sandbox.main.decision`, Gantry denies command requests. Read the [Gantry v0.4.8 policy reference](https://github.com/dstoc/gantry/blob/v0.4.8/docs/reference.md) before changing the policy contract.
+
 ## Temporary host connections
 
 `cladding expose` publishes a TCP port from the agent container on a host address. It runs in the foreground, listens on `127.0.0.1` by default, and stops with Ctrl-C:

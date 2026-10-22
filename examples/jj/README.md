@@ -135,8 +135,11 @@ Copy the Rego policy bundle in [`policy/`](./policy) into
 cp -R examples/jj/policy/. .cladding/config/fs_sandbox/
 ```
 
-The bundle follows the same router pattern as the default sandbox policies.
-`main.rego` routes by executable, `real_jj.rego` routes by `jj` subcommand, and
+The bundle follows the same structured decision pattern as the default sandbox
+policies. `decision.rego` reads the `real_jj` command policy and returns
+Gantry's Direct decision. Keep `main.rego` as `package sandbox.main` without
+the old dynamic `allow` router; Gantry can report recursion when that router
+wraps the structured decision. `real_jj.rego` routes by `jj` subcommand, and
 each file under `policy/jj/` allows one `jj` command shape. To add another
 mutation later, add or copy in another command file under `policy/jj/`.
 

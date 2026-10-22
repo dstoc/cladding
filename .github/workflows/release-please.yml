@@ -47,24 +47,26 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Build Linux helpers
-        run: cargo build -p mcp-run -p cladding-bridge --release --locked --target "${{ matrix.target }}" --bin mcp-run --bin run-remote --bin cladding-bridge
-      - name: Stage helpers
+      - name: Download and verify pinned Gantry v0.4.8 release
         run: |
-          mkdir -p helpers
-          cp "target/${{ matrix.target }}/release/mcp-run" helpers/
-          cp "target/${{ matrix.target }}/release/run-remote" helpers/
-          cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/
-          for tool in helpers/*; do
-            chmod 0755 "$tool"
-            description=$(file -b "$tool")
-            printf '%s: %s\n' "$tool" "$description"
-            case "${{ matrix.arch }}:$description" in
-              x86_64:"ELF 64-bit"*x86-64*) ;;
-              aarch64:"ELF 64-bit"*aarch64*) ;;
-              *) echo "Expected a Linux ${{ matrix.arch }} executable: $tool" >&2; exit 1 ;;
-            esac
-          done
+          set -euo pipefail
+          scripts/fetch_gantry.sh "${{ matrix.arch }}" "$RUNNER_TEMP/gantry"
+          scripts/validate_gantry_release.sh "$RUNNER_TEMP/gantry"
+      - name: Build and stage cladding-bridge
+        run: |
+          set -euo pipefail
+          cargo build -p cladding-bridge --release --locked --target "${{ matrix.target }}" --bin cladding-bridge
+          mkdir -p helpers/gantry
+          cp -a "$RUNNER_TEMP/gantry/." helpers/gantry/
+          cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/cladding-bridge
+          chmod 0755 helpers/cladding-bridge
+          description=$(file -b helpers/cladding-bridge)
+          printf '%s\n' "$description"
+          case "${{ matrix.arch }}:$description" in
+            x86_64:"ELF 64-bit"*x86-64*) ;;
+            aarch64:"ELF 64-bit"*aarch64*) ;;
+            *) echo "Expected a Linux ${{ matrix.arch }} cladding-bridge" >&2; exit 1 ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
           name: cladding-linux-helpers-${{ matrix.arch }}
@@ -118,16 +120,30 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Fetch prebuilt helpers
-        if: matrix.target != 'x86_64-unknown-linux-gnu'
         uses: actions/download-artifact@v4
         with:
           name: cladding-linux-helpers-${{ matrix.helper_arch }}
           path: helpers
-      - name: Point build.rs at prebuilt helpers
-        if: matrix.target != 'x86_64-unknown-linux-gnu'
+      - name: Restore and verify downloaded Gantry helper executables
         run: |
-          echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/helpers/mcp-run" >> "$GITHUB_ENV"
-          echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/helpers/run-remote" >> "$GITHUB_ENV"
+          set -euo pipefail
+          test "$(cat helpers/gantry/VERSION)" = 0.4.8
+          for name in gantry run-remote; do
+            tool="helpers/gantry/$name"
+            test -f "$tool"
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "${{ matrix.helper_arch }}:$description" in
+              x86_64:"ELF 64-bit"*x86-64*) ;;
+              aarch64:"ELF 64-bit"*aarch64*) ;;
+              *) echo "Expected a Linux ${{ matrix.helper_arch }} Gantry executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+      - name: Point build.rs at prebuilt helpers
+        run: |
+          echo "CLADDING_GANTRY_DIR=$GITHUB_WORKSPACE/helpers/gantry" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$GITHUB_WORKSPACE/helpers/cladding-bridge" >> "$GITHUB_ENV"
       - name: Point build.rs at the validated Linux Baffle binary
         run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
@@ -141,13 +157,14 @@ jobs:
           bin=cladding
           staging="${bin}-${{ needs.release-please.outputs.tag_name }}-${{ matrix.target }}"
           mkdir "$staging"
-          mkdir -p "$staging/crates/mcp-run" \
+          mkdir -p "$staging/docs/gantry/docs" \
             "$staging/docs/features/baffle-integration" \
             "$staging/docs/features/proxy" \
             "$staging/docs/user-guide"
           cp "target/${{ matrix.target }}/release/${bin}" "$staging/"
           cp README.md "$staging/"
-          cp crates/mcp-run/README.md "$staging/crates/mcp-run/"
+          cp helpers/gantry/README.md "$staging/docs/gantry/"
+          cp helpers/gantry/docs/reference.md "$staging/docs/gantry/docs/reference.md"
           cp docs/features/current-runtime-summary.md "$staging/docs/features/"
           cp docs/features/baffle-integration/embedded-baffle.md "$staging/docs/features/baffle-integration/"
           cp docs/features/proxy/summary.md "$staging/docs/features/proxy/"
@@ -156,6 +173,8 @@ jobs:
           cp "$RUNNER_TEMP/baffle/LICENSE" "$staging/licenses/baffle/LICENSE"
           cp "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt" "$staging/licenses/baffle/"
           cp "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt" "$staging/licenses/baffle/"
+          mkdir -p "$staging/licenses/gantry"
+          cp helpers/gantry/LICENSE "$staging/licenses/gantry/LICENSE"
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
       - name: Upload to release

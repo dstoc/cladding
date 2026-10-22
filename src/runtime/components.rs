@@ -267,14 +267,6 @@ fn build_nw_sandbox_component(
                 .to_string(),
         },
         RuntimeEnvVar {
-            name: "MCP_BIND_UDS".to_string(),
-            value: runtime_socket_mount_path(RUNTIME_RUN_NW_SANDBOX_MOUNT_PATH, "run.sock"),
-        },
-        RuntimeEnvVar {
-            name: "POLICY_DIR".to_string(),
-            value: "/opt/config/nw_sandbox".to_string(),
-        },
-        RuntimeEnvVar {
             name: "http_proxy".to_string(),
             value: format!("http://{LOOPBACK}:3128"),
         },
@@ -321,7 +313,7 @@ fn build_nw_sandbox_component(
             image: config.nw_sandbox_image().to_string(),
             command: build_supervisor_command(
                 "socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/cladding/proxy/nw-sandbox/proxy.sock",
-                "chmod 0700 /run/cladding/run/nw-sandbox && umask 077 && exec mcp-run",
+                "chmod 0700 /run/cladding/run/nw-sandbox && umask 077 && exec gantry --backend direct --bind-uds /run/cladding/run/nw-sandbox/run.sock --policy-dir /opt/config/nw_sandbox",
             ),
             workdir: Some("/home/user".to_string()),
             env,
@@ -371,7 +363,7 @@ fn build_fs_sandbox_component(
             command: vec![
                 "/bin/sh".to_string(),
                 "-ec".to_string(),
-                "chmod 0700 /run/cladding/run/fs-sandbox && umask 077 && exec mcp-run"
+                "chmod 0700 /run/cladding/run/fs-sandbox && umask 077 && exec gantry --backend direct --bind-uds /run/cladding/run/fs-sandbox/run.sock --policy-dir /opt/config/fs_sandbox"
                     .to_string(),
             ],
             workdir: Some("/home/user".to_string()),
@@ -380,14 +372,6 @@ fn build_fs_sandbox_component(
                     name: "PATH".to_string(),
                     value: "/opt/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                         .to_string(),
-                },
-                RuntimeEnvVar {
-                    name: "MCP_BIND_UDS".to_string(),
-                    value: runtime_socket_mount_path(RUNTIME_RUN_FS_SANDBOX_MOUNT_PATH, "run.sock"),
-                },
-                RuntimeEnvVar {
-                    name: "POLICY_DIR".to_string(),
-                    value: "/opt/config/fs_sandbox".to_string(),
                 },
             ],
             mounts,
@@ -620,7 +604,28 @@ mod tests {
                 .iter()
                 .any(|arg| arg.contains("proxy/nw-sandbox/proxy.sock"))
         );
-        assert!(nw.command.iter().any(|arg| arg.contains("mcp-run")));
+        for (component, socket, policy_dir) in [
+            (
+                nw,
+                "/run/cladding/run/nw-sandbox/run.sock",
+                "/opt/config/nw_sandbox",
+            ),
+            (
+                fs,
+                "/run/cladding/run/fs-sandbox/run.sock",
+                "/opt/config/fs_sandbox",
+            ),
+        ] {
+            assert!(component.command.iter().any(|arg| arg.contains("gantry")));
+            assert!(
+                component
+                    .command
+                    .iter()
+                    .any(|arg| arg.contains("--backend direct"))
+            );
+            assert!(component.command.iter().any(|arg| arg.contains(socket)));
+            assert!(component.command.iter().any(|arg| arg.contains(policy_dir)));
+        }
         assert_eq!(env_value(proxy, "CLADDING_SANDBOX_NAME"), None);
         assert_eq!(
             env_value(agent, "RUN_NW_SANDBOX_SOCKET"),
@@ -632,15 +637,11 @@ mod tests {
         );
         assert_eq!(env_value(agent, "RUN_NW_SANDBOX_SERVER"), None);
         assert_eq!(env_value(agent, "RUN_FS_SANDBOX_SERVER"), None);
-        assert_eq!(
-            env_value(nw, "MCP_BIND_UDS"),
-            Some("/run/cladding/run/nw-sandbox/run.sock")
-        );
+        assert_eq!(env_value(nw, "MCP_BIND_UDS"), None);
+        assert_eq!(env_value(nw, "POLICY_DIR"), None);
         assert_eq!(env_value(nw, "MCP_BIND_ADDR"), None);
-        assert_eq!(
-            env_value(fs, "MCP_BIND_UDS"),
-            Some("/run/cladding/run/fs-sandbox/run.sock")
-        );
+        assert_eq!(env_value(fs, "MCP_BIND_UDS"), None);
+        assert_eq!(env_value(fs, "POLICY_DIR"), None);
         assert_eq!(env_value(fs, "MCP_BIND_ADDR"), None);
 
         assert!(mount_paths(agent).contains("/run/cladding/proxy"));

@@ -44,7 +44,7 @@ pub(super) fn check_required_binaries(context: &Context, config: &ExecutionConfi
     let mut missing = false;
     let bin_dir = context.project_root.join("tools/bin");
 
-    let mut required = vec!["mcp-run", "run-remote", "cladding-bridge", "baffle"];
+    let mut required = vec!["gantry", "run-remote", "cladding-bridge", "baffle"];
     if config.nw_sandbox_enabled() {
         required.push("run-in-nw-sandbox");
     }

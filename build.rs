@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BAFFLE_VERSION: &str = "2.2.0";
+const GANTRY_VERSION: &str = "0.4.8";
+const GANTRY_MAX_GLIBC: (u16, u16) = (2, 35);
 
 fn main() {
     ensure_supported_platforms();
@@ -13,53 +15,28 @@ fn main() {
 
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
-    println!("cargo:rerun-if-changed=crates/mcp-run/Cargo.toml");
-    println!("cargo:rerun-if-changed=crates/mcp-run/src");
     println!("cargo:rerun-if-changed=crates/cladding-bridge/Cargo.toml");
     println!("cargo:rerun-if-changed=crates/cladding-bridge/src");
-    println!("cargo:rerun-if-env-changed=CLADDING_MCP_RUN_BIN");
-    println!("cargo:rerun-if-env-changed=CLADDING_RUN_REMOTE_BIN");
+    println!("cargo:rerun-if-env-changed=CLADDING_GANTRY_DIR");
     println!("cargo:rerun-if-env-changed=CLADDING_BRIDGE_BIN");
     println!("cargo:rerun-if-env-changed=CLADDING_BAFFLE_BIN");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     build_baffle(&out_dir);
+    let target = env::var("TARGET").unwrap_or_default();
+    let expected_arch = target_arch().unwrap_or_else(|err| panic!("{err}"));
+    copy_gantry_distribution(&out_dir, expected_arch);
 
-    // Escape hatch: when prebuilt Linux helpers are provided (e.g. a macOS
-    // release build that cannot run a Linux container), copy them straight in
-    // and skip the nested helper build. All three must be set together.
-    let prebuilt_helpers = [
-        env::var("CLADDING_MCP_RUN_BIN").ok(),
-        env::var("CLADDING_RUN_REMOTE_BIN").ok(),
-        env::var("CLADDING_BRIDGE_BIN").ok(),
-    ];
-    match prebuilt_helpers {
-        [Some(mcp_run), Some(run_remote), Some(bridge)] => {
-            println!(
-                "cargo:warning=Using prebuilt embedded helpers; skipping nested release build"
-            );
-            copy_bin(Path::new(&mcp_run), &out_dir.join("mcp-run"));
-            copy_bin(Path::new(&run_remote), &out_dir.join("run-remote"));
-            let bridge_path = PathBuf::from(bridge);
-            let expected_arch = target_arch().unwrap_or_else(|err| panic!("{err}"));
-            let bridge_bytes = fs::read(&bridge_path).unwrap_or_else(|err| {
-                panic!(
-                    "failed to read CLADDING_BRIDGE_BIN at {}: {err}",
-                    bridge_path.display()
-                )
-            });
-            validate_elf_architecture(&bridge_bytes, expected_arch, &bridge_path, 20, "", "")
-                .unwrap_or_else(|err| panic!("{err}"));
-            copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
-            return;
-        }
-        [None, None, None] => {}
-        _ => panic!(
-            "CLADDING_MCP_RUN_BIN, CLADDING_RUN_REMOTE_BIN, and CLADDING_BRIDGE_BIN must be set together"
-        ),
+    if let Some(bridge) = env::var_os("CLADDING_BRIDGE_BIN") {
+        let bridge_path = PathBuf::from(bridge);
+        let bridge_bytes = read_regular_file(&bridge_path, "CLADDING_BRIDGE_BIN");
+        validate_elf_architecture(&bridge_bytes, expected_arch, &bridge_path, 20, "", "")
+            .unwrap_or_else(|err| panic!("{err}"));
+        copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
+        println!("cargo:warning=Using prebuilt cladding-bridge from the target helper asset");
+        return;
     }
 
-    let target = env::var("TARGET").unwrap_or_default();
     let helper_target = linux_helper_target(&target).unwrap_or_else(|err| panic!("{err}"));
     let target_settings = cargo_target_environment(&helper_target);
     for (key, _) in &target_settings {
@@ -90,15 +67,96 @@ fn main() {
     }
     let release_dir = release_dir(&target_dir, &helper_target);
 
-    copy_bin(&release_dir.join("mcp-run"), &out_dir.join("mcp-run"));
-    copy_bin(&release_dir.join("run-remote"), &out_dir.join("run-remote"));
     let bridge_path = release_dir.join("cladding-bridge");
-    let bridge_bytes = fs::read(&bridge_path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", bridge_path.display()));
-    let expected_arch = target_arch().unwrap_or_else(|err| panic!("{err}"));
+    let bridge_bytes = read_regular_file(&bridge_path, "cladding-bridge build output");
     validate_elf_architecture(&bridge_bytes, expected_arch, &bridge_path, 20, "", "")
         .unwrap_or_else(|err| panic!("{err}"));
     copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
+}
+
+fn copy_gantry_distribution(out_dir: &Path, expected_arch: &str) {
+    let directory = env::var_os("CLADDING_GANTRY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!(
+                "CLADDING_GANTRY_DIR is required; acquire the pinned Gantry {GANTRY_VERSION} Linux release with scripts/fetch_gantry.sh {expected_arch} <destination> and set CLADDING_GANTRY_DIR to that directory"
+            )
+        });
+    println!("cargo:rerun-if-changed={}", directory.display());
+
+    let version_path = directory.join("VERSION");
+    let version = read_regular_file(&version_path, "Gantry VERSION marker");
+    validate_gantry_version(&version, &version_path).unwrap_or_else(|err| panic!("{err}"));
+
+    for (name, output_name) in [("gantry", "gantry"), ("run-remote", "run-remote")] {
+        let path = directory.join(name);
+        let bytes = read_regular_file(&path, "Gantry release executable");
+        validate_gnu_elf(&bytes, expected_arch, &path, GANTRY_MAX_GLIBC)
+            .unwrap_or_else(|err| panic!("{err}"));
+        ensure_executable(&path, "Gantry release executable");
+        copy_bin(&path, &out_dir.join(output_name));
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+
+    for (source, output) in [
+        ("LICENSE", "gantry-LICENSE"),
+        ("README.md", "gantry-README.md"),
+        ("docs/reference.md", "gantry-reference.md"),
+    ] {
+        let path = directory.join(source);
+        let _ = read_regular_file(&path, "Gantry distribution document");
+        let output_path = out_dir.join(output);
+        fs::copy(&path, &output_path).unwrap_or_else(|err| {
+            panic!(
+                "failed to copy {} to {}: {err}",
+                path.display(),
+                output_path.display()
+            )
+        });
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!(
+        "cargo:warning=Embedding pinned Gantry {GANTRY_VERSION} Linux release for {expected_arch}"
+    );
+}
+
+fn validate_gantry_version(bytes: &[u8], path: &Path) -> Result<(), String> {
+    let expected = format!("{GANTRY_VERSION}\n");
+    if bytes != expected.as_bytes() {
+        return Err(format!(
+            "{} does not identify pinned Gantry version {GANTRY_VERSION}; fetch the pinned release again",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn read_regular_file(path: &Path, description: &str) -> Vec<u8> {
+    let metadata = fs::symlink_metadata(path).unwrap_or_else(|err| {
+        panic!(
+            "failed to inspect {description} at {}: {err}",
+            path.display()
+        )
+    });
+    if !metadata.file_type().is_file() {
+        panic!("{description} is not a regular file: {}", path.display());
+    }
+    fs::read(path)
+        .unwrap_or_else(|err| panic!("failed to read {description} at {}: {err}", path.display()))
+}
+
+#[cfg(unix)]
+fn ensure_executable(path: &Path, description: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::metadata(path).unwrap_or_else(|err| {
+        panic!(
+            "failed to inspect {description} at {}: {err}",
+            path.display()
+        )
+    });
+    if metadata.permissions().mode() & 0o111 == 0 {
+        panic!("{description} is not executable: {}", path.display());
+    }
 }
 
 fn ensure_supported_platforms() {
@@ -251,6 +309,80 @@ fn validate_baffle_elf(bytes: &[u8], expected_arch: &str, path: &Path) -> Result
     Ok(())
 }
 
+fn validate_gnu_elf(
+    bytes: &[u8],
+    expected_arch: &str,
+    path: &Path,
+    maximum_glibc: (u16, u16),
+) -> Result<(), String> {
+    validate_elf_architecture(bytes, expected_arch, path, 64, "", "")?;
+
+    let loader_suffix = match expected_arch {
+        "x86_64" => "ld-linux-x86-64.so.2",
+        "aarch64" => "ld-linux-aarch64.so.1",
+        _ => unreachable!(),
+    };
+    let program_offset = read_u64(bytes, 32)
+        .ok_or_else(|| format!("{} has an invalid ELF program header", path.display()))?
+        as usize;
+    let program_entry_size = read_u16(bytes, 54).unwrap_or_default() as usize;
+    let program_count = read_u16(bytes, 56).unwrap_or_default() as usize;
+    let mut has_gnu_loader = false;
+    for index in 0..program_count {
+        let header = program_offset.saturating_add(index.saturating_mul(program_entry_size));
+        if header.saturating_add(56) > bytes.len() || program_entry_size < 56 {
+            break;
+        }
+        if read_u32(bytes, header) != Some(3) {
+            continue;
+        }
+        let offset = read_u64(bytes, header + 8).unwrap_or(u64::MAX) as usize;
+        let size = read_u64(bytes, header + 32).unwrap_or_default() as usize;
+        let end = offset.saturating_add(size);
+        if end > bytes.len() {
+            break;
+        }
+        let interpreter = bytes[offset..end]
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default();
+        has_gnu_loader = String::from_utf8_lossy(interpreter).ends_with(loader_suffix);
+        break;
+    }
+    if !has_gnu_loader {
+        return Err(format!(
+            "{} does not use the {loader_suffix} GNU libc loader required by Cladding's Linux execution images",
+            path.display()
+        ));
+    }
+
+    let maximum_required_glibc = bytes
+        .split(|byte| *byte == 0)
+        .filter_map(|part| {
+            let value = std::str::from_utf8(part).ok()?.strip_prefix("GLIBC_")?;
+            let (major, minor) = value.split_once('.')?;
+            Some((major.parse::<u16>().ok()?, minor.parse::<u16>().ok()?))
+        })
+        .max();
+    let Some(required_glibc) = maximum_required_glibc else {
+        return Err(format!(
+            "{} has no GNU libc symbol-version requirements to validate",
+            path.display()
+        ));
+    };
+    if required_glibc > maximum_glibc {
+        return Err(format!(
+            "{} requires GLIBC_{}.{} but the pinned Gantry release supports at most GLIBC_{}.{}",
+            path.display(),
+            required_glibc.0,
+            required_glibc.1,
+            maximum_glibc.0,
+            maximum_glibc.1
+        ));
+    }
+    Ok(())
+}
+
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     let value = bytes.get(offset..offset.checked_add(2)?)?;
     Some(u16::from_le_bytes([value[0], value[1]]))
@@ -273,7 +405,7 @@ fn release_dir(target_dir: &Path, target: &str) -> PathBuf {
 }
 
 fn helper_target_dir(out_dir: &Path) -> PathBuf {
-    out_dir.join("mcp-run-target")
+    out_dir.join("cladding-bridge-target")
 }
 
 fn linux_helper_target(cladding_target: &str) -> Result<String, String> {
@@ -305,21 +437,18 @@ fn build_locally(
         .arg("--locked")
         .arg("--release")
         .arg("-p")
-        .arg("mcp-run")
-        .arg("-p")
+        .arg("cladding-bridge")
+        .arg("--bin")
         .arg("cladding-bridge");
-    cargo.arg("--bin").arg("mcp-run");
-    cargo.arg("--bin").arg("run-remote");
-    cargo.arg("--bin").arg("cladding-bridge");
     cargo.arg("--target-dir").arg(target_dir);
     cargo.arg("--target").arg(target);
     cargo.env("CARGO_BUILD_TARGET", target);
 
     let status = cargo
         .status()
-        .expect("failed to run cargo build for mcp-run");
+        .expect("failed to run cargo build for cladding-bridge");
     if !status.success() {
-        panic!("cargo build -p mcp-run failed");
+        panic!("cargo build -p cladding-bridge failed");
     }
 }
 
@@ -342,10 +471,10 @@ fn build_with_podman(
 ) {
     let status = podman_build_command(workspace_root, target_dir, target, target_settings)
         .status()
-        .expect("failed to run podman build for mcp-run");
+        .expect("failed to run podman build for cladding-bridge");
 
     if !status.success() {
-        panic!("podman cargo build for mcp-run failed");
+        panic!("podman cargo build for cladding-bridge failed");
     }
 }
 
@@ -389,13 +518,7 @@ fn podman_build_command(
         .arg("--target")
         .arg(target)
         .arg("-p")
-        .arg("mcp-run")
-        .arg("-p")
         .arg("cladding-bridge")
-        .arg("--bin")
-        .arg("mcp-run")
-        .arg("--bin")
-        .arg("run-remote")
         .arg("--bin")
         .arg("cladding-bridge");
     command
@@ -422,9 +545,10 @@ fn cargo_target_environment_from(
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_target_environment_from, configure_nested_cargo_environment, helper_target_dir,
-        is_supported_platform, linux_helper_target, podman_build_command, release_dir,
-        validate_baffle_elf, validate_elf_architecture,
+        cargo_target_environment_from, configure_nested_cargo_environment, ensure_executable,
+        helper_target_dir, is_supported_platform, linux_helper_target, podman_build_command,
+        release_dir, validate_baffle_elf, validate_elf_architecture, validate_gantry_version,
+        validate_gnu_elf,
     };
     use std::ffi::OsString;
     use std::path::Path;
@@ -437,6 +561,26 @@ mod tests {
         bytes[5] = 1;
         bytes[7] = 0;
         bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    fn gnu_elf(machine: u16, loader: &str, glibc: Option<&str>) -> Vec<u8> {
+        let mut bytes = vec![0; 320];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[7] = 0;
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+        bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+        bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
+        bytes[64..68].copy_from_slice(&3u32.to_le_bytes());
+        bytes[72..80].copy_from_slice(&160u64.to_le_bytes());
+        bytes[96..104].copy_from_slice(&((loader.len() + 1) as u64).to_le_bytes());
+        bytes[160..160 + loader.len()].copy_from_slice(loader.as_bytes());
+        if let Some(glibc) = glibc {
+            bytes[224..224 + glibc.len()].copy_from_slice(glibc.as_bytes());
+        }
         bytes
     }
 
@@ -485,6 +629,75 @@ mod tests {
     }
 
     #[test]
+    fn gantry_release_requires_the_matching_gnu_loader_and_glibc_baseline() {
+        let path = Path::new("/tmp/gantry");
+        let x86_64 = gnu_elf(62, "/lib64/ld-linux-x86-64.so.2", Some("GLIBC_2.35"));
+        assert!(validate_gnu_elf(&x86_64, "x86_64", path, (2, 35)).is_ok());
+
+        let wrong_arch = gnu_elf(183, "/lib/ld-linux-aarch64.so.1", Some("GLIBC_2.35"));
+        assert!(
+            validate_gnu_elf(&wrong_arch, "x86_64", path, (2, 35))
+                .unwrap_err()
+                .contains("requires x86_64")
+        );
+
+        let aarch64 = gnu_elf(183, "/lib/ld-linux-aarch64.so.1", Some("GLIBC_2.35"));
+        assert!(validate_gnu_elf(&aarch64, "aarch64", path, (2, 35)).is_ok());
+
+        let too_new = gnu_elf(62, "/lib64/ld-linux-x86-64.so.2", Some("GLIBC_2.36"));
+        assert!(
+            validate_gnu_elf(&too_new, "x86_64", path, (2, 35))
+                .unwrap_err()
+                .contains("requires GLIBC_2.36")
+        );
+
+        let wrong_loader = gnu_elf(62, "/lib/ld-linux-aarch64.so.1", Some("GLIBC_2.35"));
+        assert!(
+            validate_gnu_elf(&wrong_loader, "x86_64", path, (2, 35))
+                .unwrap_err()
+                .contains("ld-linux-x86-64.so.2")
+        );
+
+        let missing_versions = gnu_elf(62, "/lib64/ld-linux-x86-64.so.2", None);
+        assert!(
+            validate_gnu_elf(&missing_versions, "x86_64", path, (2, 35))
+                .unwrap_err()
+                .contains("no GNU libc symbol-version requirements")
+        );
+    }
+
+    #[test]
+    fn stale_gantry_distribution_markers_are_rejected() {
+        let path = Path::new("/tmp/VERSION");
+        assert!(validate_gantry_version(b"0.4.8\n", path).is_ok());
+        assert!(
+            validate_gantry_version(b"0.4.7\n", path)
+                .unwrap_err()
+                .contains("pinned Gantry version 0.4.8")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gantry_release_executables_must_have_execute_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "cladding-gantry-executable-check-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"binary").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| ensure_executable(&path, "Gantry release executable"))
+                .is_err()
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_executable(&path, "Gantry release executable");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn selects_linux_helper_target_from_each_supported_cladding_target() {
         for (target, helper) in [
             ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"),
@@ -500,7 +713,7 @@ mod tests {
     fn helper_artifacts_stay_under_cargo_output_directory() {
         let out_dir = Path::new("target/debug/build/cladding-abc/out");
         let target_dir = helper_target_dir(out_dir);
-        assert_eq!(target_dir, out_dir.join("mcp-run-target"));
+        assert_eq!(target_dir, out_dir.join("cladding-bridge-target"));
         assert!(target_dir.starts_with(out_dir));
         assert_eq!(
             release_dir(&target_dir, "aarch64-unknown-linux-gnu"),
@@ -510,7 +723,7 @@ mod tests {
 
     #[test]
     fn podman_build_targets_the_selected_linux_architecture_and_output_dir() {
-        let target_dir = Path::new("/cargo/out/mcp-run-target");
+        let target_dir = Path::new("/cargo/out/cladding-bridge-target");
         let settings = vec![(
             OsString::from("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS"),
             OsString::from("-C target-feature=+crt-static"),
@@ -533,7 +746,7 @@ mod tests {
             "CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu",
             "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C target-feature=+crt-static",
             "/workspace/cladding:/work:ro",
-            "/cargo/out/mcp-run-target:/out:rw",
+            "/cargo/out/cladding-bridge-target:/out:rw",
             "docker.io/library/rust:1.96.0",
             "--target",
             "aarch64-unknown-linux-gnu",
@@ -543,13 +756,11 @@ mod tests {
                 "missing {expected:?} in {args:?}"
             );
         }
-        for package in ["mcp-run", "cladding-bridge"] {
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair[0] == "-p" && pair[1] == package),
-                "missing package {package:?} in {args:?}"
-            );
-        }
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-p" && pair[1] == "cladding-bridge")
+        );
+        assert!(!args.iter().any(|arg| arg == "run-remote"));
     }
 
     #[test]
