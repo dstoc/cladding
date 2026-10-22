@@ -952,6 +952,19 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 )
                 self.assertIn(command, validator)
 
+    def test_one_off_filesystem_gantry_probe_uses_available_working_directory(self):
+        validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
+        start = validator.index(
+            'phase="verify one-off fake credentials authenticate'
+        )
+        end = validator.index(
+            'phase="verify one-off proxy mounts project configuration"', start
+        )
+        self.assertIn(
+            'cd /home/user && run-in-fs-sandbox -- echo one-off-fs-gantry-ok',
+            validator[start:end],
+        )
+
 
 class InjectProcessCleanupTests(unittest.TestCase):
     def test_timeout_reaps_a_hanging_inject_and_keeps_cleanup_reference(self):

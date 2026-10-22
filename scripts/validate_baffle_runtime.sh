@@ -1290,7 +1290,7 @@ test ! -e "$project_root/credentials/baffle/secrets/$run_secret_name"
     -- \
     /bin/sh -ec 'test -n "$FAKE_RUN_TOKEN"
       test -z "${CLADDING_RUN_SECRET_OVERRIDE+x}"
-      test "$(run-in-fs-sandbox -- echo one-off-fs-gantry-ok)" = one-off-fs-gantry-ok
+      test "$(cd /home/user && run-in-fs-sandbox -- echo one-off-fs-gantry-ok)" = one-off-fs-gantry-ok
       touch /workspace/.run-command-ready
       while [ ! -f /workspace/.run-origin-ready ] && [ ! -f /workspace/.run-abort ]; do sleep 1; done
       test ! -f /workspace/.run-abort
