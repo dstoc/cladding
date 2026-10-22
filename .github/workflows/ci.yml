@@ -34,8 +34,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-workspace-crates: true
-      - name: Build Linux execution helpers
-        run: cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target-dir target/mcp-run
+      - name: Download and verify pinned Gantry v0.4.8 release
+        run: |
+          set -euo pipefail
+          scripts/fetch_gantry.sh x86_64 "$RUNNER_TEMP/gantry"
+          test "$(cat "$RUNNER_TEMP/gantry/VERSION")" = 0.4.8
+          test "$("$RUNNER_TEMP/gantry/gantry" --version)" = "gantry 0.4.8"
+          "$RUNNER_TEMP/gantry/run-remote" --help >/dev/null
+      - name: Build cladding-bridge helper
+        run: cargo build --locked --release -p cladding-bridge --bin cladding-bridge --target-dir target/cladding-bridge
       - name: Build Linux Baffle socket operation probe
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Download and verify pinned x86_64 Baffle release
@@ -54,14 +61,15 @@ jobs:
       - name: Assemble and verify embedded Linux tools
         run: |
           set -euo pipefail
-          asset_dir="$RUNNER_TEMP/embedded-linux-tools-x86_64/bin"
+          asset_root="$RUNNER_TEMP/embedded-linux-tools-x86_64"
+          asset_dir="$asset_root/bin"
+          mkdir -p "$asset_root"
+          cp -a "$RUNNER_TEMP/gantry" "$asset_root/gantry"
           mkdir -p "$asset_dir"
           cp "$RUNNER_TEMP/baffle/baffle" "$asset_dir/baffle"
-          cp "target/mcp-run/release/mcp-run" "$asset_dir/mcp-run"
-          cp "target/mcp-run/release/run-remote" "$asset_dir/run-remote"
-          cp "target/mcp-run/release/cladding-bridge" "$asset_dir/cladding-bridge"
+          cp "target/cladding-bridge/release/cladding-bridge" "$asset_dir/cladding-bridge"
           cp "$RUNNER_TEMP/baffle-socket-probe" "$asset_dir/baffle-socket-probe"
-          for tool in "$asset_dir"/*; do
+          for tool in "$asset_dir"/* "$asset_root/gantry/gantry" "$asset_root/gantry/run-remote"; do
             test -f "$tool"
             chmod 0755 "$tool"
             test -x "$tool"
@@ -93,7 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote cladding-bridge baffle-socket-probe; do
+          for name in baffle cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
             if [ ! -f "$tool" ]; then
               echo "Downloaded embedded Linux tool is missing: $tool" >&2
@@ -111,8 +119,7 @@ jobs:
       - name: Set embedded x86_64 Linux tool paths
         run: |
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
-          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
-          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
+          echo "CLADDING_GANTRY_DIR=$RUNNER_TEMP/linux-tools/gantry" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge" >> "$GITHUB_ENV"
           echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.96
@@ -123,8 +130,8 @@ jobs:
           cache-workspace-crates: true
       - name: Verify embedded helpers
         run: |
-          test -x "$CLADDING_MCP_RUN_BIN"
-          test -x "$CLADDING_RUN_REMOTE_BIN"
+          test -x "$CLADDING_GANTRY_DIR/gantry"
+          test -x "$CLADDING_GANTRY_DIR/run-remote"
           test -x "$CLADDING_BRIDGE_BIN"
           test -x "$CLADDING_BAFFLE_BIN"
       - name: Build Cladding with the embedded Baffle executable
@@ -151,7 +158,7 @@ jobs:
         run: |
           set -euo pipefail
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote cladding-bridge baffle-socket-probe; do
+          for name in baffle cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
             if [ ! -f "$tool" ]; then
               echo "Downloaded embedded Linux tool is missing: $tool" >&2
@@ -169,8 +176,7 @@ jobs:
       - name: Set embedded x86_64 Linux tool paths
         run: |
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
-          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
-          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
+          echo "CLADDING_GANTRY_DIR=$RUNNER_TEMP/linux-tools/gantry" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge" >> "$GITHUB_ENV"
           echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.96
@@ -232,8 +238,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-workspace-crates: true
-      - name: Build Linux execution helpers
-        run: cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/mcp-run
+      - name: Download and verify pinned Gantry v0.4.8 release
+        run: |
+          set -euo pipefail
+          scripts/fetch_gantry.sh aarch64 "$RUNNER_TEMP/gantry"
+          test "$(cat "$RUNNER_TEMP/gantry/VERSION")" = 0.4.8
+          test "$("$RUNNER_TEMP/gantry/gantry" --version)" = "gantry 0.4.8"
+          "$RUNNER_TEMP/gantry/run-remote" --help >/dev/null
+      - name: Build cladding-bridge helper
+        run: cargo build --locked --release -p cladding-bridge --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/cladding-bridge
       - name: Build Linux Baffle socket operation probe
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Download and verify pinned aarch64 Baffle release
@@ -252,14 +265,15 @@ jobs:
       - name: Assemble and verify embedded Linux tools
         run: |
           set -euo pipefail
-          asset_dir="$RUNNER_TEMP/embedded-linux-tools-aarch64/bin"
+          asset_root="$RUNNER_TEMP/embedded-linux-tools-aarch64"
+          asset_dir="$asset_root/bin"
+          mkdir -p "$asset_root"
+          cp -a "$RUNNER_TEMP/gantry" "$asset_root/gantry"
           mkdir -p "$asset_dir"
           cp "$RUNNER_TEMP/baffle/baffle" "$asset_dir/baffle"
-          cp "target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run" "$asset_dir/mcp-run"
-          cp "target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote" "$asset_dir/run-remote"
-          cp "target/mcp-run/aarch64-unknown-linux-gnu/release/cladding-bridge" "$asset_dir/cladding-bridge"
+          cp "target/cladding-bridge/aarch64-unknown-linux-gnu/release/cladding-bridge" "$asset_dir/cladding-bridge"
           cp "$RUNNER_TEMP/baffle-socket-probe" "$asset_dir/baffle-socket-probe"
-          for tool in "$asset_dir"/*; do
+          for tool in "$asset_dir"/* "$asset_root/gantry/gantry" "$asset_root/gantry/run-remote"; do
             test -f "$tool"
             chmod 0755 "$tool"
             test -x "$tool"
@@ -293,7 +307,7 @@ jobs:
         run: |
           set -euo pipefail
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote cladding-bridge baffle-socket-probe; do
+          for name in baffle cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
             test -f "$tool"
             chmod 0755 "$tool"
@@ -308,8 +322,7 @@ jobs:
       - name: Set embedded Linux tool paths
         run: |
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
-          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
-          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
+          echo "CLADDING_GANTRY_DIR=$RUNNER_TEMP/linux-tools/gantry" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
@@ -448,7 +461,7 @@ jobs:
         run: |
           test "$(uname -m)" = arm64
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote cladding-bridge baffle-socket-probe; do
+          for name in baffle cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
             test -f "$tool"
             chmod 0755 "$tool"
@@ -464,8 +477,7 @@ jobs:
       - name: Set prebuilt Linux binary paths
         run: |
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
-          echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
-          echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
+          echo "CLADDING_GANTRY_DIR=$RUNNER_TEMP/linux-tools/gantry" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - name: Build Cladding for Apple Silicon with Linux aarch64 binaries

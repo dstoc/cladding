@@ -5,7 +5,7 @@ Cladding lets you run an agent in a constrained container environment where netw
 - The agent runs in a standalone container with `--network none`. Optional delegated sandboxes also run in standalone containers with `--network none`.
 - A standalone proxy container runs Baffle. The agent and optional network sandbox can use its local HTTP proxy when Baffle policy allows a destination. The filesystem sandbox has no proxy access by default.
 - Execution containers communicate through Unix-domain sockets in Podman-managed volumes. Cladding does not create host socket directories for these channels.
-- The network and filesystem sandboxes each serve [`mcp-run`](crates/mcp-run/README.md) on a mounted Unix socket and execute commands only when their Rego policies under `.cladding/config/` allow them.
+- The network and filesystem sandboxes each serve [Gantry v0.4.8](https://github.com/dstoc/gantry/releases/tag/v0.4.8) with the Direct backend on a mounted Unix socket. Their Rego policies under `.cladding/config/` control command access.
 - Proxy rules use native Baffle TOML under `.cladding/config/proxy/`.
 
 Cladding does not mount the host workspace by default. Configure an explicit host-backed mount for any files an execution container must use. The proxy also denies destinations by default until you add a Baffle rule.
@@ -91,11 +91,11 @@ flowchart LR
     AgentProxy["local proxy · 127.0.0.1:3128"]
   end
   subgraph Network["optional nw-sandbox · network none"]
-    NetworkMcp[mcp-run]
+    NetworkGantry[Gantry · Direct]
     NetworkProxy["local proxy · 127.0.0.1:3128"]
   end
   subgraph Filesystem["optional fs-sandbox · network none"]
-    FilesystemMcp[mcp-run]
+    FilesystemGantry[Gantry · Direct]
   end
   AgentSocket[(Managed agent Baffle volume)]
   NetworkSocket[(Managed network Baffle volume)]
@@ -106,14 +106,14 @@ flowchart LR
   Baffle --- AgentSocket
   Baffle --- NetworkSocket
   AgentProcess --> AgentProxy --> AgentSocket
-  NetworkMcp --> NetworkProxy --> NetworkSocket
+  NetworkGantry --> NetworkProxy --> NetworkSocket
   AgentProcess <-->|"run-remote · UDS"| NetworkRun
   AgentProcess <-->|"run-remote · UDS"| FilesystemRun
-  NetworkRun --- NetworkMcp
-  FilesystemRun --- FilesystemMcp
+  NetworkRun --- NetworkGantry
+  FilesystemRun --- FilesystemGantry
   HostWorkspace -. "configured target only" .-> AgentProcess
-  HostWorkspace -. "configured target only" .-> NetworkMcp
-  HostWorkspace -. "configured target only" .-> FilesystemMcp
+  HostWorkspace -. "configured target only" .-> NetworkGantry
+  HostWorkspace -. "configured target only" .-> FilesystemGantry
 ```
 
 The filesystem sandbox has no Baffle socket, proxy environment, or CA mount by default; it is not a proxy client. The default `/home/user` mount is Cladding's project home, not the host workspace. The persistent project CA and credentials stay under `.cladding/credentials/baffle/`.

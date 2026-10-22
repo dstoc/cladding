@@ -1,4 +1,4 @@
-# Rego Pattern Examples (mcp-run)
+# Rego Pattern Examples (Gantry Direct)
 
 ## Router Contract
 

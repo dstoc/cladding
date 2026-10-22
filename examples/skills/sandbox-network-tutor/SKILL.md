@@ -39,7 +39,8 @@ run-in-nw-sandbox -- cargo fetch
 ## Policy and Network Rule Checks
 
 - Inspect Rego policy at `/opt/config/nw_sandbox/` using shell commands (`ls`, `rg`, or `less`).
-- The decision query is `data.sandbox.main.allow`, so check `main.rego` and the command package (for example `package sandbox.curl`).
+- Gantry evaluates `data.sandbox.main.decision`. Check `decision.rego` and `main.rego`, then check the command package (for example `package sandbox.curl`).
+- `decision.rego` adapts `allow` to Gantry's structured decision and sets the filesystem and Baffle selections to `null` for Cladding's Direct backend.
 - Inspect network access rules at `/opt/config/proxy/sessions/nw-sandbox.toml`.
 - Match arguments against Rego rules in the command package (for example `package sandbox.curl`) and adjust commands accordingly.
 

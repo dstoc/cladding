@@ -31,12 +31,12 @@ flowchart LR
   end
 
   subgraph Network["optional nw-sandbox · network none"]
-    NetworkMcp[mcp-run]
+    NetworkGantry[Gantry · Direct]
     NetworkProxy["socat · 127.0.0.1:3128"]
   end
 
   subgraph Filesystem["optional fs-sandbox · network none"]
-    FilesystemMcp[mcp-run]
+    FilesystemGantry[Gantry · Direct]
   end
 
   AgentBaffleVolume[(Managed Baffle agent volume)]
@@ -55,12 +55,12 @@ flowchart LR
   FilesystemRunVolume --- Filesystem
 
   AgentProcess --> AgentProxy --> AgentBaffleVolume
-  NetworkMcp --> NetworkProxy --> NetworkBaffleVolume
-  AgentProcess <-->|"run-remote · UDS"| NetworkMcp
-  AgentProcess <-->|"run-remote · UDS"| FilesystemMcp
+  NetworkGantry --> NetworkProxy --> NetworkBaffleVolume
+  AgentProcess <-->|"run-remote · UDS"| NetworkGantry
+  AgentProcess <-->|"run-remote · UDS"| FilesystemGantry
   HostWorkspace -. "only configured targets" .-> AgentProcess
-  HostWorkspace -. "only configured targets" .-> NetworkMcp
-  HostWorkspace -. "only configured targets" .-> FilesystemMcp
+  HostWorkspace -. "only configured targets" .-> NetworkGantry
+  HostWorkspace -. "only configured targets" .-> FilesystemGantry
 ```
 
 The dashed host mount is optional. Cladding does not mount the host workspace by default. A configured mount applies only to its selected target list. The agent and network sandbox can use the proxy only through their own Baffle socket and only for destinations allowed by their session policy. The filesystem sandbox has neither proxy access nor a CA mount. Direct host execution into a sandbox bypasses the agent-side delegation and policy path.
@@ -80,7 +80,7 @@ The agent Baffle volume is mounted at `/run/cladding/proxy` in both the proxy an
 
 Baffle binds each session socket directly in its managed volume. Its data socket uses mode `0600` inside a mode-`0700` component directory. The proxy's control socket and runtime configuration stay inside the proxy container, in a private directory under `/run/baffle`. No execution container mounts the Baffle control socket.
 
-The network and filesystem sandboxes bind their run sockets through `MCP_BIND_UDS`. The agent calls those sockets through `run-remote`. The agent and network sandbox each keep a `socat` listener on `127.0.0.1:3128` and forward to their own Baffle data socket. No separate proxy bridge container is used.
+The network and filesystem sandboxes start Gantry with `--backend direct`, `--bind-uds`, and `--policy-dir`. The agent calls those sockets through `run-remote`. The agent and network sandbox each keep a `socat` listener on `127.0.0.1:3128` and forward to their own Baffle data socket. No separate proxy bridge container is used.
 
 ## Default and optional mounts
 

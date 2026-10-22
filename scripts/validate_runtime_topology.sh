@@ -190,6 +190,39 @@ cat >> "$project_root/config/nw_sandbox/main.rego" <<'EOF'
 allow if {
   input.command == "/bin/echo"
 }
+
+allow if {
+  input.command == "/bin/pwd"
+}
+
+allow if {
+  input.command == "/bin/sh"
+  input.args == ["-c", "printf stdout; printf stderr >&2; exit 7"]
+}
+EOF
+cat > "$project_root/config/nw_sandbox/true.rego" <<'EOF'
+package sandbox.true
+
+default allow = false
+default allow_env = false
+
+allow if {
+  count(input.args) == 0
+}
+EOF
+cat > "$project_root/config/nw_sandbox/env.rego" <<'EOF'
+package sandbox.env
+
+default allow = false
+default allow_env = false
+
+allow if {
+  count(input.args) == 0
+}
+
+allow_env if {
+  count(input.args) == 0
+}
 EOF
 phase="build Cladding images and initialize the project CA"
 podman_wrapper_dir="$temp_root/podman-wrapper"
@@ -334,6 +367,76 @@ phase="verify agent-to-sandbox UDS communication"
 nw_output=$(podman exec "$agent" sh -ec \
   'cd /home/user && run-in-nw-sandbox -- /bin/echo nw-sandbox-uds-ok')
 test "$nw_output" = nw-sandbox-uds-ok
+phase="verify Gantry Direct check response and policy decisions"
+allowed_check=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- true')
+printf '%s\n' "$allowed_check" | jq -e \
+  '.allowed == true and .backend == "direct" and .filesystem == null and .baffle_session == null' \
+  >/dev/null
+denied_env_check=$(podman exec --env CLADDING_POLICY_TEST=forwarded "$agent" sh -ec '
+  set +e
+  output=$(run-in-nw-sandbox --check --keep-env=CLADDING_POLICY_TEST -- true)
+  status=$?
+  set -e
+  test "$status" -eq 1
+  printf "%s\n" "$output"
+')
+printf '%s\n' "$denied_env_check" | jq -e \
+  '.allowed == false and .backend == "direct" and .filesystem == null and .baffle_session == null' \
+  >/dev/null
+allowed_env_check=$(podman exec --env CLADDING_POLICY_TEST=forwarded "$agent" sh -ec \
+  'run-in-nw-sandbox --check --keep-env=CLADDING_POLICY_TEST -- env')
+printf '%s\n' "$allowed_env_check" | jq -e \
+  '.allowed == true and .backend == "direct" and .filesystem == null and .baffle_session == null' \
+  >/dev/null
+forwarded_env=$(podman exec --env CLADDING_POLICY_TEST=forwarded "$agent" sh -ec \
+  'run-in-nw-sandbox --keep-env=CLADDING_POLICY_TEST -- env')
+printf '%s\n' "$forwarded_env" | grep -Fx 'CLADDING_POLICY_TEST=forwarded' >/dev/null
+phase="verify missing and invalid Gantry decisions fail closed"
+decision_file="$project_root/config/nw_sandbox/decision.rego"
+mv "$decision_file" "$decision_file.disabled"
+if missing_decision=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- true'); then
+  missing_decision_status=0
+else
+  missing_decision_status=$?
+fi
+test "$missing_decision_status" -eq 1
+printf '%s\n' "$missing_decision" | jq -e \
+  '.allowed == false and .backend == "direct" and .filesystem == null and .baffle_session == null' \
+  >/dev/null
+mv "$decision_file.disabled" "$decision_file"
+cp "$decision_file" "$decision_file.valid"
+printf 'package sandbox.main\nthis is invalid rego\n' > "$decision_file"
+if invalid_decision=$(podman exec "$agent" sh -ec 'run-in-nw-sandbox --check -- true'); then
+  invalid_decision_status=0
+else
+  invalid_decision_status=$?
+fi
+test "$invalid_decision_status" -eq 1
+printf '%s\n' "$invalid_decision" | jq -e \
+  '.allowed == false and .backend == "direct" and .filesystem == null and .baffle_session == null' \
+  >/dev/null
+mv "$decision_file.valid" "$decision_file"
+phase="verify Gantry preserves working directory and streams command output and status"
+cwd_output=$(podman exec "$agent" sh -ec \
+  'cd /home/user && run-in-nw-sandbox -- /bin/pwd')
+test "$cwd_output" = /home/user
+command_output="$temp_root/gantry-command.stdout"
+command_error="$temp_root/gantry-command.stderr"
+set +e
+podman exec "$agent" sh -ec \
+  'run-in-nw-sandbox -- /bin/sh -c "printf stdout; printf stderr >&2; exit 7"' \
+  >"$command_output" 2>"$command_error"
+command_status=$?
+set -e
+test "$command_status" -eq 7
+test "$(cat "$command_output")" = stdout
+grep -Fx stderr "$command_error" >/dev/null
+phase="verify denied Gantry command does not start"
+if podman exec "$agent" sh -ec 'run-in-nw-sandbox -- /bin/touch /shared/denied-command-marker'; then
+  echo "Gantry unexpectedly executed a denied command" >&2
+  exit 1
+fi
+podman exec "$agent" sh -ec 'test ! -e /shared/denied-command-marker'
 phase="verify shared managed mount communication"
 podman exec "$agent" sh -ec 'printf "agent-to-sandbox-ok\n" > /shared/topology-marker'
 test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)" = agent-to-sandbox-ok

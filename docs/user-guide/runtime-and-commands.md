@@ -61,6 +61,14 @@ cladding exec --target fs-sandbox ls /opt/config/fs_sandbox
 
 Host-initiated `exec --target nw-sandbox` or `exec --target fs-sandbox` runs directly in the sandbox and bypasses the agent's delegation and policy checks. For policy-checked delegation, run `run-in-nw-sandbox -- <cmd> [args...]` or `run-in-fs-sandbox -- <cmd> [args...]` inside the agent. `fs-sandbox` has no workspace mount or proxy access by default. Add an explicit target mount when it needs host files.
 
+## Sandbox command policies
+
+Cladding embeds the pinned Gantry v0.4.8 `gantry` server and `run-remote` client. Both sandboxes start Gantry with the Direct backend. Gantry executes allowed commands inside the existing Podman sandbox, so Podman's network and filesystem boundaries remain in effect.
+
+The default policy templates include `decision.rego`. It adapts the existing `allow` result to Gantry's structured `decision` result and sets `filesystem` and `baffle_session` to `null`. The command-specific `allow` and `allow_env` rules stay in `main.rego` and their command modules.
+
+Cladding does not rewrite existing policy files. Existing projects must add the same adapter to each sandbox policy directory. Without a valid `data.sandbox.main.decision`, Gantry denies command requests. Read the [Gantry v0.4.8 policy reference](https://github.com/dstoc/gantry/blob/v0.4.8/docs/reference.md) before changing the policy contract.
+
 ## Temporary host connections
 
 `cladding expose` publishes a TCP port from the agent container on a host address. It runs in the foreground, listens on `127.0.0.1` by default, and stops with Ctrl-C:

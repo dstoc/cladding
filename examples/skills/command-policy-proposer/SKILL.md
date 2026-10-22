@@ -1,6 +1,6 @@
 ---
 name: command-policy-proposer
-description: Propose or modify Rego sandbox command policies for mcp-run (PROPOSAL_DIR ~/proposed-sandbox-commands; runtime POLICY_DIR /opt/config/nw_sandbox). Use when asked to draft new .rego files, update existing policy logic, or review command allowlists with safe argument constraints and network/data-exfiltration safeguards.
+description: Propose or modify Rego sandbox command policies for Gantry (PROPOSAL_DIR ~/proposed-sandbox-commands; runtime policy directory /opt/config/nw_sandbox). Use when asked to draft new .rego files, update existing policy logic, or review command allowlists with safe argument constraints and network/data-exfiltration safeguards.
 ---
 
 # Command Policy Proposer
@@ -31,23 +31,25 @@ description: Propose or modify Rego sandbox command policies for mcp-run (PROPOS
 - `--output`/`-o` when it can write arbitrary paths
 - Any arg that takes a **URL** or **domain** unless hard-coded
 
-## Rego Contract (mcp-run)
+## Rego Contract (Gantry Direct)
 
 - Write proposal files under `~/proposed-sandbox-commands` (not `/opt/config/nw_sandbox`, which may be read-only).
 - Treat `/opt/config/nw_sandbox` as the runtime reference location to inspect existing effective policies.
-- Decision query: `data.sandbox.main.allow`
+- Decision query: `data.sandbox.main.decision`
 - Rego input shape:
   - `input.command`: executable token
   - `input.path`: resolved absolute path
   - `input.args`: argument list
   - `input.env`: forwarded environment map
 - Deny-by-default: `default allow = false`
+- Keep the default `decision.rego` adapter in each sandbox policy directory. It returns `{allow, filesystem: null, baffle_session: null}` for the Direct backend.
+- Keep command-specific `allow` and `allow_env` rules. The `main.rego` router combines them before the adapter returns the structured decision.
 
 ## Templates
 
 ### Minimal router (`main.rego`)
 
-Use only if asked to author or update the router:
+Use only if asked to author or update the router. Keep this `allow` logic separate from the `decision.rego` adapter:
 
 ```rego
 package sandbox.main

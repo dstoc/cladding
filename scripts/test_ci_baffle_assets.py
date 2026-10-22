@@ -14,6 +14,7 @@ RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github/workflows/release-please
 RELEASE_TEXT = RELEASE_WORKFLOW.read_text()
 BUILD_SCRIPT = Path(__file__).parents[1] / "build.rs"
 BAFFLE_FETCH_SCRIPT = Path(__file__).parents[1] / "scripts/fetch_baffle.sh"
+GANTRY_FETCH_SCRIPT = Path(__file__).parents[1] / "scripts/fetch_gantry.sh"
 EMBEDDED_BAFFLE_DOC = (
     Path(__file__).parents[1] / "docs/features/baffle-integration/embedded-baffle.md"
 )
@@ -53,6 +54,29 @@ def job_block(name: str, workflow: str = TEXT) -> str:
 
 
 class BaffleCiAssetsTests(unittest.TestCase):
+    def test_gantry_release_is_pinned_and_verified_before_use(self):
+        fetch = GANTRY_FETCH_SCRIPT.read_text()
+        self.assertIn("GANTRY_VERSION=0.4.8", fetch)
+        self.assertIn(
+            "SHA256SUMS_SHA256=3dd698d856c7b8dda1022f03edceedaf1fa6c8a1cb9c4e6703fe153e12933dde",
+            fetch,
+        )
+        for digest in (
+            "f4b5eb7c96a838a094f2312c806a3e4e16a7d3bdb5df21b8b882d05aa5267bc7",
+            "1d485e9df255c84f788917bd07ca059a42ab241a2fed31802c054a962a1e07e8",
+        ):
+            with self.subTest(digest=digest):
+                self.assertIn(digest, fetch)
+        self.assertIn('"$release_url/$archive"', fetch)
+        self.assertIn('"$release_url/SHA256SUMS"', fetch)
+        self.assertIn('actual_sums_sha256=$(sha256 "$temp_root/SHA256SUMS")', fetch)
+        self.assertIn('actual_archive_sha256=$(sha256 "$archive_path")', fetch)
+        self.assertIn('chmod 0755 "$package/$binary"', fetch)
+        self.assertIn("LICENSE README.md docs/reference.md", fetch)
+        self.assertLess(fetch.index("actual_archive_sha256=$(sha256"), fetch.index("tar -xzf"))
+        self.assertIn("validate_gnu_elf", BUILD_SCRIPT.read_text())
+        self.assertIn("GANTRY_MAX_GLIBC", BUILD_SCRIPT.read_text())
+
     def test_baffle_runtime_reports_each_sandbox_socket_failure(self):
         validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
         self.assertIn("diagnose_run_socket_endpoints() {", validator)
@@ -453,16 +477,34 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('if [ "$actual" != "$expected" ]', fetch)
         self.assertLess(fetch.index('if [ "$actual" != "$expected" ]'), fetch.index("tar -xzf"))
 
+    def test_local_build_requires_pinned_verified_gantry_distribution(self):
+        build = BUILD_SCRIPT.read_text()
+        self.assertIn('const GANTRY_VERSION: &str = "0.4.8";', build)
+        self.assertIn('env::var_os("CLADDING_GANTRY_DIR")', build)
+        self.assertIn("validate_gnu_elf", build)
+        self.assertIn("validate_gantry_version", build)
+        self.assertIn("gantry-LICENSE", build)
+
+        fetch = GANTRY_FETCH_SCRIPT.read_text()
+        self.assertIn("GANTRY_VERSION=0.4.8", fetch)
+        self.assertIn("SHA256SUMS_SHA256=", fetch)
+        self.assertIn("expected_archive_sha256=", fetch)
+        self.assertIn('"$release_url/SHA256SUMS"', fetch)
+        self.assertIn('"$release_url/$archive"', fetch)
+        self.assertIn("actual_sums_sha256", fetch)
+        self.assertIn("actual_archive_sha256", fetch)
+        self.assertIn('for path in gantry run-remote LICENSE README.md docs/reference.md;', fetch)
+
     def test_complete_embedded_linux_tools_are_built_once_per_architecture(self):
         cases = {
             "embedded-linux-tools-x86_64": (
                 "x86_64",
-                "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target-dir target/mcp-run",
+                "cargo build --locked --release -p cladding-bridge --bin cladding-bridge --target-dir target/cladding-bridge",
                 "x86-64",
             ),
             "embedded-linux-tools-aarch64": (
                 "aarch64",
-                "cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/mcp-run",
+                "cargo build --locked --release -p cladding-bridge --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/cladding-bridge",
                 "aarch64",
             ),
         }
@@ -470,6 +512,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
             with self.subTest(job=job):
                 block = job_block(job)
                 self.assertIn(build, block)
+                self.assertIn(f"scripts/fetch_gantry.sh {arch}", block)
+                self.assertIn('"$RUNNER_TEMP/gantry/gantry" --version', block)
+                self.assertIn('"$RUNNER_TEMP/gantry/run-remote" --help', block)
                 self.assertIn(f"scripts/fetch_baffle.sh {arch}", block)
                 self.assertIn(
                     "cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c",
@@ -479,12 +524,12 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertIn('cp "$RUNNER_TEMP/baffle/baffle"', block)
                 for name in (
                     "baffle",
-                    "mcp-run",
-                    "run-remote",
                     "cladding-bridge",
                     "baffle-socket-probe",
                 ):
                     self.assertIn(f'"$asset_dir/{name}"', block)
+                self.assertIn('"$asset_root/gantry/gantry"', block)
+                self.assertIn('"$asset_root/gantry/run-remote"', block)
                 self.assertIn(f'"ELF 64-bit"*{machine}*) ;;', block)
                 self.assertIn('test -x "$tool"', block)
                 self.assertIn("actions/upload-artifact@v4", block)
@@ -533,11 +578,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
             "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle", test
         )
         self.assertIn(
-            "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run", test
-        )
-        self.assertIn(
-            "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote",
-            test,
+            "CLADDING_GANTRY_DIR=$RUNNER_TEMP/linux-tools/gantry", test
         )
         for job in (
             "test",
@@ -582,6 +623,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn(
             "CLADDING_BRIDGE_BIN=$GITHUB_WORKSPACE/helpers/cladding-bridge", upload
         )
+        self.assertIn(
+            "CLADDING_GANTRY_DIR=$GITHUB_WORKSPACE/helpers/gantry", upload
+        )
         release_platforms = re.findall(
             r"(?m)^          - os: ([^\s]+)\n            target: ([^\s]+)\n"
             r"            baffle_arch: ([^\s]+)\n            helper_arch: ([^\s]+)$",
@@ -612,8 +656,10 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
 
         helpers = job_block("build-helpers", RELEASE_TEXT)
-        self.assertIn("-p mcp-run -p cladding-bridge", helpers)
-        self.assertIn('cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/', helpers)
+        self.assertIn('scripts/fetch_gantry.sh "${{ matrix.arch }}" "$RUNNER_TEMP/gantry"', helpers)
+        self.assertIn('cp -a "$RUNNER_TEMP/gantry/." helpers/gantry/', helpers)
+        self.assertIn('cargo build -p cladding-bridge --release --locked', helpers)
+        self.assertIn('cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/cladding-bridge', helpers)
         self.assertIn('name: cladding-linux-helpers-${{ matrix.arch }}', helpers)
         self.assertIn('name: cladding-linux-helpers-${{ matrix.helper_arch }}', upload)
         self.assertIn('x86_64:"ELF 64-bit"*x86-64*) ;;', helpers)
@@ -667,6 +713,20 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertIn(path, package)
         self.assertNotIn("THIRD_PARTY_NOTICES.md", package)
         self.assertNotIn("baffle-Cargo.lock", package)
+
+    def test_release_package_preserves_gantry_documents_and_license(self):
+        upload = job_block("upload-binaries", RELEASE_TEXT)
+        package = upload.split("- name: Package", 1)[1].split(
+            "- name: Upload to release", 1
+        )[0]
+        self.assertIn('helpers/gantry/README.md "$staging/docs/gantry/"', package)
+        self.assertIn('helpers/gantry/docs/reference.md "$staging/docs/gantry/docs/reference.md"', package)
+        self.assertIn('helpers/gantry/LICENSE "$staging/licenses/gantry/LICENSE"', package)
+        self.assertNotIn("crates/mcp-run", package)
+
+    def test_active_helper_workflows_do_not_build_or_package_mcp_run(self):
+        self.assertNotIn("mcp-run", TEXT)
+        self.assertNotIn("mcp-run", RELEASE_TEXT)
 
     def test_baffle_docs_describe_explicit_fetch_and_published_release_assets(self):
         guide = EMBEDDED_BAFFLE_DOC.read_text()

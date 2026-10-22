@@ -136,9 +136,11 @@ cp -R examples/jj/policy/. .cladding/config/fs_sandbox/
 ```
 
 The bundle follows the same router pattern as the default sandbox policies.
-`main.rego` routes by executable, `real_jj.rego` routes by `jj` subcommand, and
-each file under `policy/jj/` allows one `jj` command shape. To add another
-mutation later, add or copy in another command file under `policy/jj/`.
+`decision.rego` adapts the existing boolean `allow` result to Gantry's Direct
+decision. `main.rego` routes by executable, `real_jj.rego` routes by `jj`
+subcommand, and each file under `policy/jj/` allows one `jj` command shape. To
+add another mutation later, add or copy in another command file under
+`policy/jj/`.
 
 Define a `jj` config in `jj-config/config.toml`:
 
