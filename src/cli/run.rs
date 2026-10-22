@@ -194,6 +194,7 @@ pub(super) fn cmd_run(
                 &signals,
             ) {
                 Ok(fake_environment) => run_if_not_cancelled(signals.received(), || {
+                    let cancellation_check = || signals.received();
                     exec::cmd_run_command(
                         &context,
                         config,
@@ -202,6 +203,7 @@ pub(super) fn cmd_run(
                         &fake_environment,
                         args,
                         !config_uses_stdin,
+                        &cancellation_check,
                     )
                 }),
                 Err(error) => Err(error),

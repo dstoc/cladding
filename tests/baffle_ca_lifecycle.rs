@@ -124,6 +124,10 @@ if [ "$1" = "exec" ]; then
     exit 0
   fi
   if [ "$3" = "/opt/tools/bin/baffle" ] && [ "$4" = "create" ]; then
+    if [ -n "${CLADDING_TEST_BAFFLE_CREATE_GATE:-}" ]; then
+      touch "${CLADDING_TEST_BAFFLE_CREATE_GATE}.started"
+      while [ ! -e "${CLADDING_TEST_BAFFLE_CREATE_GATE}.release" ]; do sleep 0.01; done
+    fi
     printf '%s\n' '{"id":"mock-session","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":true,"ca_certificate_pem":null,"credential_seed_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}'
     exit 0
   fi
@@ -1952,6 +1956,79 @@ exit 0
     assert!(
         cancellation_log.contains("rm -f") && cancellation_log.contains("volume rm"),
         "cancellation during readiness must remove runtime containers and volumes"
+    );
+
+    fs::write(&podman_log, "").unwrap();
+    fs::write(&socket_volume_state, "").unwrap();
+    let session_gate = root.join("baffle-session-create-gate");
+    let mut cancelled_session = cli(
+        &root,
+        &bin_dir,
+        &podman_log,
+        &certificate_source,
+        &private_key_source,
+    );
+    cancelled_session
+        .args([
+            "--cladding-dir",
+            project_root.to_str().unwrap(),
+            "run",
+            "--",
+            "cladding-cancelled-session-workload-token",
+        ])
+        .env("CLADDING_TEST_BAFFLE_CREATE_GATE", &session_gate)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let cancelled_session = cancelled_session.spawn().unwrap();
+    let mut cancelled_session = Some(cancelled_session);
+    let session_gate_started = PathBuf::from(format!("{}.started", session_gate.display()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session_gate_started.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !session_gate_started.exists() {
+        let mut child = cancelled_session.take().unwrap();
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        panic!(
+            "run never reached the gated Baffle session creation\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let child = cancelled_session.take().unwrap();
+    // SAFETY: the child is the Cladding process spawned by this test.
+    let signal_result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "send SIGTERM during session creation");
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(128 + libc::SIGTERM));
+    let cancellation_log = read_log(&podman_log);
+    assert!(cancellation_log.contains("/opt/tools/bin/baffle list"));
+    assert!(cancellation_log.contains("/opt/tools/bin/baffle create"));
+    assert!(
+        !cancellation_log.contains("cladding-cancelled-session-workload-token"),
+        "cancellation during session creation must prevent workload launch"
+    );
+    let cancelled_proxy_start = cancellation_log
+        .lines()
+        .find(|line| is_detached_container_run(line))
+        .expect("cancelled session creation starts a proxy container");
+    let cancelled_instance = cancelled_proxy_start
+        .split("--name ")
+        .nth(1)
+        .and_then(|name| name.split_whitespace().next())
+        .and_then(|name| name.strip_suffix("-proxy-instance"))
+        .expect("cancelled proxy name includes the run identity");
+    assert!(
+        !project_root
+            .join("runtime/runs")
+            .join(cancelled_instance)
+            .exists(),
+        "cancellation during session creation must remove the one-off runtime root"
+    );
+    assert!(
+        cancellation_log.contains("rm -f") && cancellation_log.contains("volume rm"),
+        "cancellation during session creation must remove runtime containers and volumes"
     );
 
     fs::remove_dir_all(root).unwrap();

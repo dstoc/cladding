@@ -1670,6 +1670,9 @@ fi
 echo "Baffle policy, HTTPS clients, fake credential substitution/isolation, reload, trust, project-state reuse, CA reuse, and run cleanup passed ($runtime runtime)"
 
 phase="start one-off runtime for failure-trap cleanup check"
+jq '.fake_credential_env = {}' \
+  "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
+mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 (
   cd "$temp_root/workspace"
   export TMPDIR="$temp_root/run-tmp"
