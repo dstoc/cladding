@@ -501,12 +501,53 @@ class BaffleCiAssetsTests(unittest.TestCase):
         validator = GANTRY_RELEASE_VALIDATOR.read_text()
         self.assertIn('test "$(cat "$gantry_dir/VERSION")" = 0.4.8', validator)
         self.assertIn('"$gantry_dir/gantry" --help', validator)
-        self.assertIn('"$gantry_dir/run-remote" --check -- /bin/true', validator)
-        self.assertIn('"$gantry_dir/run-remote" --check -- /bin/false', validator)
+        self.assertIn('"$gantry_dir/run-remote" --check -- printf gantry-smoke-ok', validator)
+        self.assertIn('"$gantry_dir/run-remote" --check -- false', validator)
+        self.assertIn('package sandbox.printf', validator)
+        self.assertIn('package sandbox.env', validator)
+        self.assertIn('--check --keep-env=CLADDING_POLICY_TEST -- printf gantry-smoke-ok', validator)
+        self.assertIn('--keep-env=CLADDING_POLICY_TEST -- env', validator)
         self.assertIn('RUN_REMOTE_SOCKET="$socket_path"', validator)
         self.assertIn('"$gantry_dir/gantry" \\', validator)
         self.assertNotIn('"$gantry_dir/gantry" --version', validator)
         self.assertNotIn('"$gantry_dir/run-remote" --help', validator)
+
+    def test_direct_decision_adapter_routes_command_and_environment_rules(self):
+        decision_paths = [
+            Path(__file__).parents[1] / "config-template/nw_sandbox/decision.rego",
+            Path(__file__).parents[1] / "config-template/fs_sandbox/decision.rego",
+            Path(__file__).parents[1] / "examples/jj/policy/decision.rego",
+        ]
+        decisions = [path.read_text() for path in decision_paths]
+        self.assertTrue(all(decision == decisions[0] for decision in decisions[1:]))
+        for expected in (
+            '"allow": false',
+            '"filesystem": null',
+            '"baffle_session": null',
+            "data.sandbox[input.command].allow",
+            "data.sandbox[input.command].allow_env",
+            "count(object.keys(input.env)) == 0",
+            "count(object.keys(input.env)) > 0",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, decisions[0])
+
+        main_paths = [
+            Path(__file__).parents[1] / "config-template/nw_sandbox/main.rego",
+            Path(__file__).parents[1] / "config-template/fs_sandbox/main.rego",
+            Path(__file__).parents[1] / "examples/jj/policy/main.rego",
+        ]
+        for path in main_paths:
+            with self.subTest(path=path):
+                main = path.read_text()
+                self.assertIn("package sandbox.main", main)
+                self.assertNotIn("default allow", main)
+                self.assertNotIn("data.sandbox[input.command].allow", main)
+
+        topology = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        self.assertIn('.allowed == true and .backend == "direct"', topology)
+        self.assertIn('.allowed == false and .backend == "direct"', topology)
+        self.assertIn(".filesystem == null and .baffle_session == null", topology)
 
     def test_complete_embedded_linux_tools_are_built_once_per_architecture(self):
         cases = {

@@ -43,34 +43,45 @@ description: Propose or modify Rego sandbox command policies for Gantry (PROPOSA
   - `input.env`: forwarded environment map
 - Deny-by-default: `default allow = false`
 - Keep the default `decision.rego` adapter in each sandbox policy directory. It returns `{allow, filesystem: null, baffle_session: null}` for the Direct backend.
-- Keep command-specific `allow` and `allow_env` rules. The `main.rego` router combines them before the adapter returns the structured decision.
+- Keep command-specific `allow` and `allow_env` rules in their command modules. The decision adapter reads them directly.
+- Keep `main.rego` in `package sandbox.main`, but do not add a dynamic `allow` router there. Gantry can report recursion when that router wraps the structured decision.
 
 ## Templates
 
-### Minimal router (`main.rego`)
+### Structured decision adapter (`decision.rego`)
 
-Use only if asked to author or update the router. Keep this `allow` logic separate from the `decision.rego` adapter:
+Use this adapter when asked to author or update the command routing policy:
 
 ```rego
 package sandbox.main
 
-default allow = false
+default decision := {
+    "allow": false,
+    "filesystem": null,
+    "baffle_session": null,
+}
 
-default env_allowed = false
-
-env_allowed if {
+decision := {
+    "allow": true,
+    "filesystem": null,
+    "baffle_session": null,
+} if {
+    data.sandbox[input.command].allow
     count(object.keys(input.env)) == 0
 }
 
-env_allowed if {
+decision := {
+    "allow": true,
+    "filesystem": null,
+    "baffle_session": null,
+} if {
+    data.sandbox[input.command].allow
+    count(object.keys(input.env)) > 0
     data.sandbox[input.command].allow_env
 }
-
-allow if {
-    data.sandbox[input.command].allow
-    env_allowed
-}
 ```
+
+Keep `main.rego` as `package sandbox.main` without an `allow` router. Keep each command's `allow` and `allow_env` rules in its command package.
 
 ### Single command policy
 

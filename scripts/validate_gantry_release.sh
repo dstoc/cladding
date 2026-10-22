@@ -47,11 +47,30 @@ mkdir -m 0700 "$policy_dir"
 cp "$repo_root/config-template/nw_sandbox/decision.rego" "$policy_dir/decision.rego"
 cat > "$policy_dir/main.rego" <<'EOF'
 package sandbox.main
+# Command routing is in decision.rego.
+EOF
+cat > "$policy_dir/printf.rego" <<'EOF'
+package sandbox.printf
 
 default allow = false
+default allow_env = false
 
 allow if {
-  input.command == "/bin/true"
+  input.args == ["gantry-smoke-ok"]
+}
+EOF
+cat > "$policy_dir/env.rego" <<'EOF'
+package sandbox.env
+
+default allow = false
+default allow_env = false
+
+allow if {
+  count(input.args) == 0
+}
+
+allow_env if {
+  input.env.CLADDING_POLICY_TEST == "forwarded"
 }
 EOF
 unset RUN_REMOTE_SERVER
@@ -78,7 +97,7 @@ if [ ! -S "$socket_path" ]; then
 fi
 
 allowed_check=$(RUN_REMOTE_SOCKET="$socket_path" \
-  "$gantry_dir/run-remote" --check -- /bin/true)
+  "$gantry_dir/run-remote" --check -- printf gantry-smoke-ok)
 printf '%s\n' "$allowed_check" | python3 -c '
 import json
 import sys
@@ -89,11 +108,13 @@ assert decision["backend"] == "direct"
 assert decision["filesystem"] is None
 assert decision["baffle_session"] is None
 '
-RUN_REMOTE_SOCKET="$socket_path" "$gantry_dir/run-remote" -- /bin/true
+execution_output=$(RUN_REMOTE_SOCKET="$socket_path" \
+  "$gantry_dir/run-remote" -- printf gantry-smoke-ok)
+test "$execution_output" = gantry-smoke-ok
 
 set +e
 denied_check=$(RUN_REMOTE_SOCKET="$socket_path" \
-  "$gantry_dir/run-remote" --check -- /bin/false)
+  "$gantry_dir/run-remote" --check -- false)
 denied_status=$?
 set -e
 test "$denied_status" -eq 1
@@ -107,3 +128,36 @@ assert decision["backend"] == "direct"
 assert decision["filesystem"] is None
 assert decision["baffle_session"] is None
 '
+
+set +e
+denied_env_check=$(CLADDING_POLICY_TEST=forwarded RUN_REMOTE_SOCKET="$socket_path" \
+  "$gantry_dir/run-remote" --check --keep-env=CLADDING_POLICY_TEST -- printf gantry-smoke-ok)
+denied_env_status=$?
+set -e
+test "$denied_env_status" -eq 1
+printf '%s\n' "$denied_env_check" | python3 -c '
+import json
+import sys
+
+decision = json.load(sys.stdin)
+assert decision["allowed"] is False
+assert decision["backend"] == "direct"
+assert decision["filesystem"] is None
+assert decision["baffle_session"] is None
+'
+
+allowed_env_check=$(CLADDING_POLICY_TEST=forwarded RUN_REMOTE_SOCKET="$socket_path" \
+  "$gantry_dir/run-remote" --check --keep-env=CLADDING_POLICY_TEST -- env)
+printf '%s\n' "$allowed_env_check" | python3 -c '
+import json
+import sys
+
+decision = json.load(sys.stdin)
+assert decision["allowed"] is True
+assert decision["backend"] == "direct"
+assert decision["filesystem"] is None
+assert decision["baffle_session"] is None
+'
+forwarded_env=$(CLADDING_POLICY_TEST=forwarded RUN_REMOTE_SOCKET="$socket_path" \
+  "$gantry_dir/run-remote" --keep-env=CLADDING_POLICY_TEST -- env)
+printf '%s\n' "$forwarded_env" | grep -Fx 'CLADDING_POLICY_TEST=forwarded' >/dev/null
