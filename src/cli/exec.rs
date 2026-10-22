@@ -28,6 +28,7 @@ struct PodmanExec<'a> {
     allow_interactive: bool,
     forward_stdin: bool,
     forward_signals: bool,
+    cancellation_check: Option<&'a dyn Fn() -> Option<i32>>,
 }
 
 pub(super) fn cmd_exec(
@@ -56,8 +57,8 @@ pub(super) fn cmd_exec(
             allow_interactive: true,
             forward_stdin: true,
             forward_signals: false,
+            cancellation_check: None,
         },
-        None,
     )
 }
 
@@ -66,14 +67,11 @@ pub(super) fn cmd_run_command(
     config: &ExecutionConfig,
     runtime_spec: &RuntimeSpec,
     env_vars: &[String],
-    fake_env_vars: &[String],
     args: &[String],
     forward_stdin: bool,
     cancellation_check: &dyn Fn() -> Option<i32>,
 ) -> Result<()> {
     let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
-    let mut effective_env = env_vars.to_vec();
-    effective_env.extend(fake_env_vars.iter().cloned());
     run_podman_exec(
         context,
         config,
@@ -82,13 +80,13 @@ pub(super) fn cmd_run_command(
             command_name: "run",
             mount_target: MountTarget::Agent,
             container_name: &container_name,
-            env_vars: &effective_env,
+            env_vars,
             args,
             allow_interactive: forward_stdin,
             forward_stdin,
             forward_signals: true,
+            cancellation_check: Some(cancellation_check),
         },
-        Some(cancellation_check),
     )
 }
 
@@ -152,7 +150,6 @@ fn run_podman_exec(
     config: &ExecutionConfig,
     runtime_spec: &RuntimeSpec,
     request: PodmanExec<'_>,
-    cancellation_check: Option<&dyn Fn() -> Option<i32>>,
 ) -> Result<()> {
     let PodmanExec {
         command_name,
@@ -163,6 +160,7 @@ fn run_podman_exec(
         allow_interactive,
         forward_stdin,
         forward_signals,
+        cancellation_check,
     } = request;
     if args.is_empty() {
         eprintln!("usage: cladding {command_name} [--env KEY[=VALUE] ...] <command> [args...]");

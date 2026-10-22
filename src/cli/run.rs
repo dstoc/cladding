@@ -195,12 +195,13 @@ pub(super) fn cmd_run(
             ) {
                 Ok(fake_environment) => run_if_not_cancelled(signals.received(), || {
                     let cancellation_check = || signals.received();
+                    let mut effective_env = env_vars.to_vec();
+                    effective_env.extend(fake_environment);
                     exec::cmd_run_command(
                         &context,
                         config,
                         &spec,
-                        env_vars,
-                        &fake_environment,
+                        &effective_env,
                         args,
                         !config_uses_stdin,
                         &cancellation_check,
