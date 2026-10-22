@@ -50,7 +50,7 @@ jobs:
             *) echo "Baffle is not the expected Linux x86_64 executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
-          "$RUNNER_TEMP/baffle/baffle" --version
+          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"
       - name: Assemble and verify embedded Linux tools
         run: |
           set -euo pipefail
@@ -248,7 +248,7 @@ jobs:
             *) echo "Baffle is not the expected Linux aarch64 executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
-          "$RUNNER_TEMP/baffle/baffle" --version
+          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"
       - name: Assemble and verify embedded Linux tools
         run: |
           set -euo pipefail

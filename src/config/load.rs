@@ -64,6 +64,8 @@ pub fn load_cladding_config_v2_from_str(config_path: &Path, raw: &str) -> Result
         ));
     }
 
+    let fake_credential_env = parse_fake_credential_env(document.fake_credential_env, config_path)?;
+
     let agent = parse_agent(document.agent, &name, config_path)?;
     let nw_sandbox = document
         .nw_sandbox
@@ -77,6 +79,7 @@ pub fn load_cladding_config_v2_from_str(config_path: &Path, raw: &str) -> Result
     let execution_config = ExecutionConfig {
         name,
         use_runsc: document.use_runsc,
+        fake_credential_env,
         agent,
         nw_sandbox,
         fs_sandbox,
@@ -97,6 +100,33 @@ pub fn load_cladding_config_v2_from_str(config_path: &Path, raw: &str) -> Result
         mounts,
         ..execution_config
     })
+}
+
+fn parse_fake_credential_env(
+    mappings: std::collections::BTreeMap<String, String>,
+    config_path: &Path,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    for (environment_name, credential_name) in &mappings {
+        if !is_environment_variable_name(environment_name) {
+            return Err(invalid_config(
+                config_path,
+                "fake_credential_env keys must be valid environment variable names",
+            ));
+        }
+        if !cladding_fake_credentials::is_credential_identifier(credential_name) {
+            return Err(invalid_config(
+                config_path,
+                "fake_credential_env values must be valid Baffle credential identifiers",
+            ));
+        }
+    }
+    Ok(mappings)
+}
+
+fn is_environment_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn config_deserialization_error(
@@ -442,6 +472,7 @@ mod tests {
         assert!(config.fs_sandbox_enabled());
         assert_eq!(config.fs_sandbox_image(), "fs:image");
         assert!(config.mounts.is_empty());
+        assert!(config.fake_credential_env.is_empty());
         assert_eq!(config.proxy_image(), DEFAULT_PROXY_IMAGE);
         assert_eq!(config.agent_session_config(), DEFAULT_AGENT_SESSION_CONFIG);
         assert_eq!(
@@ -453,6 +484,45 @@ mod tests {
         assert!(config.agent.init);
         assert!(config.nw_sandbox.as_ref().unwrap().init);
         assert!(config.fs_sandbox.as_ref().unwrap().init);
+    }
+
+    #[test]
+    fn load_cladding_config_validates_fake_mapping_syntax_without_baffle_policy_files() {
+        let temp = create_temp_dir("fake-credential-env");
+        assert!(!temp.join("config/proxy/daemon.toml").exists());
+        fs::write(
+            temp.join("cladding.json"),
+            r#"{
+  "name": "demo",
+  "agent": {},
+  "fake_credential_env": {
+    "GITHUB_TOKEN": "github-api",
+    "CUSTOM_GIT_TOKEN": "github-api"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cladding_config_v2(&temp).unwrap();
+        assert_eq!(config.fake_credential_env.len(), 2);
+        assert_eq!(config.fake_credential_env["GITHUB_TOKEN"], "github-api");
+        assert_eq!(config.fake_credential_env["CUSTOM_GIT_TOKEN"], "github-api");
+
+        for mapping in [
+            r#""INVALID-NAME":"github-api""#,
+            r#""GITHUB_TOKEN":"not..valid""#,
+        ] {
+            fs::write(
+                temp.join("cladding.json"),
+                format!(r#"{{"name":"demo","agent":{{}},"fake_credential_env":{{{mapping}}}}}"#),
+            )
+            .unwrap();
+            assert!(
+                load_cladding_config_v2(&temp).is_err(),
+                "accepted invalid mapping {mapping}"
+            );
+        }
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

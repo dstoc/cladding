@@ -22,6 +22,8 @@ BAFFLE_CONFIG_VALIDATOR = Path(__file__).parents[1] / "scripts/validate_baffle_c
 BAFFLE_RUNTIME_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_baffle_runtime.sh"
 )
+PROXY_STARTUP_SCRIPT = Path(__file__).parents[1] / "scripts/proxy_startup.sh"
+RUN_IMPLEMENTATION = Path(__file__).parents[1] / "src/cli/run.rs"
 RUNTIME_TOPOLOGY_VALIDATOR = (
     Path(__file__).parents[1] / "scripts/validate_runtime_topology.sh"
 )
@@ -108,7 +110,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('podman rm "$origin_name"', validator)
         self.assertIn('podman rm "$run_origin_name"', validator)
         self.assertEqual(validator.count('stop_origin_container "$origin_name"'), 2)
-        self.assertEqual(validator.count('stop_origin_container "$run_origin_name"'), 1)
+        self.assertEqual(validator.count('stop_origin_container "$run_origin_name"'), 2)
         self.assertIn('cleanup_origin_container "$origin_name"', validator)
         self.assertIn('cleanup_origin_container "$run_origin_name"', validator)
         self.assertNotIn('podman rm -f "$origin_name"', validator)
@@ -124,8 +126,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
         self.assertLess(
             cleanup.index('cleanup_origin_container "$run_origin_name"'),
-            cleanup.index('touch "$temp_root/workspace/.run-origin-ready"'),
+            cleanup.index('touch "$temp_root/workspace/.run-abort"'),
         )
+        self.assertIn('"$temp_root/workspace/.cross-run-abort"', cleanup)
         self.assertIn('"$temp_root/workspace/.failure-run-finish"', cleanup)
         self.assertIn('wait_for_process_exit "$run_pid" 600', cleanup)
         self.assertIn('kill -KILL "$run_pid"', cleanup)
@@ -146,6 +149,30 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn(".failure-run-finish", probe)
         self.assertNotIn("while :; do sleep", probe)
         self.assertNotIn('wait "$run_child"', validator)
+        self.assertIn("/workspace/.run-command-ready", validator)
+        self.assertIn("/workspace/.cross-run-command-ready", validator)
+
+    def test_baffle_runtime_proves_fake_credential_substitution_and_session_isolation(self):
+        validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
+        startup = PROXY_STARTUP_SCRIPT.read_text()
+        run = RUN_IMPLEMENTATION.read_text()
+
+        self.assertIn("write_agent_substitution_policy() {", validator)
+        self.assertIn("[credentials.overrides.$token]", validator)
+        self.assertIn('mode = "substitute"', validator)
+        self.assertIn('jq \'.fake_credential_env = {"FAKE_RUN_TOKEN":"run-token"}\'', validator)
+        self.assertIn('jq -e \'.authorization == "old"\'', validator)
+        self.assertIn('jq -e \'.authorization == "new"\'', validator)
+        self.assertIn('jq -e \'.authorization == "client"\'', validator)
+        self.assertIn('test "$FAKE_RUN_TOKEN" != "$CROSS_SESSION_FAKE"', validator)
+        self.assertIn("fake credential substitution/isolation", validator)
+        self.assertIn('DEFER_AGENT_SESSION=${CLADDING_DEFER_AGENT_SESSION:-false}', startup)
+        self.assertIn('"$BAFFLE_BIN" create "$session_file" >/dev/null', startup)
+        self.assertIn("create_agent_session_and_fake_environment(", run)
+        self.assertIn('"create",\n            session_config,', run)
+        self.assertIn("credential_seed_base64url", run)
+        self.assertIn("wait_for_baffle_ready", run)
+        self.assertIn("run_if_not_cancelled(signals.received()", run)
 
     def test_baffle_config_validator_prepares_managed_socket_volume_permissions(self):
         validator = BAFFLE_CONFIG_VALIDATOR.read_text()
@@ -343,7 +370,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
     def test_baffle_runtime_uses_project_run_roots_even_with_tmpdir_override(self):
         validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
-        self.assertEqual(validator.count('find "$project_root/runtime/runs"'), 2)
+        self.assertEqual(validator.count('find "$project_root/runtime/runs"'), 3)
         self.assertIn('export TMPDIR="$temp_root/run-tmp"', validator)
         self.assertIn('stat_mode "$project_root/runtime/runs"', validator)
         self.assertNotIn('find "$temp_root/run-tmp"', validator)
@@ -413,14 +440,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
     def test_local_build_requires_pinned_verified_baffle_binary(self):
         build = BUILD_SCRIPT.read_text()
-        self.assertIn('const BAFFLE_VERSION: &str = "1.1.1";', build)
+        self.assertIn('const BAFFLE_VERSION: &str = "2.2.0";', build)
         self.assertIn('env::var_os("CLADDING_BAFFLE_BIN")', build)
         self.assertIn("scripts/fetch_baffle.sh", build)
         self.assertNotIn('.arg("install")', build)
         self.assertNotIn("baffle-proxy", build)
 
         fetch = BAFFLE_FETCH_SCRIPT.read_text()
-        self.assertIn("BAFFLE_VERSION=1.1.1", fetch)
+        self.assertIn("BAFFLE_VERSION=2.2.0", fetch)
         self.assertIn('archive="baffle-proxy-v${BAFFLE_VERSION}-${arch}-unknown-linux-gnu.tar.gz"', fetch)
         self.assertIn('"$release_url/SHA256SUMS"', fetch)
         self.assertIn('if [ "$actual" != "$expected" ]', fetch)
@@ -593,7 +620,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('aarch64:"ELF 64-bit"*aarch64*) ;;', helpers)
 
         download = upload.split(
-            "- name: Download and verify pinned Baffle v1.1.1 release", 1
+            "- name: Download and verify pinned Baffle v2.2.0 release", 1
         )[1].split("- uses: dtolnay/rust-toolchain@stable", 1)[0]
         self.assertIn(
             'scripts/fetch_baffle.sh "${{ matrix.baffle_arch }}" "$RUNNER_TEMP/baffle"',
@@ -644,7 +671,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
     def test_baffle_docs_describe_explicit_fetch_and_published_release_assets(self):
         guide = EMBEDDED_BAFFLE_DOC.read_text()
         prd = BAFFLE_PRD.read_text()
-        self.assertIn("pinned Baffle v1.1.1 Linux archive", guide)
+        self.assertIn("pinned Baffle v2.2.0 Linux archive", guide)
         self.assertIn("`SHA256SUMS` before extraction", guide)
         self.assertIn("requires `CLADDING_BAFFLE_BIN`", guide)
         self.assertIn("scripts/fetch_baffle.sh", guide)
@@ -652,11 +679,11 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("under `licenses/baffle/`", guide)
         self.assertNotIn("Do not use Baffle's GitHub release assets", guide)
         self.assertIn(
-            "Do not download GitHub release assets for this source-build path.",
+            "For CI and Cladding release builds, set `CLADDING_BAFFLE_BIN`",
             prd,
         )
         self.assertIn(
-            "The workflows use the explicit v1.1.1 release archives", prd
+            "The workflows use the explicit v2.2.0 release archives", prd
         )
 
     def test_required_test_path_waits_only_for_x86_64_asset_prep(self):

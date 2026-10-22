@@ -125,5 +125,6 @@ See the [current runtime summary](docs/features/current-runtime-summary.md) for 
 - [Mounts and workspace access](docs/user-guide/mounts.md)
 - [Runtime commands and configuration selection](docs/user-guide/runtime-and-commands.md)
 - [Custom container images](docs/user-guide/custom-images.md)
+- [Fake credentials for `cladding run`](docs/user-guide/fake-credentials.md)
 - [Proxy policy, CA, and credentials](docs/features/proxy/summary.md)
 - [Baffle session-file migration](docs/features/baffle-integration/embedded-baffle.md#session-file-migration)

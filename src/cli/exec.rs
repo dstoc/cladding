@@ -16,7 +16,7 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::thread;
 
 struct PodmanExec<'a> {
@@ -28,6 +28,7 @@ struct PodmanExec<'a> {
     allow_interactive: bool,
     forward_stdin: bool,
     forward_signals: bool,
+    cancellation_check: Option<&'a dyn Fn() -> Option<i32>>,
 }
 
 pub(super) fn cmd_exec(
@@ -56,6 +57,7 @@ pub(super) fn cmd_exec(
             allow_interactive: true,
             forward_stdin: true,
             forward_signals: false,
+            cancellation_check: None,
         },
     )
 }
@@ -67,6 +69,7 @@ pub(super) fn cmd_run_command(
     env_vars: &[String],
     args: &[String],
     forward_stdin: bool,
+    cancellation_check: &dyn Fn() -> Option<i32>,
 ) -> Result<()> {
     let container_name = runtime_container_name(&project_component_name(&config.name, "agent"));
     run_podman_exec(
@@ -82,6 +85,7 @@ pub(super) fn cmd_run_command(
             allow_interactive: forward_stdin,
             forward_stdin,
             forward_signals: true,
+            cancellation_check: Some(cancellation_check),
         },
     )
 }
@@ -156,6 +160,7 @@ fn run_podman_exec(
         allow_interactive,
         forward_stdin,
         forward_signals,
+        cancellation_check,
     } = request;
     if args.is_empty() {
         eprintln!("usage: cladding {command_name} [--env KEY[=VALUE] ...] <command> [args...]");
@@ -238,9 +243,7 @@ fn run_podman_exec(
     }
 
     let command_started = std::time::Instant::now();
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to run podman exec for {command_name}"))?;
+    let mut child = spawn_podman_exec(&mut cmd, command_name, cancellation_check)?;
 
     let mut signal_handle = None;
     let mut signal_thread = None;
@@ -302,6 +305,23 @@ fn run_podman_exec(
     }
 }
 
+fn spawn_podman_exec(
+    command: &mut Command,
+    command_name: &str,
+    cancellation_check: Option<&dyn Fn() -> Option<i32>>,
+) -> Result<Child> {
+    if let Some(signal) = cancellation_check.and_then(|check| check()) {
+        return Err(Error::CommandFailed {
+            context: "cladding run",
+            code: 128 + signal,
+        });
+    }
+
+    Ok(command
+        .spawn()
+        .with_context(|| format!("failed to run podman exec for {command_name}"))?)
+}
+
 pub(super) fn cmd_reload_proxy(context: &Context) -> Result<()> {
     let config = context.load_config()?;
 
@@ -329,8 +349,12 @@ fn project_component_name(project_name: &str, component: &str) -> String {
 }
 
 #[cfg(test)]
-mod reload_proxy_tests {
-    use super::reload_proxy_args;
+mod exec_tests {
+    use super::{reload_proxy_args, spawn_podman_exec};
+    use signal_hook::consts::signal::SIGTERM;
+    use std::fs;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn reload_proxy_targets_all_baffle_sessions_in_the_proxy_container() {
@@ -344,6 +368,30 @@ mod reload_proxy_tests {
                 "--all"
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_checks_cancellation_immediately_before_spawning_the_workload() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let marker = std::env::temp_dir().join(format!(
+            "cladding-cancelled-workload-{}-{unique}",
+            std::process::id()
+        ));
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "touch \"$1\"", "cancelled-workload"])
+            .arg(&marker);
+        let cancelled = || Some(SIGTERM);
+
+        let result = spawn_podman_exec(&mut command, "run", Some(&cancelled));
+
+        assert!(result.is_err());
+        assert!(!marker.exists(), "the cancelled workload must not start");
+        let _ = fs::remove_file(marker);
     }
 }
 
@@ -935,6 +983,7 @@ mod tests {
         let config = ExecutionConfig {
             name: "demo".to_string(),
             use_runsc: false,
+            fake_credential_env: std::collections::BTreeMap::new(),
             agent: ExecutionComponentConfig {
                 enabled: true,
                 init: true,

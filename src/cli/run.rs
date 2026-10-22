@@ -3,16 +3,24 @@ use super::{exec, lifecycle};
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
 use cladding::identity::invoking_uid;
+use serde::Deserialize;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+const BAFFLE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const BAFFLE_READY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+const BAFFLE_SESSION_CREATE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_BAFFLE_OUTPUT_BYTES: usize = 64 * 1024;
 
 pub(super) fn cmd_run(
     source_context: &Context,
@@ -34,7 +42,6 @@ pub(super) fn cmd_run(
         |name| std::env::var_os(name),
         read_run_secret_file,
     )?;
-
     let instance_name = format!("cladding-run-{}", generate_uuid_v4()?);
     if verbose {
         println!("starting one-off instance: {instance_name}");
@@ -46,6 +53,7 @@ pub(super) fn cmd_run(
         ))
     })?;
     config.name = instance_name.clone();
+    let fake_mappings = configured_fake_credential_mappings(&config.fake_credential_env, env_vars);
 
     cladding::podman::podman_required("podman (required for cladding run)").map_err(|err| {
         Error::message(format!(
@@ -101,11 +109,12 @@ pub(super) fn cmd_run(
             )));
         }
     };
-    let context = source_context.with_resolved_config(runtime_root.clone(), config);
-    let context = match secret_mounts {
+    let mut context = source_context.with_resolved_config(runtime_root.clone(), config);
+    context = match secret_mounts {
         Some(secret_mounts) => context.with_run_secret_mounts(secret_mounts),
         None => context,
     };
+    context = context.with_deferred_agent_session_creation();
     let config = context
         .resolved_config()
         .expect("one-off run context stores its resolved configuration");
@@ -172,9 +181,28 @@ pub(super) fn cmd_run(
         let _command = cladding::runtime_metrics::phase("user command");
         match signals.received() {
             Some(signal) => Err(signal_status_error(signal)),
-            None => {
-                exec::cmd_run_command(&context, config, &spec, env_vars, args, !config_uses_stdin)
-            }
+            None => match create_agent_session_and_fake_environment(
+                &spec.proxy.container.name,
+                config.agent_session_config(),
+                &fake_mappings,
+                &signals,
+            ) {
+                Ok(fake_environment) => run_if_not_cancelled(signals.received(), || {
+                    let cancellation_check = || signals.received();
+                    let mut effective_env = env_vars.to_vec();
+                    effective_env.extend(fake_environment);
+                    exec::cmd_run_command(
+                        &context,
+                        config,
+                        &spec,
+                        &effective_env,
+                        args,
+                        !config_uses_stdin,
+                        &cancellation_check,
+                    )
+                }),
+                Err(error) => Err(error),
+            },
         }
     };
     let cleanup_error = {
@@ -196,6 +224,264 @@ pub(super) fn cmd_run(
         cleanup_error,
         signal,
     )
+}
+
+fn configured_fake_credential_mappings(
+    configured: &BTreeMap<String, String>,
+    explicit_environment: &[String],
+) -> BTreeMap<String, String> {
+    let mut mappings = configured.clone();
+    for value in explicit_environment {
+        let environment_name = value.split_once('=').map(|(name, _)| name).unwrap_or(value);
+        mappings.remove(environment_name);
+    }
+    mappings
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatedAgentSession {
+    id: String,
+    socket: String,
+    persistent: bool,
+    #[serde(default)]
+    ca_certificate_pem: Option<String>,
+    credential_seed_base64url: Option<String>,
+}
+
+struct CapturedProcessOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+}
+
+fn create_agent_session_and_fake_environment(
+    proxy_container: &str,
+    session_config: &str,
+    mappings: &BTreeMap<String, String>,
+    signals: &SignalWatcher,
+) -> Result<Vec<String>> {
+    wait_for_baffle_ready(proxy_container, signals)?;
+    if let Some(signal) = signals.received() {
+        return Err(signal_status_error(signal));
+    }
+
+    let output = run_podman_exec_capture(
+        &[
+            "exec",
+            proxy_container,
+            "/opt/tools/bin/baffle",
+            "create",
+            session_config,
+        ],
+        BAFFLE_SESSION_CREATE_TIMEOUT,
+        signals,
+        "Baffle agent session creation",
+    )?;
+    if !output.status.success() {
+        return Err(Error::message("Baffle failed to create the agent session"));
+    }
+    let session = parse_created_agent_session(&output.stdout)?;
+    let _ = session.ca_certificate_pem;
+    let seed = session
+        .credential_seed_base64url
+        .as_deref()
+        .ok_or_else(|| Error::message("Baffle did not return an agent session credential seed"))?;
+
+    derive_with_cancellation_check(
+        || signals.received(),
+        || {
+            let values = cladding_fake_credentials::derive_environment(seed, mappings)
+                .map_err(Error::message)?;
+            Ok(values
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect())
+        },
+    )
+}
+
+fn parse_created_agent_session(output: &[u8]) -> Result<CreatedAgentSession> {
+    let session: CreatedAgentSession = serde_json::from_slice(output)
+        .map_err(|_| Error::message("Baffle returned an invalid agent session response"))?;
+    if session.id.trim().is_empty() || session.id.chars().any(char::is_control) {
+        return Err(Error::message(
+            "Baffle returned an unexpected agent session identifier",
+        ));
+    }
+    if session.socket != "/run/cladding/proxy/agent/proxy.sock" {
+        return Err(Error::message(
+            "Baffle returned an unexpected agent session socket",
+        ));
+    }
+    if !session.persistent {
+        return Err(Error::message(
+            "Baffle returned a non-persistent agent session",
+        ));
+    }
+    let seed = session
+        .credential_seed_base64url
+        .as_deref()
+        .ok_or_else(|| Error::message("Baffle did not return an agent session credential seed"))?;
+    cladding_fake_credentials::validate_seed(seed).map_err(Error::message)?;
+    Ok(session)
+}
+
+fn wait_for_baffle_ready(proxy_container: &str, signals: &SignalWatcher) -> Result<()> {
+    let deadline = Instant::now() + BAFFLE_READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(signal) = signals.received() {
+            return Err(signal_status_error(signal));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let attempt_timeout = remaining.min(BAFFLE_READY_ATTEMPT_TIMEOUT);
+        let readiness = run_podman_exec_capture(
+            &["exec", proxy_container, "/opt/tools/bin/baffle", "list"],
+            attempt_timeout,
+            signals,
+            "Baffle readiness check",
+        );
+        if let Ok(output) = readiness {
+            if output.status.success() {
+                return Ok(());
+            }
+        } else if let Some(signal) = signals.received() {
+            return Err(signal_status_error(signal));
+        }
+
+        let sleep_until = (Instant::now() + Duration::from_millis(50)).min(deadline);
+        while Instant::now() < sleep_until {
+            if let Some(signal) = signals.received() {
+                return Err(signal_status_error(signal));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    if let Some(signal) = signals.received() {
+        return Err(signal_status_error(signal));
+    }
+    Err(Error::message(
+        "timed out waiting for the Baffle daemon to become ready",
+    ))
+}
+
+fn run_podman_exec_capture(
+    args: &[&str],
+    timeout: Duration,
+    signals: &SignalWatcher,
+    operation: &str,
+) -> Result<CapturedProcessOutput> {
+    let mut command = Command::new("podman");
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    capture_command_output(&mut command, timeout, || signals.received(), operation)
+}
+
+fn capture_command_output(
+    command: &mut Command,
+    timeout: Duration,
+    mut cancelled: impl FnMut() -> Option<i32>,
+    operation: &str,
+) -> Result<CapturedProcessOutput> {
+    let mut child = command
+        .spawn()
+        .map_err(|_| Error::message(format!("failed to start {operation}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .expect("captured command stdout is piped");
+    let reader = thread::spawn(move || read_capped_output(stdout));
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(signal) = cancelled() {
+            stop_process_group(&mut child);
+            let _ = reader.join();
+            return Err(signal_status_error(signal));
+        }
+        if Instant::now() >= deadline {
+            stop_process_group(&mut child);
+            let _ = reader.join();
+            return Err(Error::message(format!("{operation} timed out")));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let (stdout, overflowed) = reader
+                    .join()
+                    .map_err(|_| Error::message(format!("failed to read {operation} output")))?
+                    .map_err(|_| Error::message(format!("failed to read {operation} output")))?;
+                if overflowed {
+                    return Err(Error::message(format!(
+                        "{operation} returned an oversized response"
+                    )));
+                }
+                return Ok(CapturedProcessOutput { status, stdout });
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                stop_process_group(&mut child);
+                let _ = reader.join();
+                return Err(Error::message(format!("failed to wait for {operation}")));
+            }
+        }
+    }
+}
+
+fn read_capped_output(mut reader: impl std::io::Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut overflowed = false;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok((output, overflowed));
+        }
+        let remaining = MAX_BAFFLE_OUTPUT_BYTES.saturating_sub(output.len());
+        let keep = remaining.min(read);
+        output.extend_from_slice(&buffer[..keep]);
+        overflowed |= keep < read;
+    }
+}
+
+fn stop_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as libc::pid_t);
+        // SAFETY: this signals the private process group created for this child.
+        unsafe {
+            libc::kill(process_group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn run_if_not_cancelled<T>(signal: Option<i32>, launch: impl FnOnce() -> Result<T>) -> Result<T> {
+    match signal {
+        Some(signal) => Err(signal_status_error(signal)),
+        None => launch(),
+    }
+}
+
+fn derive_with_cancellation_check<T>(
+    mut cancelled: impl FnMut() -> Option<i32>,
+    derive: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Some(signal) = cancelled() {
+        return Err(signal_status_error(signal));
+    }
+    let values = derive()?;
+    if let Some(signal) = cancelled() {
+        return Err(signal_status_error(signal));
+    }
+    Ok(values)
 }
 
 enum RunSecretSource {
@@ -809,6 +1095,119 @@ mod tests {
             uuid.chars()
                 .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch) || ch == '-')
         );
+    }
+
+    #[test]
+    fn explicit_environment_values_override_configured_fake_mappings() {
+        let configured = BTreeMap::from([
+            ("GITHUB_TOKEN".to_string(), "github-api".to_string()),
+            ("GH_TOKEN".to_string(), "github-api".to_string()),
+            ("OPENAI_API_KEY".to_string(), "openai-api".to_string()),
+        ]);
+        let explicit = vec!["GITHUB_TOKEN=ordinary-value".to_string()];
+
+        let effective = configured_fake_credential_mappings(&configured, &explicit);
+
+        assert_eq!(
+            effective,
+            BTreeMap::from([
+                ("GH_TOKEN".to_string(), "github-api".to_string()),
+                ("OPENAI_API_KEY".to_string(), "openai-api".to_string()),
+            ])
+        );
+        assert_eq!(explicit, ["GITHUB_TOKEN=ordinary-value"]);
+    }
+
+    #[test]
+    fn explicit_environment_values_without_fake_mappings_remain_unchanged() {
+        let explicit = vec!["TOKEN=ordinary-value".to_string()];
+        assert!(configured_fake_credential_mappings(&BTreeMap::new(), &explicit).is_empty());
+        assert_eq!(explicit, ["TOKEN=ordinary-value"]);
+    }
+
+    #[test]
+    fn baffle_session_creation_response_requires_valid_expected_details_and_seed() {
+        let valid = br#"{
+            "id": "session-123",
+            "socket": "/run/cladding/proxy/agent/proxy.sock",
+            "persistent": true,
+            "ca_certificate_pem": null,
+            "credential_seed_base64url": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }"#;
+        let parsed = parse_created_agent_session(valid).unwrap();
+        assert_eq!(parsed.id, "session-123");
+
+        for invalid in [
+            &b"not-json"[..],
+            br#"{"id":"session-123","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":true}"#,
+            br#"{"id":"session-123","socket":"/wrong.sock","persistent":true,"credential_seed_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+            br#"{"id":"session-123","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":false,"credential_seed_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+            br#"{"id":"session-123","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":true,"credential_seed_base64url":"bad-seed"}"#,
+            br#"{"id":"session-123","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":true,"credential_seed_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","unexpected":true}"#,
+        ] {
+            assert!(parse_created_agent_session(invalid).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_during_session_creation_prevents_workload_launch() {
+        let temp = std::env::temp_dir().join(format!(
+            "cladding-run-cancelled-session-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let marker = temp.join("workload-launched");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 5; touch \"$1\"", "cancelled-session-fixture"])
+            .arg(&marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+
+        let started = Instant::now();
+        let result = capture_command_output(
+            &mut command,
+            Duration::from_secs(5),
+            || (started.elapsed() >= Duration::from_millis(100)).then_some(SIGTERM),
+            "session creation fixture",
+        );
+        assert!(result.is_err());
+        let launch_result = run_if_not_cancelled(Some(SIGTERM), || {
+            fs::write(&marker, b"launched")
+                .map_err(|error| Error::message(format!("fixture failed: {error}")))
+        });
+        assert!(launch_result.is_err());
+        assert!(!marker.exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cancellation_during_fake_derivation_discards_values_before_workload_launch() {
+        let signal = AtomicI32::new(0);
+        let values = derive_with_cancellation_check(
+            || match signal.load(Ordering::SeqCst) {
+                0 => None,
+                signal => Some(signal),
+            },
+            || {
+                signal.store(SIGTERM, Ordering::SeqCst);
+                Ok(vec!["TOKEN=fake-value".to_string()])
+            },
+        );
+        assert!(values.is_err());
+
+        let workload_launched = std::sync::atomic::AtomicBool::new(false);
+        let launch = run_if_not_cancelled(Some(signal.load(Ordering::SeqCst)), || {
+            workload_launched.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(launch.is_err());
+        assert!(!workload_launched.load(Ordering::SeqCst));
     }
 
     #[test]

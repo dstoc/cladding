@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const BAFFLE_VERSION: &str = "1.1.1";
+const BAFFLE_VERSION: &str = "2.2.0";
 
 fn main() {
     ensure_supported_platforms();
@@ -388,6 +388,10 @@ fn podman_build_command(
         .arg("--locked")
         .arg("--target")
         .arg(target)
+        .arg("-p")
+        .arg("mcp-run")
+        .arg("-p")
+        .arg("cladding-bridge")
         .arg("--bin")
         .arg("mcp-run")
         .arg("--bin")
@@ -537,6 +541,13 @@ mod tests {
             assert!(
                 args.iter().any(|arg| arg == expected),
                 "missing {expected:?} in {args:?}"
+            );
+        }
+        for package in ["mcp-run", "cladding-bridge"] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-p" && pair[1] == package),
+                "missing package {package:?} in {args:?}"
             );
         }
     }

@@ -1,0 +1,11 @@
+[package]
+name = "cladding-fake-credentials"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[dependencies]
+base64 = "0.23.1"
+baffle-client = "=2.2.0"
+ring = "0.17.14"

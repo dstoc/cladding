@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-BAFFLE_VERSION=1.1.1
+BAFFLE_VERSION=2.2.0
 
 usage() {
   echo "usage: $0 <x86_64|aarch64> <new-destination-directory>" >&2

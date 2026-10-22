@@ -96,7 +96,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Download and verify pinned Baffle v1.1.1 release
+      - name: Download and verify pinned Baffle v2.2.0 release
         run: |
           set -euo pipefail
           scripts/fetch_baffle.sh "${{ matrix.baffle_arch }}" "$RUNNER_TEMP/baffle"
@@ -112,6 +112,7 @@ jobs:
             *) echo "Baffle is not the expected Linux ${{ matrix.baffle_arch }} executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
+          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

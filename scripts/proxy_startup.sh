@@ -10,6 +10,7 @@ SOCKET_DIR=${BAFFLE_SOCKET_DIR:-/run/cladding/proxy}
 NW_SANDBOX_ENABLED=${CLADDING_NW_SANDBOX_ENABLED:-false}
 AGENT_SESSION_CONFIG=${CLADDING_AGENT_SESSION_CONFIG:-agent.toml}
 NW_SANDBOX_SESSION_CONFIG=${CLADDING_NW_SANDBOX_SESSION_CONFIG:-nw-sandbox.toml}
+DEFER_AGENT_SESSION=${CLADDING_DEFER_AGENT_SESSION:-false}
 daemon_pid=
 control_socket_dir=
 private_control_dir=
@@ -85,6 +86,10 @@ case "$NW_SANDBOX_ENABLED" in
     true|false) ;;
     *) fail "CLADDING_NW_SANDBOX_ENABLED must be true or false" ;;
 esac
+case "$DEFER_AGENT_SESSION" in
+    true|false) ;;
+    *) fail "CLADDING_DEFER_AGENT_SESSION must be true or false" ;;
+esac
 validate_session_config_name() {
     session_config_name=$1
     case "$session_config_name" in
@@ -97,7 +102,6 @@ validate_session_config_name() {
 if [ ! -x "$BAFFLE_BIN" ]; then
     fail "Baffle executable is missing or not executable: $BAFFLE_BIN"
 fi
-
 require_file "$CONFIG_DIR/daemon.toml"
 validate_session_config_name "$AGENT_SESSION_CONFIG"
 validate_session_config_name "$NW_SANDBOX_SESSION_CONFIG"
@@ -359,11 +363,20 @@ create_session() {
         fi
     fi
 
+    if [ "$component" = agent ] && [ "$DEFER_AGENT_SESSION" = true ]; then
+        log "deferring agent session creation to Cladding"
+        return 0
+    fi
+
     log "creating persistent session from $session_file"
-    if "$BAFFLE_BIN" create "$session_file"; then
+    if "$BAFFLE_BIN" create "$session_file" >/dev/null; then
         log "created persistent session from $session_file"
+        return 0
     else
         status=$?
+    fi
+
+    if [ "$status" -ne 0 ]; then
         log "session socket bind context: uid=$proxy_uid socket_dir=$baffle_socket_dir"
         grep '^socket_dir = ' "$runtime_config" >&2 || true
         for socket_path in "$private_control_dir" "$baffle_socket_dir" \

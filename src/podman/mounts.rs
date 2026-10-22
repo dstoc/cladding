@@ -163,6 +163,7 @@ mod tests {
             let config = ExecutionConfig {
                 name: name.to_string(),
                 use_runsc: false,
+                fake_credential_env: std::collections::BTreeMap::new(),
                 agent: ExecutionComponentConfig {
                     enabled: true,
                     init: true,

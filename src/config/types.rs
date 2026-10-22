@@ -34,6 +34,7 @@ pub struct ExecutionProxyConfig {
 pub struct ExecutionConfig {
     pub name: String,
     pub use_runsc: bool,
+    pub fake_credential_env: BTreeMap<String, String>,
     pub agent: ExecutionComponentConfig,
     pub nw_sandbox: Option<ExecutionComponentConfig>,
     pub fs_sandbox: Option<ExecutionComponentConfig>,

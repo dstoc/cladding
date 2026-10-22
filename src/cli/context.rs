@@ -17,6 +17,7 @@ pub(super) struct Context {
     pub(super) runtime_root: PathBuf,
     config_source: ConfigSource,
     run_secret_mounts: Option<RunSecretMounts>,
+    defer_agent_session_creation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ impl Context {
             workspace_root,
             config_source,
             run_secret_mounts: None,
+            defer_agent_session_creation: false,
         }
     }
 
@@ -95,6 +97,7 @@ impl Context {
             runtime_root,
             config_source: ConfigSource::Resolved(Arc::new(config)),
             run_secret_mounts: self.run_secret_mounts.clone(),
+            defer_agent_session_creation: self.defer_agent_session_creation,
         }
     }
 
@@ -107,6 +110,11 @@ impl Context {
 
     pub(super) fn with_run_secret_mounts(mut self, mounts: RunSecretMounts) -> Self {
         self.run_secret_mounts = Some(mounts);
+        self
+    }
+
+    pub(super) fn with_deferred_agent_session_creation(mut self) -> Self {
+        self.defer_agent_session_creation = true;
         self
     }
 
@@ -134,6 +142,13 @@ impl Context {
                         },
                     }),
             );
+        }
+        if self.defer_agent_session_creation {
+            let proxy = &mut spec.proxy.container;
+            proxy.env.push(cladding::runtime::RuntimeEnvVar {
+                name: "CLADDING_DEFER_AGENT_SESSION".to_string(),
+                value: "true".to_string(),
+            });
         }
         Ok(spec)
     }
@@ -334,6 +349,44 @@ mod tests {
         assert_eq!(context.project_root, runtime_dir);
         assert_eq!(context.workspace_root, workspace_dir);
         assert_eq!(config.name, "custom");
+    }
+
+    #[test]
+    fn run_defers_agent_session_creation_in_the_proxy_only() {
+        let temp = create_temp_dir("deferred-agent-session-context");
+        let project_root = temp.join(".cladding");
+        fs::create_dir_all(&project_root).unwrap();
+        let config_path = temp.join("custom.json");
+        fs::write(&config_path, r#"{"name":"custom","agent":{}}"#).unwrap();
+        let source = Context::new(
+            project_root.clone(),
+            temp.clone(),
+            ConfigSource::File(config_path),
+        );
+        let config = source.load_config().unwrap();
+        let context = source
+            .with_resolved_config(project_root.join("runtime/runs/run"), config)
+            .with_deferred_agent_session_creation();
+        let spec = context
+            .runtime_spec(context.resolved_config().unwrap())
+            .unwrap();
+
+        assert!(spec.proxy.container.env.iter().any(|value| {
+            value.name == "CLADDING_DEFER_AGENT_SESSION" && value.value == "true"
+        }));
+        assert!(!spec.proxy.container.mounts.iter().any(|mount| {
+            mount.mount_path.contains("credential-seed")
+                || mount.mount_path.contains("fake-credentials")
+        }));
+        assert!(
+            !spec
+                .agent
+                .container
+                .env
+                .iter()
+                .any(|value| { value.name == "CLADDING_DEFER_AGENT_SESSION" })
+        );
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
