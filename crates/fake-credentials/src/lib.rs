@@ -1,9 +1,9 @@
 //! Trusted helpers for deriving Baffle v2 session credentials.
 
-use baffle_client::{CredentialMode, SessionConfig, validate_secret_name};
+use baffle_client::validate_secret_name;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::hmac::{self, HMAC_SHA256, Key};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 const SEED_BYTES: usize = 32;
 const DOMAIN_SEPARATOR: &[u8] = b"baffle:credential-substitution:v1\0";
@@ -11,46 +11,6 @@ const DOMAIN_SEPARATOR: &[u8] = b"baffle:credential-substitution:v1\0";
 /// Return whether a name is a Baffle credential identifier.
 pub fn is_credential_identifier(name: &str) -> bool {
     validate_secret_name(name).is_ok()
-}
-
-/// Validate environment mappings against the selected Baffle agent policy.
-///
-/// Each mapped credential must have a real secret file available, be referenced
-/// by an agent rule, and use Baffle's `substitute` credential mode.
-pub fn validate_mappings(
-    session_config_toml: &str,
-    mappings: &BTreeMap<String, String>,
-    available_credentials: &BTreeSet<String>,
-) -> Result<(), String> {
-    if mappings.is_empty() {
-        return Ok(());
-    }
-
-    let session = SessionConfig::from_toml(session_config_toml)
-        .map_err(|error| format!("invalid Baffle agent session config: {error}"))?;
-    for (environment_name, credential_name) in mappings {
-        if !available_credentials.contains(credential_name) {
-            return Err(format!(
-                "fake credential mapping for '{environment_name}' references unavailable Baffle credential '{credential_name}'"
-            ));
-        }
-        if session.effective_credential_mode(credential_name) != CredentialMode::Substitute {
-            return Err(format!(
-                "fake credential mapping for '{environment_name}' requires Baffle credential '{credential_name}' to use substitute mode"
-            ));
-        }
-        if !session
-            .rules
-            .iter()
-            .flat_map(|rule| &rule.inject)
-            .any(|injection| injection.secret == *credential_name)
-        {
-            return Err(format!(
-                "fake credential mapping for '{environment_name}' references Baffle credential '{credential_name}', which is not used by an agent session rule"
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Derive a fake credential from Baffle's unpadded Base64URL session seed.
@@ -107,35 +67,14 @@ pub fn derive_environment(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_environment, derive_fake_credential, validate_mappings};
+    use super::{derive_environment, derive_fake_credential};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     const PUBLISHED_VECTOR: &str = "baffle_v1_Tamc3Pa1DyIVEIq8yK6rlwaPc_L-LdF8S9YHz-17h1I";
 
     fn seed() -> String {
         URL_SAFE_NO_PAD.encode((0_u8..32).collect::<Vec<_>>())
-    }
-
-    fn substituting_policy() -> &'static str {
-        r#"
-version = 2
-persistent = true
-socket_name = "agent/proxy.sock"
-
-[credentials]
-default_mode = "substitute"
-
-[rules."api.example.com"]
-mode = "intercept"
-ports = [443]
-paths = ["/**"]
-
-[[rules."api.example.com".inject]]
-header = "Authorization"
-secret = "github-api"
-format = "bearer"
-"#
     }
 
     #[test]
@@ -170,33 +109,5 @@ format = "bearer"
             let error = derive_fake_credential(invalid, "github-api").unwrap_err();
             assert!(!error.contains(invalid));
         }
-    }
-
-    #[test]
-    fn validates_real_secret_substitution_mode_and_rule_reference() {
-        let mappings = BTreeMap::from([("GH_TOKEN".to_string(), "github-api".to_string())]);
-        let available = BTreeSet::from(["github-api".to_string()]);
-        validate_mappings(substituting_policy(), &mappings, &available).unwrap();
-
-        let inject_policy = substituting_policy().replace("= \"substitute\"", "= \"inject\"");
-        assert!(
-            validate_mappings(&inject_policy, &mappings, &available)
-                .unwrap_err()
-                .contains("substitute mode")
-        );
-
-        let unreferenced =
-            substituting_policy().replace("secret = \"github-api\"", "secret = \"other\"");
-        assert!(
-            validate_mappings(&unreferenced, &mappings, &available)
-                .unwrap_err()
-                .contains("not used by an agent session rule")
-        );
-
-        assert!(
-            validate_mappings(substituting_policy(), &mappings, &BTreeSet::new())
-                .unwrap_err()
-                .contains("unavailable Baffle credential")
-        );
     }
 }

@@ -22,11 +22,10 @@ identifier, including its case.
 }
 ```
 
-The Baffle secret must be available under
-`.cladding/credentials/baffle/secrets/<credential-id>` or supplied for that run
-with `--secret`. The selected agent session file must reference the same
-credential in a rule and set its effective credential mode to `substitute`.
-For example:
+For substitution to work, provision the Baffle secret under
+`.cladding/credentials/baffle/secrets/<credential-id>` or supply it for that
+run with `--secret`. Configure the agent session to inject the same credential
+with its effective credential mode set to `substitute`. For example:
 
 ```toml
 [credentials.overrides.github-api]
@@ -43,8 +42,20 @@ secret = "github-api"
 format = "bearer"
 ```
 
-Baffle still enforces the daemon's allowed-secret list, destination, port, and
-path rules. A mapping does not grant access by itself.
+Baffle owns validation of its daemon and session policy, including imports,
+allowed credentials, secret availability, and injector configuration. It also
+enforces destination, port, and path rules. A mapping does not grant access by
+itself.
+
+Cladding validates environment variable names and Baffle credential identifier
+syntax. It does not verify that a mapped credential appears in an effective
+agent injector policy or uses `substitute` mode. Baffle v2.2.0's
+`baffle-client` crate does not expose the effective composed policy that
+Cladding would need for those checks. Until Baffle exposes that API, a mapping
+can be syntactically valid but ineffective: Baffle will not replace its fake
+value with the real secret, and the request can fail authentication. Baffle
+checks the session policy and its referenced secret files when Cladding creates
+the agent session, before Cladding launches the run command.
 
 ## Select a real credential for one run
 
@@ -82,8 +93,9 @@ substitution.
 ## Session and upgrade requirements
 
 Cladding embeds the published Baffle v2.2.0 Linux binary and uses the published
-`baffle-client` v2.2.0 crate for session policy validation and credential
-identifier checks. Baffle v2.2.0 returns session creation details as JSON,
+`baffle-client` v2.2.0 crate to validate credential identifier syntax. The
+client crate does not expose Baffle's effective composed session policy.
+Baffle v2.2.0 returns session creation details as JSON,
 including the session seed. For `cladding run`, Cladding creates the agent
 session and reads this response in its trusted host process. Run
 `cladding build` after upgrading Cladding to refresh

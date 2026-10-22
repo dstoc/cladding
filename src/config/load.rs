@@ -487,8 +487,9 @@ mod tests {
     }
 
     #[test]
-    fn load_cladding_config_parses_and_validates_fake_credential_environment_mappings() {
+    fn load_cladding_config_validates_fake_mapping_syntax_without_baffle_policy_files() {
         let temp = create_temp_dir("fake-credential-env");
+        assert!(!temp.join("config/proxy/daemon.toml").exists());
         fs::write(
             temp.join("cladding.json"),
             r#"{

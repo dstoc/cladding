@@ -6,7 +6,7 @@ use cladding::identity::invoking_uid;
 use serde::Deserialize;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
@@ -54,12 +54,6 @@ pub(super) fn cmd_run(
     })?;
     config.name = instance_name.clone();
     let fake_mappings = configured_fake_credential_mappings(&config.fake_credential_env, env_vars);
-    validate_fake_credential_mappings(
-        &source_context.project_root,
-        &config,
-        &fake_mappings,
-        &secret_overrides,
-    )?;
 
     cladding::podman::podman_required("podman (required for cladding run)").map_err(|err| {
         Error::message(format!(
@@ -242,69 +236,6 @@ fn configured_fake_credential_mappings(
         mappings.remove(environment_name);
     }
     mappings
-}
-
-fn validate_fake_credential_mappings(
-    project_root: &Path,
-    config: &cladding::config::ExecutionConfig,
-    mappings: &BTreeMap<String, String>,
-    run_secret_overrides: &[ResolvedRunSecret],
-) -> Result<()> {
-    if mappings.is_empty() {
-        return Ok(());
-    }
-
-    let config_dir = project_root.join("config");
-    validate_fake_credential_allowlist(&config_dir, mappings)?;
-    cladding::config::validate_baffle_session_files(&config_dir, config).map_err(|error| {
-        Error::message(format!(
-            "cannot validate Baffle agent session config: {error}"
-        ))
-    })?;
-    let session_path = config_dir
-        .join("proxy/sessions")
-        .join(config.agent_session_config());
-    let session_toml = fs::read_to_string(&session_path).map_err(|error| {
-        Error::message(format!(
-            "cannot read selected Baffle agent session config '{}': {error}",
-            config.agent_session_config()
-        ))
-    })?;
-
-    let run_secret_names = run_secret_overrides
-        .iter()
-        .map(|secret| secret.name.as_str())
-        .collect::<BTreeSet<_>>();
-    let secret_directory = project_root.join("credentials/baffle/secrets");
-    let mut available = BTreeSet::new();
-    for (environment_name, credential_name) in mappings {
-        if run_secret_names.contains(credential_name.as_str()) {
-            available.insert(credential_name.clone());
-            continue;
-        }
-        let secret_path = secret_directory.join(credential_name);
-        let metadata = fs::symlink_metadata(&secret_path).map_err(|error| {
-            Error::message(format!(
-                "fake credential mapping for '{environment_name}' references unavailable Baffle credential '{credential_name}' ({})",
-                error.kind()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(Error::message(format!(
-                "fake credential mapping for '{environment_name}' requires a regular Baffle credential file for '{credential_name}'"
-            )));
-        }
-        File::open(&secret_path).map_err(|error| {
-            Error::message(format!(
-                "fake credential mapping for '{environment_name}' references unavailable Baffle credential '{credential_name}' ({})",
-                error.kind()
-            ))
-        })?;
-        available.insert(credential_name.clone());
-    }
-
-    cladding_fake_credentials::validate_mappings(&session_toml, mappings, &available)
-        .map_err(Error::message)
 }
 
 #[derive(Deserialize)]
@@ -855,37 +786,6 @@ fn write_private_run_secret(path: &Path, contents: &[u8]) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn validate_fake_credential_allowlist(
-    config_dir: &Path,
-    mappings: &BTreeMap<String, String>,
-) -> Result<()> {
-    let daemon_path = config_dir.join("proxy/daemon.toml");
-    let daemon_contents = fs::read_to_string(&daemon_path).map_err(|error| {
-        Error::message(format!(
-            "cannot read Baffle daemon config '{}': {error}",
-            daemon_path.display()
-        ))
-    })?;
-    let daemon: toml::Value = toml::from_str(&daemon_contents)
-        .map_err(|error| Error::message(format!("cannot parse Baffle daemon config: {error}")))?;
-    let allowed = daemon
-        .get("secrets")
-        .and_then(|secrets| secrets.get("allowed"))
-        .and_then(toml::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(toml::Value::as_str)
-        .collect::<BTreeSet<_>>();
-    for credential_name in mappings.values().collect::<BTreeSet<_>>() {
-        if !allowed.contains(credential_name.as_str()) {
-            return Err(Error::message(format!(
-                "Baffle daemon does not allow mapped credential '{credential_name}'; add it to secrets.allowed"
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn cleanup_ephemeral_runtime(
     spec: &cladding::runtime::RuntimeSpec,
     resource_attempts: &cladding::podman::RuntimeResourceAttempts,
@@ -1308,27 +1208,6 @@ mod tests {
         });
         assert!(launch.is_err());
         assert!(!workload_launched.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn fake_credential_mappings_require_daemon_allowlist_entitlements() {
-        let temp = std::env::temp_dir().join(format!(
-            "cladding-fake-credential-allowlist-{}",
-            generate_uuid_v4().unwrap()
-        ));
-        let config_dir = temp.join("config");
-        fs::create_dir_all(config_dir.join("proxy")).unwrap();
-        fs::write(
-            config_dir.join("proxy/daemon.toml"),
-            "[secrets]\nallowed = [\"github-api\"]\n",
-        )
-        .unwrap();
-        let mappings = BTreeMap::from([("TOKEN".to_string(), "github-api".to_string())]);
-        assert!(validate_fake_credential_allowlist(&config_dir, &mappings).is_ok());
-        let disallowed = BTreeMap::from([("TOKEN".to_string(), "other-api".to_string())]);
-        let error = validate_fake_credential_allowlist(&config_dir, &disallowed).unwrap_err();
-        assert!(error.to_string().contains("secrets.allowed"));
-        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
