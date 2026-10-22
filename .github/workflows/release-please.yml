@@ -51,8 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           scripts/fetch_gantry.sh "${{ matrix.arch }}" "$RUNNER_TEMP/gantry"
-          test "$("$RUNNER_TEMP/gantry/gantry" --version)" = "gantry 0.4.8"
-          "$RUNNER_TEMP/gantry/run-remote" --help >/dev/null
+          scripts/validate_gantry_release.sh "$RUNNER_TEMP/gantry"
       - name: Build and stage cladding-bridge
         run: |
           set -euo pipefail
@@ -125,6 +124,23 @@ jobs:
         with:
           name: cladding-linux-helpers-${{ matrix.helper_arch }}
           path: helpers
+      - name: Restore and verify downloaded Gantry helper executables
+        run: |
+          set -euo pipefail
+          test "$(cat helpers/gantry/VERSION)" = 0.4.8
+          for name in gantry run-remote; do
+            tool="helpers/gantry/$name"
+            test -f "$tool"
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "${{ matrix.helper_arch }}:$description" in
+              x86_64:"ELF 64-bit"*x86-64*) ;;
+              aarch64:"ELF 64-bit"*aarch64*) ;;
+              *) echo "Expected a Linux ${{ matrix.helper_arch }} Gantry executable: $tool" >&2; exit 1 ;;
+            esac
+          done
       - name: Point build.rs at prebuilt helpers
         run: |
           echo "CLADDING_GANTRY_DIR=$GITHUB_WORKSPACE/helpers/gantry" >> "$GITHUB_ENV"

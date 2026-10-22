@@ -42,6 +42,10 @@ topology_image=localhost/cladding-runtime-topology:latest
 proxy="$project_name-proxy-instance"
 agent="$project_name-agent-instance"
 nw_sandbox="$project_name-nw-sandbox-instance"
+cancel_ready="/tmp/${project_name}-cancel-ready"
+cancel_complete="/tmp/${project_name}-cancel-complete"
+cancel_client_pid="/tmp/${project_name}-cancel-client.pid"
+cancel_command="touch $cancel_ready; sleep 3; touch $cancel_complete"
 phase="initialize fixture"
 
 volume_names() {
@@ -198,6 +202,11 @@ allow if {
 allow if {
   input.command == "/bin/sh"
   input.args == ["-c", "printf stdout; printf stderr >&2; exit 7"]
+}
+
+allow if {
+  input.command == "/bin/sh"
+  input.args == ["-c", "$cancel_command"]
 }
 EOF
 cat > "$project_root/config/nw_sandbox/true.rego" <<'EOF'
@@ -437,6 +446,45 @@ if podman exec "$agent" sh -ec 'run-in-nw-sandbox -- /bin/touch /shared/denied-c
   exit 1
 fi
 podman exec "$agent" sh -ec 'test ! -e /shared/denied-command-marker'
+phase="verify Gantry client cancellation cleans up a wrapped workload"
+podman exec "$nw_sandbox" rm -f "$cancel_ready" "$cancel_complete"
+podman exec "$agent" rm -f "$cancel_client_pid"
+podman exec --detach \
+  --env "CLADDING_CANCEL_COMMAND=$cancel_command" \
+  --env "CLADDING_CANCEL_CLIENT_PID=$cancel_client_pid" \
+  "$agent" sh -ec '
+    printf "%s\n" "$$" > "$CLADDING_CANCEL_CLIENT_PID"
+    exec run-in-nw-sandbox -- /bin/sh -c "$CLADDING_CANCEL_COMMAND"
+  '
+cancel_ready_seen=false
+cancel_client_pid_value=
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+  cancel_client_pid_value=$(podman exec "$agent" cat "$cancel_client_pid" 2>/dev/null || true)
+  if [ -n "$cancel_client_pid_value" ] \
+    && podman exec "$nw_sandbox" test -e "$cancel_ready" 2>/dev/null; then
+    cancel_ready_seen=true
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if [ "$cancel_ready_seen" != true ]; then
+  echo "Gantry cancellation workload did not become ready" >&2
+  exit 1
+fi
+case "$cancel_client_pid_value" in
+  ''|*[!0-9]*)
+    echo "Gantry run-remote client recorded an invalid PID: $cancel_client_pid_value" >&2
+    exit 1
+    ;;
+esac
+podman exec "$agent" kill -TERM "$cancel_client_pid_value"
+sleep 4
+if podman exec "$nw_sandbox" test -e "$cancel_complete"; then
+  echo "Gantry kept the remote workload running after its UDS client disconnected" >&2
+  exit 1
+fi
 phase="verify shared managed mount communication"
 podman exec "$agent" sh -ec 'printf "agent-to-sandbox-ok\n" > /shared/topology-marker'
 test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)" = agent-to-sandbox-ok

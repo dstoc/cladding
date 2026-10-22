@@ -38,9 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           scripts/fetch_gantry.sh x86_64 "$RUNNER_TEMP/gantry"
-          test "$(cat "$RUNNER_TEMP/gantry/VERSION")" = 0.4.8
-          test "$("$RUNNER_TEMP/gantry/gantry" --version)" = "gantry 0.4.8"
-          "$RUNNER_TEMP/gantry/run-remote" --help >/dev/null
+          scripts/validate_gantry_release.sh "$RUNNER_TEMP/gantry"
       - name: Build cladding-bridge helper
         run: cargo build --locked --release -p cladding-bridge --bin cladding-bridge --target-dir target/cladding-bridge
       - name: Build Linux Baffle socket operation probe
@@ -116,6 +114,22 @@ jobs:
               *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
             esac
           done
+          gantry_dir="$RUNNER_TEMP/linux-tools/gantry"
+          for name in gantry run-remote; do
+            tool="$gantry_dir/$name"
+            if [ ! -f "$tool" ]; then
+              echo "Downloaded Gantry helper is missing: $tool" >&2
+              exit 1
+            fi
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
       - name: Set embedded x86_64 Linux tool paths
         run: |
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
@@ -173,6 +187,22 @@ jobs:
               *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
             esac
           done
+          gantry_dir="$RUNNER_TEMP/linux-tools/gantry"
+          for name in gantry run-remote; do
+            tool="$gantry_dir/$name"
+            if [ ! -f "$tool" ]; then
+              echo "Downloaded Gantry helper is missing: $tool" >&2
+              exit 1
+            fi
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected a Linux x86_64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
       - name: Set embedded x86_64 Linux tool paths
         run: |
           echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle" >> "$GITHUB_ENV"
@@ -203,6 +233,7 @@ jobs:
         run: |
           for script in \
             scripts/fetch_baffle.sh \
+            scripts/validate_gantry_release.sh \
             scripts/validate_baffle_config.sh \
             scripts/validate_baffle_control_socket.sh \
             scripts/validate_baffle_runtime.sh \
@@ -242,9 +273,7 @@ jobs:
         run: |
           set -euo pipefail
           scripts/fetch_gantry.sh aarch64 "$RUNNER_TEMP/gantry"
-          test "$(cat "$RUNNER_TEMP/gantry/VERSION")" = 0.4.8
-          test "$("$RUNNER_TEMP/gantry/gantry" --version)" = "gantry 0.4.8"
-          "$RUNNER_TEMP/gantry/run-remote" --help >/dev/null
+          scripts/validate_gantry_release.sh "$RUNNER_TEMP/gantry"
       - name: Build cladding-bridge helper
         run: cargo build --locked --release -p cladding-bridge --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/cladding-bridge
       - name: Build Linux Baffle socket operation probe
@@ -309,6 +338,19 @@ jobs:
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
           for name in baffle cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
+            test -f "$tool"
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*x86-64*) ;;
+              *) echo "Expected an x86_64 Linux executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+          gantry_dir="$RUNNER_TEMP/linux-tools/gantry"
+          for name in gantry run-remote; do
+            tool="$gantry_dir/$name"
             test -f "$tool"
             chmod 0755 "$tool"
             test -x "$tool"
@@ -463,6 +505,19 @@ jobs:
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
           for name in baffle cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
+            test -f "$tool"
+            chmod 0755 "$tool"
+            test -x "$tool"
+            description=$(file -b "$tool")
+            printf '%s: %s\n' "$tool" "$description"
+            case "$description" in
+              "ELF 64-bit"*aarch64*) ;;
+              *) echo "Expected a Linux aarch64 executable: $tool" >&2; exit 1 ;;
+            esac
+          done
+          gantry_dir="$RUNNER_TEMP/linux-tools/gantry"
+          for name in gantry run-remote; do
+            tool="$gantry_dir/$name"
             test -f "$tool"
             chmod 0755 "$tool"
             test -x "$tool"

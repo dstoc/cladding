@@ -15,6 +15,9 @@ RELEASE_TEXT = RELEASE_WORKFLOW.read_text()
 BUILD_SCRIPT = Path(__file__).parents[1] / "build.rs"
 BAFFLE_FETCH_SCRIPT = Path(__file__).parents[1] / "scripts/fetch_baffle.sh"
 GANTRY_FETCH_SCRIPT = Path(__file__).parents[1] / "scripts/fetch_gantry.sh"
+GANTRY_RELEASE_VALIDATOR = (
+    Path(__file__).parents[1] / "scripts/validate_gantry_release.sh"
+)
 EMBEDDED_BAFFLE_DOC = (
     Path(__file__).parents[1] / "docs/features/baffle-integration/embedded-baffle.md"
 )
@@ -495,6 +498,16 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("actual_archive_sha256", fetch)
         self.assertIn('for path in gantry run-remote LICENSE README.md docs/reference.md;', fetch)
 
+        validator = GANTRY_RELEASE_VALIDATOR.read_text()
+        self.assertIn('test "$(cat "$gantry_dir/VERSION")" = 0.4.8', validator)
+        self.assertIn('"$gantry_dir/gantry" --help', validator)
+        self.assertIn('"$gantry_dir/run-remote" --check -- /bin/true', validator)
+        self.assertIn('"$gantry_dir/run-remote" --check -- /bin/false', validator)
+        self.assertIn('RUN_REMOTE_SOCKET="$socket_path"', validator)
+        self.assertIn('"$gantry_dir/gantry" \\', validator)
+        self.assertNotIn('"$gantry_dir/gantry" --version', validator)
+        self.assertNotIn('"$gantry_dir/run-remote" --help', validator)
+
     def test_complete_embedded_linux_tools_are_built_once_per_architecture(self):
         cases = {
             "embedded-linux-tools-x86_64": (
@@ -513,8 +526,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 block = job_block(job)
                 self.assertIn(build, block)
                 self.assertIn(f"scripts/fetch_gantry.sh {arch}", block)
-                self.assertIn('"$RUNNER_TEMP/gantry/gantry" --version', block)
-                self.assertIn('"$RUNNER_TEMP/gantry/run-remote" --help', block)
+                self.assertIn(
+                    'scripts/validate_gantry_release.sh "$RUNNER_TEMP/gantry"', block
+                )
                 self.assertIn(f"scripts/fetch_baffle.sh {arch}", block)
                 self.assertIn(
                     "cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c",
@@ -567,6 +581,8 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertIn('chmod 0755 "$tool"', block)
                 self.assertIn('test -x "$tool"', block)
                 self.assertIn('file -b "$tool"', block)
+                self.assertIn('gantry_dir="$RUNNER_TEMP/linux-tools/gantry"', block)
+                self.assertIn("for name in gantry run-remote; do", block)
                 self.assertIn(f'"ELF 64-bit"*{machine}*) ;;', block)
                 self.assertIn("baffle-socket-probe", block)
                 self.assertNotIn("Download and verify pinned", block)
@@ -657,11 +673,21 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
         helpers = job_block("build-helpers", RELEASE_TEXT)
         self.assertIn('scripts/fetch_gantry.sh "${{ matrix.arch }}" "$RUNNER_TEMP/gantry"', helpers)
+        self.assertIn(
+            'scripts/validate_gantry_release.sh "$RUNNER_TEMP/gantry"', helpers
+        )
         self.assertIn('cp -a "$RUNNER_TEMP/gantry/." helpers/gantry/', helpers)
         self.assertIn('cargo build -p cladding-bridge --release --locked', helpers)
         self.assertIn('cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/cladding-bridge', helpers)
         self.assertIn('name: cladding-linux-helpers-${{ matrix.arch }}', helpers)
         self.assertIn('name: cladding-linux-helpers-${{ matrix.helper_arch }}', upload)
+        restore = upload.split(
+            "- name: Restore and verify downloaded Gantry helper executables", 1
+        )[1].split("- name: Point build.rs at prebuilt helpers", 1)[0]
+        self.assertIn("for name in gantry run-remote; do", restore)
+        self.assertIn('chmod 0755 "$tool"', restore)
+        self.assertIn('test -x "$tool"', restore)
+        self.assertIn('file -b "$tool"', restore)
         self.assertIn('x86_64:"ELF 64-bit"*x86-64*) ;;', helpers)
         self.assertIn('aarch64:"ELF 64-bit"*aarch64*) ;;', helpers)
 
@@ -820,6 +846,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("test_collect_baffle_notices.py", test)
 
         integration = job_block("linux-integration")
+        self.assertIn("scripts/validate_gantry_release.sh", integration)
         for validator in (
             "scripts/validate_baffle_config.sh",
             "scripts/validate_baffle_runtime.sh default",
@@ -842,6 +869,25 @@ class BaffleCiAssetsTests(unittest.TestCase):
         ):
             with self.subTest(validator=validator):
                 self.assertIn(validator, integration)
+
+    def test_runtime_topology_cancels_a_released_run_remote_client(self):
+        validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
+        self.assertIn(
+            'cancel_command="touch $cancel_ready; sleep 3; touch $cancel_complete"',
+            validator,
+        )
+        self.assertIn('input.args == ["-c", "$cancel_command"]', validator)
+        self.assertIn(
+            'phase="verify Gantry client cancellation cleans up a wrapped workload"',
+            validator,
+        )
+        self.assertIn("podman exec --detach", validator)
+        self.assertIn(
+            'exec run-in-nw-sandbox -- /bin/sh -c "$CLADDING_CANCEL_COMMAND"',
+            validator,
+        )
+        self.assertIn('kill -TERM "$cancel_client_pid_value"', validator)
+        self.assertIn('test -e "$cancel_complete"', validator)
 
 
 class InjectProcessCleanupTests(unittest.TestCase):
