@@ -931,7 +931,11 @@ class BaffleCiAssetsTests(unittest.TestCase):
             'exec run-in-nw-sandbox -- sh -c "$CLADDING_CANCEL_COMMAND"',
             validator,
         )
-        self.assertIn('kill -TERM "$cancel_client_pid_value"', validator)
+        self.assertIn(
+            "podman exec \"$agent\" sh -ec 'kill -TERM \"$1\"' _ \"$cancel_client_pid_value\"",
+            validator,
+        )
+        self.assertNotIn('podman exec "$agent" kill -TERM', validator)
         self.assertIn('test -e "$cancel_complete"', validator)
 
     def test_baffle_runtime_gantry_policies_use_command_packages(self):

@@ -488,7 +488,7 @@ case "$cancel_client_pid_value" in
     exit 1
     ;;
 esac
-podman exec "$agent" kill -TERM "$cancel_client_pid_value"
+podman exec "$agent" sh -ec 'kill -TERM "$1"' _ "$cancel_client_pid_value"
 sleep 4
 if podman exec "$nw_sandbox" test -e "$cancel_complete"; then
   echo "Gantry kept the remote workload running after its UDS client disconnected" >&2
