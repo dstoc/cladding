@@ -48,14 +48,13 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build Linux helpers
-        run: cargo build -p mcp-run -p cladding-bridge -p cladding-fake-credentials --release --locked --target "${{ matrix.target }}" --bin mcp-run --bin run-remote --bin cladding-bridge --bin cladding-fake-credentials
+        run: cargo build -p mcp-run -p cladding-bridge --release --locked --target "${{ matrix.target }}" --bin mcp-run --bin run-remote --bin cladding-bridge
       - name: Stage helpers
         run: |
           mkdir -p helpers
           cp "target/${{ matrix.target }}/release/mcp-run" helpers/
           cp "target/${{ matrix.target }}/release/run-remote" helpers/
           cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/
-          cp "target/${{ matrix.target }}/release/cladding-fake-credentials" helpers/
           for tool in helpers/*; do
             chmod 0755 "$tool"
             description=$(file -b "$tool")
@@ -97,7 +96,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Download and verify pinned Baffle v2.1.0 release
+      - name: Download and verify pinned Baffle v2.2.0 release
         run: |
           set -euo pipefail
           scripts/fetch_baffle.sh "${{ matrix.baffle_arch }}" "$RUNNER_TEMP/baffle"
@@ -113,7 +112,7 @@ jobs:
             *) echo "Baffle is not the expected Linux ${{ matrix.baffle_arch }} executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
-          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.1.0"
+          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -130,7 +129,6 @@ jobs:
           echo "CLADDING_MCP_RUN_BIN=$GITHUB_WORKSPACE/helpers/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$GITHUB_WORKSPACE/helpers/run-remote" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$GITHUB_WORKSPACE/helpers/cladding-bridge" >> "$GITHUB_ENV"
-          echo "CLADDING_FAKE_CREDENTIALS_BIN=$GITHUB_WORKSPACE/helpers/cladding-fake-credentials" >> "$GITHUB_ENV"
       - name: Point build.rs at the validated Linux Baffle binary
         run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
       # --locked is safe: the cargo-workspace plugin keeps the root Cargo.lock

@@ -46,58 +46,63 @@ format = "bearer"
 Baffle still enforces the daemon's allowed-secret list, destination, port, and
 path rules. A mapping does not grant access by itself.
 
-## Override a mapping for one run
+## Select a real credential for one run
 
-Use `--fake-credential-env NAME=CREDENTIAL` to add or replace one mapping.
-Repeat the option to set more than one mapping:
+The configured mapping always selects the Baffle credential identifier. Use
+`--secret` to select a different real secret file or host environment variable
+for that identifier during one run:
 
 ```sh
+# Use the project's read-only github-api secret.
+cladding run -- codex
+
+# Use a read-write value for github-api during this run.
 cladding run \
-  --secret github-api=env:REAL_GITHUB_TOKEN \
-  --fake-credential-env GITHUB_TOKEN=github-api \
-  --fake-credential-env GH_TOKEN=github-api \
+  --secret github-api=env:GITHUB_WRITE_TOKEN \
   -- codex
 ```
 
-Use `NAME=none` to suppress the configured mapping for that variable:
-
-```sh
-cladding run --fake-credential-env GITHUB_TOKEN=none -- codex
-```
-
-Suppression removes only the fake mapping. It does not remove a value supplied
-with `--env` or inherited by the agent container.
+Both commands give `codex` the fake value configured for `github-api`. The
+second command changes the real secret that Baffle uses for authorized
+requests. It does not change the mapping or the Baffle session policy.
 
 ## Environment precedence
 
 Cladding applies values in this order:
 
 1. A value supplied with `cladding run --env`.
-2. A per-run `--fake-credential-env` mapping or `none` suppression.
-3. A mapping in `fake_credential_env` in `cladding.json`.
-4. The environment already present in the agent container.
+2. A mapping in `fake_credential_env` in `cladding.json`.
+3. The environment already present in the agent container.
 
 When `--env` names a mapped variable, Cladding does not derive or inject a fake
-for that variable. `--env` keeps its existing behavior. If you set it to a real
-secret, that value is available to the user command and is outside Baffle's
-secret isolation.
+for that variable. `--env` keeps its existing behavior. An explicitly supplied
+value is available to the user command and is outside Baffle's secret
+substitution.
 
 ## Session and upgrade requirements
 
-Cladding embeds the published Baffle v2.1.0 Linux binary and uses the published
-`baffle-client` v2.1.0 API. Run `cladding build` after upgrading Cladding to
-refresh `.cladding/tools/bin/baffle`; run `cladding check` to confirm the
-embedded tool is current. Existing version 2 Baffle session files remain in
-the required format. Set the mapped credential's effective Baffle mode to
-`substitute`; the default remains `inject`.
+Cladding embeds the published Baffle v2.2.0 Linux binary and uses the published
+`baffle-client` v2.2.0 crate for session policy validation and credential
+identifier checks. Baffle v2.2.0 returns session creation details as JSON,
+including the session seed. For `cladding run`, Cladding creates the agent
+session and reads this response in its trusted host process. Run
+`cladding build` after upgrading Cladding to refresh
+`.cladding/tools/bin/baffle`; run `cladding check` to confirm the embedded tool
+is current. Existing version 2 Baffle session files remain in the required
+format. Set the mapped credential's effective Baffle mode to `substitute`; the
+default remains `inject`.
 
-Baffle creates a new random seed for each session. Cladding keeps that seed in
-proxy-private state, derives fake values after it creates the agent session,
-and removes the seed after derivation. The seed is not passed to the agent or
-written to routine logs. Real secrets stay in Baffle's credential directory or
-in the proxy-only secret mount for a run. The mapped values in the user command
-environment are fakes; values passed explicitly with `--env` keep their normal
-behavior.
+Baffle creates a new random seed for each session. Cladding derives the fake
+values from the session seed in memory. It does not write the seed or derived
+values to routine logs. It does not pass the seed to the agent, network
+sandbox, or filesystem sandbox. The proxy keeps real secrets in Baffle's
+credential directory or in the proxy-only secret mount for a run. The user
+command receives only the derived fake values for configured mappings.
+
+Baffle derives each fake from the session seed with its versioned,
+domain-separated HMAC contract. Cladding passes the exact configured Baffle
+credential identifier; the environment-variable name does not affect the
+derived value.
 
 Variables mapped to the same credential receive the same fake value within a
 session. Different sessions receive different values. A fake works only

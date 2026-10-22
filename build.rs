@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const BAFFLE_VERSION: &str = "2.1.0";
+const BAFFLE_VERSION: &str = "2.2.0";
 
 fn main() {
     ensure_supported_platforms();
@@ -17,12 +17,9 @@ fn main() {
     println!("cargo:rerun-if-changed=crates/mcp-run/src");
     println!("cargo:rerun-if-changed=crates/cladding-bridge/Cargo.toml");
     println!("cargo:rerun-if-changed=crates/cladding-bridge/src");
-    println!("cargo:rerun-if-changed=crates/fake-credentials/Cargo.toml");
-    println!("cargo:rerun-if-changed=crates/fake-credentials/src");
     println!("cargo:rerun-if-env-changed=CLADDING_MCP_RUN_BIN");
     println!("cargo:rerun-if-env-changed=CLADDING_RUN_REMOTE_BIN");
     println!("cargo:rerun-if-env-changed=CLADDING_BRIDGE_BIN");
-    println!("cargo:rerun-if-env-changed=CLADDING_FAKE_CREDENTIALS_BIN");
     println!("cargo:rerun-if-env-changed=CLADDING_BAFFLE_BIN");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -30,20 +27,14 @@ fn main() {
 
     // Escape hatch: when prebuilt Linux helpers are provided (e.g. a macOS
     // release build that cannot run a Linux container), copy them straight in
-    // and skip the nested helper build. All four must be set together.
+    // and skip the nested helper build. All three must be set together.
     let prebuilt_helpers = [
         env::var("CLADDING_MCP_RUN_BIN").ok(),
         env::var("CLADDING_RUN_REMOTE_BIN").ok(),
         env::var("CLADDING_BRIDGE_BIN").ok(),
-        env::var("CLADDING_FAKE_CREDENTIALS_BIN").ok(),
     ];
     match prebuilt_helpers {
-        [
-            Some(mcp_run),
-            Some(run_remote),
-            Some(bridge),
-            Some(fake_credentials),
-        ] => {
+        [Some(mcp_run), Some(run_remote), Some(bridge)] => {
             println!(
                 "cargo:warning=Using prebuilt embedded helpers; skipping nested release build"
             );
@@ -60,31 +51,11 @@ fn main() {
             validate_elf_architecture(&bridge_bytes, expected_arch, &bridge_path, 20, "", "")
                 .unwrap_or_else(|err| panic!("{err}"));
             copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
-            let fake_credentials_path = PathBuf::from(fake_credentials);
-            let fake_credentials_bytes = fs::read(&fake_credentials_path).unwrap_or_else(|err| {
-                panic!(
-                    "failed to read CLADDING_FAKE_CREDENTIALS_BIN at {}: {err}",
-                    fake_credentials_path.display()
-                )
-            });
-            validate_elf_architecture(
-                &fake_credentials_bytes,
-                expected_arch,
-                &fake_credentials_path,
-                20,
-                "",
-                "",
-            )
-            .unwrap_or_else(|err| panic!("{err}"));
-            copy_bin(
-                &fake_credentials_path,
-                &out_dir.join("cladding-fake-credentials"),
-            );
             return;
         }
-        [None, None, None, None] => {}
+        [None, None, None] => {}
         _ => panic!(
-            "CLADDING_MCP_RUN_BIN, CLADDING_RUN_REMOTE_BIN, CLADDING_BRIDGE_BIN, and CLADDING_FAKE_CREDENTIALS_BIN must be set together"
+            "CLADDING_MCP_RUN_BIN, CLADDING_RUN_REMOTE_BIN, and CLADDING_BRIDGE_BIN must be set together"
         ),
     }
 
@@ -128,10 +99,6 @@ fn main() {
     validate_elf_architecture(&bridge_bytes, expected_arch, &bridge_path, 20, "", "")
         .unwrap_or_else(|err| panic!("{err}"));
     copy_bin(&bridge_path, &out_dir.join("cladding-bridge"));
-    copy_bin(
-        &release_dir.join("cladding-fake-credentials"),
-        &out_dir.join("cladding-fake-credentials"),
-    );
 }
 
 fn ensure_supported_platforms() {
@@ -340,11 +307,7 @@ fn build_locally(
         .arg("-p")
         .arg("mcp-run")
         .arg("-p")
-        .arg("cladding-bridge")
-        .arg("-p")
-        .arg("cladding-fake-credentials")
-        .arg("--bin")
-        .arg("cladding-fake-credentials");
+        .arg("cladding-bridge");
     cargo.arg("--bin").arg("mcp-run");
     cargo.arg("--bin").arg("run-remote");
     cargo.arg("--bin").arg("cladding-bridge");
@@ -434,11 +397,7 @@ fn podman_build_command(
         .arg("--bin")
         .arg("run-remote")
         .arg("--bin")
-        .arg("cladding-bridge")
-        .arg("-p")
-        .arg("cladding-fake-credentials")
-        .arg("--bin")
-        .arg("cladding-fake-credentials");
+        .arg("cladding-bridge");
     command
 }
 
@@ -584,17 +543,13 @@ mod tests {
                 "missing {expected:?} in {args:?}"
             );
         }
-        for package in ["mcp-run", "cladding-bridge", "cladding-fake-credentials"] {
+        for package in ["mcp-run", "cladding-bridge"] {
             assert!(
                 args.windows(2)
                     .any(|pair| pair[0] == "-p" && pair[1] == package),
                 "missing package {package:?} in {args:?}"
             );
         }
-        assert!(
-            args.windows(2)
-                .any(|pair| { pair[0] == "--bin" && pair[1] == "cladding-fake-credentials" })
-        );
     }
 
     #[test]

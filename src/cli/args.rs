@@ -62,13 +62,6 @@ pub(super) enum CommandSpec {
         )]
         secret: Vec<String>,
         #[arg(
-            long = "fake-credential-env",
-            value_name = "NAME=CREDENTIAL|none",
-            action = ArgAction::Append,
-            help = "Set or suppress a fake Baffle credential environment mapping. Repeat to set multiple values"
-        )]
-        fake_credential_env: Vec<String>,
-        #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
             allow_hyphen_values = true,
@@ -468,14 +461,12 @@ mod tests {
                     args,
                     env,
                     secret,
-                    fake_credential_env,
                     verbose,
                 } => {
                     assert_eq!(args, ["codex", "exec", "--full-auto"]);
                     assert!(!verbose);
                     assert!(env.is_empty());
                     assert!(secret.is_empty());
-                    assert!(fake_credential_env.is_empty());
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
@@ -495,14 +486,12 @@ mod tests {
                     args,
                     env,
                     secret,
-                    fake_credential_env,
                     verbose,
                 } => {
                     assert!(verbose);
                     assert_eq!(args, ["echo", "hello"]);
                     assert!(env.is_empty());
                     assert!(secret.is_empty());
-                    assert!(fake_credential_env.is_empty());
                 }
                 other => panic!("unexpected command: {other:?}"),
             }
@@ -575,7 +564,6 @@ mod tests {
             .render_help()
             .to_string();
         assert!(!exec_help.contains("--secret"));
-        assert!(!exec_help.contains("--fake-credential-env"));
         let cli = Cli::try_parse_from([
             "cladding",
             "exec",
@@ -588,35 +576,6 @@ mod tests {
             CommandSpec::Exec { args, env, .. } => {
                 assert_eq!(args, ["--secret", "github-token=env:GITHUB_TOKEN", "echo"]);
                 assert!(env.is_empty());
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn run_accepts_repeated_fake_credential_mappings_and_suppression() {
-        let cli = Cli::try_parse_from([
-            "cladding",
-            "run",
-            "--fake-credential-env",
-            "GITHUB_TOKEN=github-api",
-            "--fake-credential-env",
-            "OTHER_TOKEN=none",
-            "--",
-            "env",
-        ])
-        .expect("run fake credential mappings should parse");
-        match cli.command.expect("command") {
-            CommandSpec::Run {
-                fake_credential_env,
-                args,
-                ..
-            } => {
-                assert_eq!(
-                    fake_credential_env,
-                    ["GITHUB_TOKEN=github-api", "OTHER_TOKEN=none"]
-                );
-                assert_eq!(args, ["env"]);
             }
             other => panic!("unexpected command: {other:?}"),
         }

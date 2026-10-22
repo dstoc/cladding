@@ -1,6 +1,6 @@
 # Baffle integration test matrix
 
-The Baffle tests use the pinned **baffle-proxy 2.1.0** executable. They run
+The Baffle tests use the pinned **baffle-proxy 2.2.0** executable. They run
 from the **linux-integration** GitHub Actions job with rootless Podman.
 
 | Environment | Coverage |
@@ -10,11 +10,12 @@ from the **linux-integration** GitHub Actions job with rootless Podman.
 | Ubuntu, rootless Podman Machine | The Linux x86_64 guest uses the validated Baffle and helper assets. CI checks four host and VM bind combinations, then runs the shared runtime topology validator against the Machine. |
 | Apple Silicon macOS build | Cladding embeds and tests a Linux aarch64 Baffle executable on an ARM64 macOS host. |
 
-The CI asset jobs download the published Linux GNU Baffle 2.1.0 archives on
+The CI asset jobs download the published Linux GNU Baffle 2.2.0 archives on
 native x86_64 and aarch64 runners. Each job verifies the archive checksum and
 ELF architecture, then runs `baffle --version`. The x86_64 integration job
-starts the binary in Cladding's default proxy image and runs the policy and
-client suite under default Podman and runsc. The Linux-hosted Podman Machine
+starts the binary in Cladding's default proxy image, verifies Cladding can
+parse the JSON response from `baffle create`, and runs the policy and client
+suite under default Podman and runsc. The Linux-hosted Podman Machine
 job checks the x86_64 guest topology with the validated Baffle and helper
 assets. The Apple Silicon job builds Cladding with the Linux aarch64
 executable and checks its embedded architecture. The release workflow

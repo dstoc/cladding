@@ -159,9 +159,9 @@ There is no backward compatibility requirement. Remove Squid's config template, 
 
 ## Binary packaging and proxy image
 
-The current implementation embeds the published Baffle v2.1.0 Linux GNU release binary. Cladding fetches the matching x86_64 or aarch64 archive and verifies its `SHA256SUMS` entry before it embeds the binary. Cladding also pins the published `baffle-client` v2.1.0 crate for session-seed access and policy validation. Keep both references on published releases; do not use a Git revision workaround.
+The current implementation embeds the published Baffle v2.2.0 Linux GNU release binary. Cladding fetches the matching x86_64 or aarch64 archive and verifies its `SHA256SUMS` entry before it embeds the binary. Cladding also pins the published `baffle-client` v2.2.0 crate for session policy and credential identifier validation. Keep both references on published releases; do not use a Git revision workaround.
 
-For CI and Cladding release builds, set `CLADDING_BAFFLE_BIN` to the matching published Linux GNU Baffle binary, including for macOS host builds. The workflows use the explicit v2.1.0 release archives for x86_64 and aarch64 and verify each archive against that release's `SHA256SUMS` before extraction. Use x86_64 for x86_64 Linux releases and aarch64 for aarch64 Linux and Apple Silicon macOS releases. Include Baffle's `LICENSE`, `THIRD-PARTY-NOTICES.txt`, and required third-party license files in Cladding release archives. Check target architecture and dynamic dependencies. Diagnose unsupported targets explicitly.
+For CI and Cladding release builds, set `CLADDING_BAFFLE_BIN` to the matching published Linux GNU Baffle binary, including for macOS host builds. The workflows use the explicit v2.2.0 release archives for x86_64 and aarch64 and verify each archive against that release's `SHA256SUMS` before extraction. Use x86_64 for x86_64 Linux releases and aarch64 for aarch64 Linux and Apple Silicon macOS releases. Include Baffle's `LICENSE`, `THIRD-PARTY-NOTICES.txt`, and required third-party license files in Cladding release archives. Check target architecture and dynamic dependencies. Diagnose unsupported targets explicitly.
 
 Replace the Squid proxy image with a small compatible Linux image. It needs the embedded Baffle executable mounted read-only, a shell for `proxy_startup.sh`, runtime TLS libraries and any minimal utilities used by startup; it does **not** need Cargo or the full Rust toolchain. Preserve Cladding's ability to override the proxy image/build where compatible.
 
@@ -184,10 +184,12 @@ The proxy container owns the Baffle-specific initialization sequence:
 1. Verify the mounted configuration, public CA, private key and secret directory are present and readable; do not create or rewrite user-provisioned secret files.
 2. Start `baffle daemon --config /opt/config/proxy/daemon.toml` in file-only mode; use a private in-container control-socket directory.
 3. Wait locally for the daemon control socket to accept commands. This is an internal startup dependency, **not** a Cladding-level readiness barrier.
-4. Run `baffle create agent.toml` to establish the persistent agent session. If the network sandbox is enabled, also run `baffle create nw-sandbox.toml`.
+4. Run `baffle create agent.toml` to establish the persistent agent session. If the network sandbox is enabled, also run `baffle create nw-sandbox.toml`. Redirect successful session-creation output so Baffle's JSON response is not written to container logs.
 5. Supervise the daemon process. Forward shutdown signals and stop it on partial initialization failure. If it terminates unexpectedly, exit the proxy container unsuccessfully.
 
 The script must not run a long-lived ephemeral `baffle create` as its session manager. Its default session files set `persistent = true`, so creation returns immediately and the daemon owns each session until stopped or shut down. Fixed socket names allow reuse of Cladding's scoped proxy socket mounts.
+
+For `cladding run`, proxy startup defers the agent session while it starts the daemon. Cladding waits for Baffle readiness, runs `baffle create <agent-session-file>` through `podman exec`, and captures the v2.2.0 JSON response in the trusted host process. Cladding validates the session details, derives configured fake environment values from the returned seed, and then launches the agent command. The seed and captured JSON are not forwarded to the agent or routine logs. The network-sandbox session remains part of proxy startup.
 
 `cladding up` retains normal Podman orchestration, without waiting for the proxy's sessions to be ready before starting execution containers. A proxy startup failure can therefore be asynchronous and must be evident through `cladding logs proxy` and the container's exit status. Do not claim synchronous session-readiness guarantees or add a polling barrier in phase one.
 

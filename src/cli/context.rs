@@ -17,7 +17,7 @@ pub(super) struct Context {
     pub(super) runtime_root: PathBuf,
     config_source: ConfigSource,
     run_secret_mounts: Option<RunSecretMounts>,
-    capture_agent_credential_seed: bool,
+    defer_agent_session_creation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +52,7 @@ impl Context {
             workspace_root,
             config_source,
             run_secret_mounts: None,
-            capture_agent_credential_seed: false,
+            defer_agent_session_creation: false,
         }
     }
 
@@ -97,7 +97,7 @@ impl Context {
             runtime_root,
             config_source: ConfigSource::Resolved(Arc::new(config)),
             run_secret_mounts: self.run_secret_mounts.clone(),
-            capture_agent_credential_seed: self.capture_agent_credential_seed,
+            defer_agent_session_creation: self.defer_agent_session_creation,
         }
     }
 
@@ -113,8 +113,8 @@ impl Context {
         self
     }
 
-    pub(super) fn with_fake_credential_seed(mut self) -> Self {
-        self.capture_agent_credential_seed = true;
+    pub(super) fn with_deferred_agent_session_creation(mut self) -> Self {
+        self.defer_agent_session_creation = true;
         self
     }
 
@@ -143,20 +143,11 @@ impl Context {
                     }),
             );
         }
-        if self.capture_agent_credential_seed {
+        if self.defer_agent_session_creation {
             let proxy = &mut spec.proxy.container;
             proxy.env.push(cladding::runtime::RuntimeEnvVar {
-                name: "CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED".to_string(),
+                name: "CLADDING_DEFER_AGENT_SESSION".to_string(),
                 value: "true".to_string(),
-            });
-            proxy.mounts.push(RuntimeMount {
-                mount_path: "/opt/tools/bin/cladding-fake-credentials".to_string(),
-                read_only: true,
-                source: RuntimeMountSource::HostPath {
-                    path: self
-                        .project_root
-                        .join("tools/bin/cladding-fake-credentials"),
-                },
             });
         }
         Ok(spec)
@@ -361,8 +352,8 @@ mod tests {
     }
 
     #[test]
-    fn fake_seed_capture_is_proxy_only_and_mounts_the_embedded_helper() {
-        let temp = create_temp_dir("fake-seed-context");
+    fn run_defers_agent_session_creation_in_the_proxy_only() {
+        let temp = create_temp_dir("deferred-agent-session-context");
         let project_root = temp.join(".cladding");
         fs::create_dir_all(&project_root).unwrap();
         let config_path = temp.join("custom.json");
@@ -375,23 +366,17 @@ mod tests {
         let config = source.load_config().unwrap();
         let context = source
             .with_resolved_config(project_root.join("runtime/runs/run"), config)
-            .with_fake_credential_seed();
+            .with_deferred_agent_session_creation();
         let spec = context
             .runtime_spec(context.resolved_config().unwrap())
             .unwrap();
 
         assert!(spec.proxy.container.env.iter().any(|value| {
-            value.name == "CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED" && value.value == "true"
+            value.name == "CLADDING_DEFER_AGENT_SESSION" && value.value == "true"
         }));
-        assert!(
-            spec.proxy
-                .container
-                .mounts
-                .iter()
-                .any(|mount| { mount.mount_path == "/opt/tools/bin/cladding-fake-credentials" })
-        );
-        assert!(!spec.agent.container.mounts.iter().any(|mount| {
-            mount.mount_path.contains("credential-seed") || mount.mount_path == "/run/baffle"
+        assert!(!spec.proxy.container.mounts.iter().any(|mount| {
+            mount.mount_path.contains("credential-seed")
+                || mount.mount_path.contains("fake-credentials")
         }));
         assert!(
             !spec
@@ -399,7 +384,7 @@ mod tests {
                 .container
                 .env
                 .iter()
-                .any(|value| { value.name == "CLADDING_CAPTURE_AGENT_CREDENTIAL_SEED" })
+                .any(|value| { value.name == "CLADDING_DEFER_AGENT_SESSION" })
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -463,7 +448,6 @@ mod tests {
                 verbose: false,
                 env: Vec::new(),
                 secret: Vec::new(),
-                fake_credential_env: Vec::new(),
                 args: vec!["echo".to_string()],
             },
         )

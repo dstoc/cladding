@@ -35,7 +35,7 @@ jobs:
         with:
           cache-workspace-crates: true
       - name: Build Linux execution helpers
-        run: cargo build --locked --release -p mcp-run -p cladding-bridge -p cladding-fake-credentials --bin mcp-run --bin run-remote --bin cladding-bridge --bin cladding-fake-credentials --target-dir target/mcp-run
+        run: cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target-dir target/mcp-run
       - name: Build Linux Baffle socket operation probe
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Download and verify pinned x86_64 Baffle release
@@ -50,7 +50,7 @@ jobs:
             *) echo "Baffle is not the expected Linux x86_64 executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
-          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.1.0"
+          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"
       - name: Assemble and verify embedded Linux tools
         run: |
           set -euo pipefail
@@ -60,7 +60,6 @@ jobs:
           cp "target/mcp-run/release/mcp-run" "$asset_dir/mcp-run"
           cp "target/mcp-run/release/run-remote" "$asset_dir/run-remote"
           cp "target/mcp-run/release/cladding-bridge" "$asset_dir/cladding-bridge"
-          cp "target/mcp-run/release/cladding-fake-credentials" "$asset_dir/cladding-fake-credentials"
           cp "$RUNNER_TEMP/baffle-socket-probe" "$asset_dir/baffle-socket-probe"
           for tool in "$asset_dir"/*; do
             test -f "$tool"
@@ -94,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote cladding-bridge cladding-fake-credentials baffle-socket-probe; do
+          for name in baffle mcp-run run-remote cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
             if [ ! -f "$tool" ]; then
               echo "Downloaded embedded Linux tool is missing: $tool" >&2
@@ -115,7 +114,6 @@ jobs:
           echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge" >> "$GITHUB_ENV"
-          echo "CLADDING_FAKE_CREDENTIALS_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-fake-credentials" >> "$GITHUB_ENV"
           echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.96
         with:
@@ -128,7 +126,6 @@ jobs:
           test -x "$CLADDING_MCP_RUN_BIN"
           test -x "$CLADDING_RUN_REMOTE_BIN"
           test -x "$CLADDING_BRIDGE_BIN"
-          test -x "$CLADDING_FAKE_CREDENTIALS_BIN"
           test -x "$CLADDING_BAFFLE_BIN"
       - name: Build Cladding with the embedded Baffle executable
         run: cargo build --locked -p cladding --bin cladding
@@ -154,7 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote cladding-bridge cladding-fake-credentials baffle-socket-probe; do
+          for name in baffle mcp-run run-remote cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
             if [ ! -f "$tool" ]; then
               echo "Downloaded embedded Linux tool is missing: $tool" >&2
@@ -175,7 +172,6 @@ jobs:
           echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge" >> "$GITHUB_ENV"
-          echo "CLADDING_FAKE_CREDENTIALS_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-fake-credentials" >> "$GITHUB_ENV"
           echo "BAFFLE_SOCKET_PROBE_BIN=$RUNNER_TEMP/linux-tools/bin/baffle-socket-probe" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.96
       - name: Install rootless Podman dependencies
@@ -237,7 +233,7 @@ jobs:
         with:
           cache-workspace-crates: true
       - name: Build Linux execution helpers
-        run: cargo build --locked --release -p mcp-run -p cladding-bridge -p cladding-fake-credentials --bin mcp-run --bin run-remote --bin cladding-bridge --bin cladding-fake-credentials --target aarch64-unknown-linux-gnu --target-dir target/mcp-run
+        run: cargo build --locked --release -p mcp-run -p cladding-bridge --bin mcp-run --bin run-remote --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/mcp-run
       - name: Build Linux Baffle socket operation probe
         run: cc -std=c11 -Wall -Wextra -Werror scripts/baffle_socket_probe.c -o "$RUNNER_TEMP/baffle-socket-probe"
       - name: Download and verify pinned aarch64 Baffle release
@@ -252,7 +248,7 @@ jobs:
             *) echo "Baffle is not the expected Linux aarch64 executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
-          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.1.0"
+          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"
       - name: Assemble and verify embedded Linux tools
         run: |
           set -euo pipefail
@@ -262,7 +258,6 @@ jobs:
           cp "target/mcp-run/aarch64-unknown-linux-gnu/release/mcp-run" "$asset_dir/mcp-run"
           cp "target/mcp-run/aarch64-unknown-linux-gnu/release/run-remote" "$asset_dir/run-remote"
           cp "target/mcp-run/aarch64-unknown-linux-gnu/release/cladding-bridge" "$asset_dir/cladding-bridge"
-          cp "target/mcp-run/aarch64-unknown-linux-gnu/release/cladding-fake-credentials" "$asset_dir/cladding-fake-credentials"
           cp "$RUNNER_TEMP/baffle-socket-probe" "$asset_dir/baffle-socket-probe"
           for tool in "$asset_dir"/*; do
             test -f "$tool"
@@ -298,7 +293,7 @@ jobs:
         run: |
           set -euo pipefail
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote cladding-bridge cladding-fake-credentials baffle-socket-probe; do
+          for name in baffle mcp-run run-remote cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
             test -f "$tool"
             chmod 0755 "$tool"
@@ -316,7 +311,6 @@ jobs:
           echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge" >> "$GITHUB_ENV"
-          echo "CLADDING_FAKE_CREDENTIALS_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-fake-credentials" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
         with:
@@ -454,7 +448,7 @@ jobs:
         run: |
           test "$(uname -m)" = arm64
           tool_dir="$RUNNER_TEMP/linux-tools/bin"
-          for name in baffle mcp-run run-remote cladding-bridge cladding-fake-credentials baffle-socket-probe; do
+          for name in baffle mcp-run run-remote cladding-bridge baffle-socket-probe; do
             tool="$tool_dir/$name"
             test -f "$tool"
             chmod 0755 "$tool"
@@ -473,7 +467,6 @@ jobs:
           echo "CLADDING_MCP_RUN_BIN=$RUNNER_TEMP/linux-tools/bin/mcp-run" >> "$GITHUB_ENV"
           echo "CLADDING_RUN_REMOTE_BIN=$RUNNER_TEMP/linux-tools/bin/run-remote" >> "$GITHUB_ENV"
           echo "CLADDING_BRIDGE_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-bridge" >> "$GITHUB_ENV"
-          echo "CLADDING_FAKE_CREDENTIALS_BIN=$RUNNER_TEMP/linux-tools/bin/cladding-fake-credentials" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - name: Build Cladding for Apple Silicon with Linux aarch64 binaries
         run: cargo build --locked --bin cladding

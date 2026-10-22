@@ -3,6 +3,7 @@ use super::{exec, lifecycle};
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
 use cladding::identity::invoking_uid;
+use serde::Deserialize;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -10,16 +11,21 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+const BAFFLE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const BAFFLE_READY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+const BAFFLE_SESSION_CREATE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_BAFFLE_OUTPUT_BYTES: usize = 64 * 1024;
 
 pub(super) fn cmd_run(
     source_context: &Context,
     env_vars: &[String],
     secret_overrides: &[String],
-    fake_credential_overrides: &[String],
     args: &[String],
     config_uses_stdin: bool,
     verbose: bool,
@@ -36,8 +42,6 @@ pub(super) fn cmd_run(
         |name| std::env::var_os(name),
         read_run_secret_file,
     )?;
-    let fake_credential_overrides = parse_fake_credential_overrides(fake_credential_overrides)?;
-
     let instance_name = format!("cladding-run-{}", generate_uuid_v4()?);
     if verbose {
         println!("starting one-off instance: {instance_name}");
@@ -49,11 +53,7 @@ pub(super) fn cmd_run(
         ))
     })?;
     config.name = instance_name.clone();
-    let fake_mappings = effective_fake_credential_mappings(
-        &config.fake_credential_env,
-        &fake_credential_overrides,
-        env_vars,
-    );
+    let fake_mappings = configured_fake_credential_mappings(&config.fake_credential_env, env_vars);
     validate_fake_credential_mappings(
         &source_context.project_root,
         &config,
@@ -120,9 +120,7 @@ pub(super) fn cmd_run(
         Some(secret_mounts) => context.with_run_secret_mounts(secret_mounts),
         None => context,
     };
-    if !fake_mappings.is_empty() {
-        context = context.with_fake_credential_seed();
-    }
+    context = context.with_deferred_agent_session_creation();
     let config = context
         .resolved_config()
         .expect("one-off run context stores its resolved configuration");
@@ -189,16 +187,23 @@ pub(super) fn cmd_run(
         let _command = cladding::runtime_metrics::phase("user command");
         match signals.received() {
             Some(signal) => Err(signal_status_error(signal)),
-            None => match derive_fake_environment(&spec.proxy.container.name, &fake_mappings) {
-                Ok(fake_environment) => exec::cmd_run_command(
-                    &context,
-                    config,
-                    &spec,
-                    env_vars,
-                    &fake_environment,
-                    args,
-                    !config_uses_stdin,
-                ),
+            None => match create_agent_session_and_fake_environment(
+                &spec.proxy.container.name,
+                config.agent_session_config(),
+                &fake_mappings,
+                &signals,
+            ) {
+                Ok(fake_environment) => run_if_not_cancelled(signals.received(), || {
+                    exec::cmd_run_command(
+                        &context,
+                        config,
+                        &spec,
+                        env_vars,
+                        &fake_environment,
+                        args,
+                        !config_uses_stdin,
+                    )
+                }),
                 Err(error) => Err(error),
             },
         }
@@ -224,58 +229,11 @@ pub(super) fn cmd_run(
     )
 }
 
-fn parse_fake_credential_overrides(
-    raw_overrides: &[String],
-) -> Result<BTreeMap<String, Option<String>>> {
-    let mut overrides = BTreeMap::new();
-    for raw in raw_overrides {
-        let Some((environment_name, credential_name)) = raw.split_once('=') else {
-            return Err(Error::message(
-                "fake credential environment override must use NAME=CREDENTIAL or NAME=none",
-            ));
-        };
-        if !is_environment_variable_name(environment_name) {
-            return Err(Error::message(
-                "fake credential environment override requires a valid environment variable name",
-            ));
-        }
-        let mapping = if credential_name == "none" {
-            None
-        } else if cladding_fake_credentials::is_credential_identifier(credential_name) {
-            Some(credential_name.to_string())
-        } else {
-            return Err(Error::message(format!(
-                "fake credential mapping for '{environment_name}' requires a valid Baffle credential identifier or 'none'"
-            )));
-        };
-        if overrides
-            .insert(environment_name.to_string(), mapping)
-            .is_some()
-        {
-            return Err(Error::message(format!(
-                "duplicate fake credential environment override for '{environment_name}'"
-            )));
-        }
-    }
-    Ok(overrides)
-}
-
-fn effective_fake_credential_mappings(
+fn configured_fake_credential_mappings(
     configured: &BTreeMap<String, String>,
-    overrides: &BTreeMap<String, Option<String>>,
     explicit_environment: &[String],
 ) -> BTreeMap<String, String> {
     let mut mappings = configured.clone();
-    for (environment_name, credential_name) in overrides {
-        match credential_name {
-            Some(credential_name) => {
-                mappings.insert(environment_name.clone(), credential_name.clone());
-            }
-            None => {
-                mappings.remove(environment_name);
-            }
-        }
-    }
     for value in explicit_environment {
         let environment_name = value.split_once('=').map(|(name, _)| name).unwrap_or(value);
         mappings.remove(environment_name);
@@ -346,70 +304,250 @@ fn validate_fake_credential_mappings(
         .map_err(Error::message)
 }
 
-fn derive_fake_environment(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatedAgentSession {
+    id: String,
+    socket: String,
+    persistent: bool,
+    #[serde(default)]
+    ca_certificate_pem: Option<String>,
+    credential_seed_base64url: Option<String>,
+}
+
+struct CapturedProcessOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+}
+
+fn create_agent_session_and_fake_environment(
     proxy_container: &str,
+    session_config: &str,
     mappings: &BTreeMap<String, String>,
+    signals: &SignalWatcher,
 ) -> Result<Vec<String>> {
-    if mappings.is_empty() {
-        return Ok(Vec::new());
+    wait_for_baffle_ready(proxy_container, signals)?;
+    if let Some(signal) = signals.received() {
+        return Err(signal_status_error(signal));
     }
 
-    let mut wait = Command::new("podman");
-    wait.args([
-        "exec",
-        proxy_container,
-        "/bin/sh",
-        "-c",
-        "attempt=0; while [ ! -s \"$1\" ]; do attempt=$((attempt + 1)); [ \"$attempt\" -lt 600 ] || exit 1; sleep 0.1; done",
-        "cladding-wait-for-seed",
-        "/run/baffle/cladding-fake-credentials/agent.seed",
-    ]);
-    let wait_output = cladding::runtime_metrics::output(&mut wait).map_err(|error| {
-        Error::message(format!(
-            "failed to wait for the Baffle agent session: {error}"
-        ))
-    })?;
-    if !wait_output.status.success() {
-        return Err(Error::message(
-            "Baffle agent session did not publish its credential seed before startup timed out",
-        ));
-    }
-
-    let mut command = Command::new("podman");
-    command.args([
-        "exec",
-        proxy_container,
-        "/opt/tools/bin/cladding-fake-credentials",
-        "derive",
-        "/run/baffle/cladding-fake-credentials/agent.seed",
-    ]);
-    command.args(mappings.iter().map(|(environment_name, credential_name)| {
-        format!("{environment_name}={credential_name}")
-    }));
-    let output = cladding::runtime_metrics::output(&mut command).map_err(|error| {
-        Error::message(format!("failed to run Baffle credential helper: {error}"))
-    })?;
+    let output = run_podman_exec_capture(
+        &[
+            "exec",
+            proxy_container,
+            "/opt/tools/bin/baffle",
+            "create",
+            session_config,
+        ],
+        BAFFLE_SESSION_CREATE_TIMEOUT,
+        signals,
+        "Baffle agent session creation",
+    )?;
     if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::message(format!(
-            "failed to derive per-session fake credentials: {}",
-            detail.trim()
-        )));
+        return Err(Error::message("Baffle failed to create the agent session"));
     }
+    let session = parse_created_agent_session(&output.stdout)?;
+    let _ = session.ca_certificate_pem;
+    let seed = session
+        .credential_seed_base64url
+        .as_deref()
+        .ok_or_else(|| Error::message("Baffle did not return an agent session credential seed"))?;
 
-    let values =
-        serde_json::from_slice::<BTreeMap<String, String>>(&output.stdout).map_err(|_| {
-            Error::message("Baffle credential helper returned invalid environment data")
-        })?;
-    if values.len() != mappings.len() || mappings.keys().any(|name| !values.contains_key(name)) {
+    derive_with_cancellation_check(
+        || signals.received(),
+        || {
+            let values = cladding_fake_credentials::derive_environment(seed, mappings)
+                .map_err(Error::message)?;
+            Ok(values
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect())
+        },
+    )
+}
+
+fn parse_created_agent_session(output: &[u8]) -> Result<CreatedAgentSession> {
+    let session: CreatedAgentSession = serde_json::from_slice(output)
+        .map_err(|_| Error::message("Baffle returned an invalid agent session response"))?;
+    if session.id.trim().is_empty() || session.id.chars().any(char::is_control) {
         return Err(Error::message(
-            "Baffle credential helper returned incomplete environment data",
+            "Baffle returned an unexpected agent session identifier",
         ));
     }
-    Ok(values
-        .into_iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect())
+    if session.socket != "/run/cladding/proxy/agent/proxy.sock" {
+        return Err(Error::message(
+            "Baffle returned an unexpected agent session socket",
+        ));
+    }
+    if !session.persistent {
+        return Err(Error::message(
+            "Baffle returned a non-persistent agent session",
+        ));
+    }
+    let seed = session
+        .credential_seed_base64url
+        .as_deref()
+        .ok_or_else(|| Error::message("Baffle did not return an agent session credential seed"))?;
+    cladding_fake_credentials::validate_seed(seed).map_err(Error::message)?;
+    Ok(session)
+}
+
+fn wait_for_baffle_ready(proxy_container: &str, signals: &SignalWatcher) -> Result<()> {
+    let deadline = Instant::now() + BAFFLE_READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(signal) = signals.received() {
+            return Err(signal_status_error(signal));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let attempt_timeout = remaining.min(BAFFLE_READY_ATTEMPT_TIMEOUT);
+        let readiness = run_podman_exec_capture(
+            &["exec", proxy_container, "/opt/tools/bin/baffle", "list"],
+            attempt_timeout,
+            signals,
+            "Baffle readiness check",
+        );
+        if let Ok(output) = readiness {
+            if output.status.success() {
+                return Ok(());
+            }
+        } else if let Some(signal) = signals.received() {
+            return Err(signal_status_error(signal));
+        }
+
+        let sleep_until = (Instant::now() + Duration::from_millis(50)).min(deadline);
+        while Instant::now() < sleep_until {
+            if let Some(signal) = signals.received() {
+                return Err(signal_status_error(signal));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    if let Some(signal) = signals.received() {
+        return Err(signal_status_error(signal));
+    }
+    Err(Error::message(
+        "timed out waiting for the Baffle daemon to become ready",
+    ))
+}
+
+fn run_podman_exec_capture(
+    args: &[&str],
+    timeout: Duration,
+    signals: &SignalWatcher,
+    operation: &str,
+) -> Result<CapturedProcessOutput> {
+    let mut command = Command::new("podman");
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    capture_command_output(&mut command, timeout, || signals.received(), operation)
+}
+
+fn capture_command_output(
+    command: &mut Command,
+    timeout: Duration,
+    mut cancelled: impl FnMut() -> Option<i32>,
+    operation: &str,
+) -> Result<CapturedProcessOutput> {
+    let mut child = command
+        .spawn()
+        .map_err(|_| Error::message(format!("failed to start {operation}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .expect("captured command stdout is piped");
+    let reader = thread::spawn(move || read_capped_output(stdout));
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(signal) = cancelled() {
+            stop_process_group(&mut child);
+            let _ = reader.join();
+            return Err(signal_status_error(signal));
+        }
+        if Instant::now() >= deadline {
+            stop_process_group(&mut child);
+            let _ = reader.join();
+            return Err(Error::message(format!("{operation} timed out")));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let (stdout, overflowed) = reader
+                    .join()
+                    .map_err(|_| Error::message(format!("failed to read {operation} output")))?
+                    .map_err(|_| Error::message(format!("failed to read {operation} output")))?;
+                if overflowed {
+                    return Err(Error::message(format!(
+                        "{operation} returned an oversized response"
+                    )));
+                }
+                return Ok(CapturedProcessOutput { status, stdout });
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                stop_process_group(&mut child);
+                let _ = reader.join();
+                return Err(Error::message(format!("failed to wait for {operation}")));
+            }
+        }
+    }
+}
+
+fn read_capped_output(mut reader: impl std::io::Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut overflowed = false;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok((output, overflowed));
+        }
+        let remaining = MAX_BAFFLE_OUTPUT_BYTES.saturating_sub(output.len());
+        let keep = remaining.min(read);
+        output.extend_from_slice(&buffer[..keep]);
+        overflowed |= keep < read;
+    }
+}
+
+fn stop_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as libc::pid_t);
+        // SAFETY: this signals the private process group created for this child.
+        unsafe {
+            libc::kill(process_group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn run_if_not_cancelled<T>(signal: Option<i32>, launch: impl FnOnce() -> Result<T>) -> Result<T> {
+    match signal {
+        Some(signal) => Err(signal_status_error(signal)),
+        None => launch(),
+    }
+}
+
+fn derive_with_cancellation_check<T>(
+    mut cancelled: impl FnMut() -> Option<i32>,
+    derive: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Some(signal) = cancelled() {
+        return Err(signal_status_error(signal));
+    }
+    let values = derive()?;
+    if let Some(signal) = cancelled() {
+        return Err(signal_status_error(signal));
+    }
+    Ok(values)
 }
 
 enum RunSecretSource {
@@ -1028,7 +1166,7 @@ mod tests {
             ConfigSource::File(external_config),
         );
 
-        let error = cmd_run(&context, &[], &[], &[], &["echo".to_string()], false, false)
+        let error = cmd_run(&context, &[], &[], &["echo".to_string()], false, false)
             .expect_err("run must require the project config created by init");
 
         assert!(
@@ -1057,51 +1195,116 @@ mod tests {
     }
 
     #[test]
-    fn fake_credential_run_overrides_support_addition_and_suppression() {
-        let raw = vec![
-            "GITHUB_TOKEN=github-alt".to_string(),
-            "OPENAI_API_KEY=none".to_string(),
-            "CUSTOM_TOKEN=custom".to_string(),
-        ];
-        let overrides = parse_fake_credential_overrides(&raw).unwrap();
+    fn explicit_environment_values_override_configured_fake_mappings() {
         let configured = BTreeMap::from([
             ("GITHUB_TOKEN".to_string(), "github-api".to_string()),
+            ("GH_TOKEN".to_string(), "github-api".to_string()),
             ("OPENAI_API_KEY".to_string(), "openai-api".to_string()),
-            ("ANTHROPIC_API_KEY".to_string(), "anthropic-api".to_string()),
         ]);
-        let explicit = vec![
-            "OPENAI_API_KEY=ordinary-value".to_string(),
-            "ANTHROPIC_API_KEY=other-value".to_string(),
-        ];
+        let explicit = vec!["GITHUB_TOKEN=ordinary-value".to_string()];
 
-        let effective = effective_fake_credential_mappings(&configured, &overrides, &explicit);
+        let effective = configured_fake_credential_mappings(&configured, &explicit);
 
         assert_eq!(
             effective,
             BTreeMap::from([
-                ("CUSTOM_TOKEN".to_string(), "custom".to_string()),
-                ("GITHUB_TOKEN".to_string(), "github-alt".to_string()),
+                ("GH_TOKEN".to_string(), "github-api".to_string()),
+                ("OPENAI_API_KEY".to_string(), "openai-api".to_string()),
             ])
         );
-        assert_eq!(
-            explicit,
-            [
-                "OPENAI_API_KEY=ordinary-value",
-                "ANTHROPIC_API_KEY=other-value"
-            ]
-        );
+        assert_eq!(explicit, ["GITHUB_TOKEN=ordinary-value"]);
     }
 
     #[test]
-    fn fake_credential_overrides_reject_invalid_names_and_duplicates() {
+    fn explicit_environment_values_without_fake_mappings_remain_unchanged() {
+        let explicit = vec!["TOKEN=ordinary-value".to_string()];
+        assert!(configured_fake_credential_mappings(&BTreeMap::new(), &explicit).is_empty());
+        assert_eq!(explicit, ["TOKEN=ordinary-value"]);
+    }
+
+    #[test]
+    fn baffle_session_creation_response_requires_valid_expected_details_and_seed() {
+        let valid = br#"{
+            "id": "session-123",
+            "socket": "/run/cladding/proxy/agent/proxy.sock",
+            "persistent": true,
+            "ca_certificate_pem": null,
+            "credential_seed_base64url": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }"#;
+        let parsed = parse_created_agent_session(valid).unwrap();
+        assert_eq!(parsed.id, "session-123");
+
         for invalid in [
-            vec!["BAD-NAME=github-api".to_string()],
-            vec!["TOKEN=not..valid".to_string()],
-            vec!["TOKEN".to_string()],
-            vec!["TOKEN=one".to_string(), "TOKEN=two".to_string()],
+            &b"not-json"[..],
+            br#"{"id":"session-123","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":true}"#,
+            br#"{"id":"session-123","socket":"/wrong.sock","persistent":true,"credential_seed_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+            br#"{"id":"session-123","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":false,"credential_seed_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+            br#"{"id":"session-123","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":true,"credential_seed_base64url":"bad-seed"}"#,
+            br#"{"id":"session-123","socket":"/run/cladding/proxy/agent/proxy.sock","persistent":true,"credential_seed_base64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","unexpected":true}"#,
         ] {
-            assert!(parse_fake_credential_overrides(&invalid).is_err());
+            assert!(parse_created_agent_session(invalid).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_during_session_creation_prevents_workload_launch() {
+        let temp = std::env::temp_dir().join(format!(
+            "cladding-run-cancelled-session-{}-{}",
+            std::process::id(),
+            generate_uuid_v4().unwrap()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let marker = temp.join("workload-launched");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 5; touch \"$1\"", "cancelled-session-fixture"])
+            .arg(&marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+
+        let started = Instant::now();
+        let result = capture_command_output(
+            &mut command,
+            Duration::from_secs(5),
+            || (started.elapsed() >= Duration::from_millis(100)).then_some(SIGTERM),
+            "session creation fixture",
+        );
+        assert!(result.is_err());
+        let launch_result = run_if_not_cancelled(Some(SIGTERM), || {
+            fs::write(&marker, b"launched")
+                .map_err(|error| Error::message(format!("fixture failed: {error}")))
+        });
+        assert!(launch_result.is_err());
+        assert!(!marker.exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cancellation_during_fake_derivation_discards_values_before_workload_launch() {
+        let signal = AtomicI32::new(0);
+        let values = derive_with_cancellation_check(
+            || match signal.load(Ordering::SeqCst) {
+                0 => None,
+                signal => Some(signal),
+            },
+            || {
+                signal.store(SIGTERM, Ordering::SeqCst);
+                Ok(vec!["TOKEN=fake-value".to_string()])
+            },
+        );
+        assert!(values.is_err());
+
+        let workload_launched = std::sync::atomic::AtomicBool::new(false);
+        let launch = run_if_not_cancelled(Some(signal.load(Ordering::SeqCst)), || {
+            workload_launched.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(launch.is_err());
+        assert!(!workload_launched.load(Ordering::SeqCst));
     }
 
     #[test]

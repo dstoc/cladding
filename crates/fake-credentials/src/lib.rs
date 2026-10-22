@@ -55,18 +55,13 @@ pub fn validate_mappings(
 
 /// Derive a fake credential from Baffle's unpadded Base64URL session seed.
 ///
-/// This matches Baffle v2.1.0's `baffle:credential-substitution:v1\0` HMAC
+/// This matches Baffle v2.2.0's `baffle:credential-substitution:v1\0` HMAC
 /// domain, exact credential identifier bytes, and `baffle_v1_` representation.
 pub fn derive_fake_credential(
     seed_base64url: &str,
     credential_name: &str,
 ) -> Result<String, String> {
-    let seed = URL_SAFE_NO_PAD
-        .decode(seed_base64url)
-        .map_err(|_| "Baffle returned an invalid credential seed".to_string())?;
-    if seed.len() != SEED_BYTES {
-        return Err("Baffle returned a credential seed with an invalid length".to_string());
-    }
+    let seed = decode_seed(seed_base64url)?;
     validate_secret_name(credential_name)
         .map_err(|_| "Baffle credential identifier is invalid".to_string())?;
 
@@ -79,6 +74,21 @@ pub fn derive_fake_credential(
         "baffle_v1_{}",
         URL_SAFE_NO_PAD.encode(digest.as_ref())
     ))
+}
+
+/// Validate Baffle's unpadded Base64URL session seed without deriving a value.
+pub fn validate_seed(seed_base64url: &str) -> Result<(), String> {
+    decode_seed(seed_base64url).map(|_| ())
+}
+
+fn decode_seed(seed_base64url: &str) -> Result<Vec<u8>, String> {
+    let seed = URL_SAFE_NO_PAD
+        .decode(seed_base64url)
+        .map_err(|_| "Baffle returned an invalid credential seed".to_string())?;
+    if seed.len() != SEED_BYTES {
+        return Err("Baffle returned a credential seed with an invalid length".to_string());
+    }
+    Ok(seed)
 }
 
 /// Derive each environment value. The variable name does not enter derivation.
@@ -129,7 +139,7 @@ format = "bearer"
     }
 
     #[test]
-    fn matches_the_baffle_v2_1_published_test_vector() {
+    fn matches_the_baffle_v2_2_published_test_vector() {
         assert_eq!(
             derive_fake_credential(&seed(), "github-api").unwrap(),
             PUBLISHED_VECTOR

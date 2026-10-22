@@ -228,9 +228,9 @@ dependencies = [
 
 [[package]]
 name = "baffle-client"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a394efdf5c64326b66e36967f3c32869c9be5d5aa4da713fbbcf97f41a8c6e7"
+checksum = "37dede0aeb990bd25c032696a4fc409a23b93b77d6135f9b8709a7d97bcb4561"
 dependencies = [
  "libc",
  "serde",
@@ -438,13 +438,9 @@ dependencies = [
 name = "cladding-fake-credentials"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "baffle-client",
  "base64 0.23.1",
- "libc",
  "ring",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
