@@ -1,7 +1,8 @@
 use super::CONTAINER_HOME_DIR;
 use super::args::{ExecTarget, LogsTarget};
-use super::control;
+use super::control::{self, ComponentMountIdentity, MountIdentity};
 use super::selection::SelectedRun;
+use super::terminal::ForegroundTerminal;
 use anyhow::Context as _;
 use cladding::config::{ExecutionConfig, MountTarget, MountType, ResolvedMountConfig};
 use cladding::error::{Error, Result};
@@ -54,9 +55,15 @@ pub(super) fn cmd_exec_selected(
         .control_socket
         .as_deref()
         .ok_or_else(|| Error::message("selected run has no supervisor control endpoint"))?;
-    let defaults = control::admit(Path::new(socket), selected.uuid(), role)?;
+    let admission = control::admit(Path::new(socket), selected.uuid(), role, container_id)?;
     let cwd = env::current_dir().with_context(|| "failed to determine current directory")?;
-    let workdir = inspect_run_workdir(container_id, role, &cwd, component.cwd_mappings.as_deref())?;
+    let workdir = inspect_run_workdir(
+        container_id,
+        role,
+        &cwd,
+        component.cwd_mappings.as_deref(),
+        &admission.mount_identity,
+    )?;
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let mut command = Command::new("podman");
     if interactive {
@@ -79,7 +86,7 @@ pub(super) fn cmd_exec_selected(
         .iter()
         .map(|value| value.split_once('=').map(|(key, _)| key).unwrap_or(value))
         .collect::<std::collections::HashSet<_>>();
-    for value in defaults {
+    for value in admission.fake_environment {
         let key = value.split_once('=').map(|(key, _)| key).unwrap_or(&value);
         if !overridden.contains(key) {
             command.arg("--env").arg(value);
@@ -88,17 +95,18 @@ pub(super) fn cmd_exec_selected(
     for value in env_vars {
         command.arg("--env").arg(value);
     }
-    let _ = control::admit(Path::new(socket), selected.uuid(), role)?;
     command.arg(container_id).args(args);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
+    let foreground_terminal = interactive
+        .then(|| ForegroundTerminal::capture(0))
+        .transpose()
+        .with_context(|| "failed to prepare controlling terminal for podman exec")?;
+    configure_podman_process_group(&mut command, foreground_terminal.as_ref());
     let mut child = command
         .spawn()
         .with_context(|| "failed to run podman exec")?;
-    wait_for_attached_exec(&mut child, Path::new(socket), selected.uuid())
+    let result = wait_for_attached_exec(&mut child, Path::new(socket), selected.uuid());
+    drop(foreground_terminal);
+    result
 }
 
 fn wait_for_attached_exec(child: &mut Child, socket: &Path, uuid: &str) -> Result<()> {
@@ -207,6 +215,125 @@ pub(super) fn cmd_run_command(
             cancellation_check: Some(cancellation_check),
         },
     )
+}
+
+pub(super) fn capture_run_mount_identities(
+    runtime_spec: &RuntimeSpec,
+) -> Result<Vec<ComponentMountIdentity>> {
+    let mut components = vec![
+        ("proxy", &runtime_spec.proxy),
+        ("agent", &runtime_spec.agent),
+    ];
+    if let Some(component) = &runtime_spec.nw_sandbox {
+        components.push(("nw-sandbox", component));
+    }
+    if let Some(component) = &runtime_spec.fs_sandbox {
+        components.push(("fs-sandbox", component));
+    }
+
+    let mut identities = Vec::with_capacity(components.len());
+    for (role, component) in components {
+        let output = Command::new("podman")
+            .args(["inspect", &component.container.name])
+            .output()
+            .with_context(|| format!("failed to inspect run {role} component mounts"))?;
+        if !output.status.success() {
+            return Err(Error::message(format!(
+                "failed to inspect run {role} component mounts"
+            )));
+        }
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+            Error::message(format!("podman returned invalid inspection for run {role}"))
+        })?;
+        let object = document
+            .as_array()
+            .and_then(|items| items.first())
+            .or_else(|| document.as_object().map(|_| &document))
+            .ok_or_else(|| {
+                Error::message(format!("podman returned no inspection for run {role}"))
+            })?;
+        let id = object
+            .get("Id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Error::message(format!("run {role} has no immutable container ID")))?;
+        let labels = object
+            .get("Config")
+            .and_then(|config| config.get("Labels"))
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| Error::message(format!("run {role} inspection omitted labels")))?;
+        let expected_identity = runtime_spec
+            .run_private_identity
+            .as_deref()
+            .ok_or_else(|| Error::message("run private identity metadata was not initialized"))?;
+        let expected_socket = runtime_spec
+            .run_control_socket
+            .as_deref()
+            .ok_or_else(|| Error::message("run control endpoint metadata was not initialized"))?;
+        let expected_project_root = runtime_spec.project_root.to_string_lossy();
+        let expected_socket = expected_socket.display().to_string();
+        let expected_roles = runtime_spec.run_expected_roles.join(",");
+        for (label, expected) in [
+            ("cladding", runtime_spec.project_name.as_str()),
+            ("project_root", expected_project_root.as_ref()),
+            ("app", role),
+            ("cladding_run_metadata_version", "2"),
+            ("cladding_run_control_socket", expected_socket.as_str()),
+            ("cladding_run_private_identity", expected_identity),
+            ("cladding_run_expected_roles", expected_roles.as_str()),
+        ] {
+            if labels.get(label).and_then(serde_json::Value::as_str) != Some(expected) {
+                return Err(Error::message(format!(
+                    "run {role} inspection has conflicting {label} metadata"
+                )));
+            }
+        }
+        let mounts = object
+            .get("Mounts")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| Error::message(format!("run {role} inspection omitted mounts")))?;
+        let mounts = mounts
+            .iter()
+            .map(|mount| {
+                let string_field = |name: &str| {
+                    mount
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                };
+                let destination = string_field("Destination").ok_or_else(|| {
+                    Error::message(format!(
+                        "run {role} inspection has a mount without destination"
+                    ))
+                })?;
+                let mount_type = string_field("Type").ok_or_else(|| {
+                    Error::message(format!("run {role} inspection has a mount without type"))
+                })?;
+                let read_only = mount
+                    .get("RW")
+                    .and_then(serde_json::Value::as_bool)
+                    .map(|read_write| !read_write)
+                    .ok_or_else(|| {
+                        Error::message(format!("run {role} inspection omitted mount access mode"))
+                    })?;
+                let identity = MountIdentity {
+                    destination,
+                    mount_type,
+                    source: string_field("Source"),
+                    name: string_field("Name"),
+                    read_only,
+                };
+                Ok(identity)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        identities.push(ComponentMountIdentity {
+            role: role.to_string(),
+            container_id: id.to_string(),
+            mounts,
+        });
+    }
+    Ok(identities)
 }
 
 pub(super) fn cmd_logs_selected(
@@ -336,7 +463,16 @@ fn run_podman_exec(
     }
 
     let command_started = std::time::Instant::now();
-    let mut child = spawn_podman_exec(&mut cmd, command_name, cancellation_check)?;
+    let foreground_terminal = interactive
+        .then(|| ForegroundTerminal::capture(0))
+        .transpose()
+        .with_context(|| "failed to prepare controlling terminal for podman exec")?;
+    let mut child = spawn_podman_exec(
+        &mut cmd,
+        command_name,
+        cancellation_check,
+        foreground_terminal.as_ref(),
+    )?;
 
     let mut signal_handle = None;
     let mut signal_thread = None;
@@ -377,6 +513,7 @@ fn run_podman_exec(
     if let Some(thread) = signal_thread {
         let _ = thread.join();
     }
+    drop(foreground_terminal);
 
     if let Some(code) = status.code() {
         if code == 0 {
@@ -401,6 +538,7 @@ fn spawn_podman_exec(
     command: &mut Command,
     command_name: &str,
     cancellation_check: Option<&dyn Fn() -> Option<i32>>,
+    foreground_terminal: Option<&ForegroundTerminal>,
 ) -> Result<Child> {
     if let Some(signal) = cancellation_check.and_then(|check| check()) {
         return Err(Error::CommandFailed {
@@ -409,14 +547,27 @@ fn spawn_podman_exec(
         });
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
+    configure_podman_process_group(command, foreground_terminal);
     Ok(command
         .spawn()
         .with_context(|| format!("failed to run podman exec for {command_name}"))?)
+}
+
+fn configure_podman_process_group(
+    command: &mut Command,
+    foreground_terminal: Option<&ForegroundTerminal>,
+) {
+    #[cfg(unix)]
+    {
+        if let Some(terminal) = foreground_terminal {
+            terminal.configure_child(command);
+        } else {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (command, foreground_terminal);
 }
 
 fn wait_for_podman_exec(
@@ -471,12 +622,12 @@ pub(super) fn cmd_reload_proxy_selected(selected: &SelectedRun) -> Result<()> {
         .control_socket
         .as_deref()
         .ok_or_else(|| Error::message("selected run has no supervisor control endpoint"))?;
-    let _ = control::admit(Path::new(socket), selected.uuid(), "proxy")?;
     let component = selected.component("proxy")?;
     let id = component
         .id
         .as_deref()
         .ok_or_else(|| Error::message("selected proxy has no immutable container ID"))?;
+    let _ = control::admit(Path::new(socket), selected.uuid(), "proxy", id)?;
     let status = Command::new("podman")
         .args(reload_proxy_args(id))
         .status()
@@ -499,7 +650,13 @@ fn inspect_run_workdir(
     role: &str,
     cwd: &Path,
     captured: Option<&str>,
+    launch_identity: &ComponentMountIdentity,
 ) -> Result<PathBuf> {
+    if launch_identity.container_id != container_id || launch_identity.role != role {
+        return Err(Error::message(
+            "selected run component identity changed after startup",
+        ));
+    }
     let output = Command::new("podman")
         .args(["inspect", container_id])
         .output()
@@ -564,18 +721,23 @@ fn inspect_run_workdir(
                 Error::message("selected run mount inspection omitted its access mode")
             })?;
         let actual_read_only = !actual_rw;
-        let identity_matches = match mapping.mount_type.as_str() {
-            "bind" | "readonly" => actual_type == "bind" && actual_read_only == mapping.read_only,
-            "copy" => {
-                actual_type == "volume"
-                    && actual_read_only == mapping.read_only
-                    && mapping.volume_name.as_deref().is_some_and(|expected| {
-                        actual_mount.get("Name").and_then(serde_json::Value::as_str)
-                            == Some(expected)
-                    })
-            }
-            _ => false,
-        };
+        let expected_mount = launch_identity
+            .mounts
+            .iter()
+            .find(|mount| mount.destination == mapping.destination.to_string_lossy())
+            .ok_or_else(|| {
+                Error::message(format!(
+                    "selected run has no launch-time identity for CWD mount {}",
+                    mapping.destination.display()
+                ))
+            })?;
+        let identity_matches = inspected_cwd_mount_matches(
+            actual_mount,
+            &mapping,
+            expected_mount,
+            actual_type,
+            actual_read_only,
+        );
         if !identity_matches {
             return Err(Error::message(format!(
                 "selected run CWD mount identity changed at {}",
@@ -637,6 +799,39 @@ fn inspect_run_workdir(
     ))
 }
 
+fn inspected_cwd_mount_matches(
+    actual_mount: &serde_json::Value,
+    mapping: &CapturedCwdMapping,
+    expected: &MountIdentity,
+    actual_type: &str,
+    actual_read_only: bool,
+) -> bool {
+    if expected.destination != mapping.destination.to_string_lossy()
+        || expected.read_only != mapping.read_only
+        || actual_read_only != mapping.read_only
+        || expected.mount_type != actual_type
+    {
+        return false;
+    }
+    match mapping.mount_type.as_str() {
+        "bind" | "readonly" => {
+            actual_type == "bind"
+                && actual_mount
+                    .get("Source")
+                    .and_then(serde_json::Value::as_str)
+                    == expected.source.as_deref()
+        }
+        "copy" => {
+            actual_type == "volume"
+                && mapping.volume_name.as_deref().is_some_and(|name| {
+                    actual_mount.get("Name").and_then(serde_json::Value::as_str) == Some(name)
+                        && expected.name.as_deref() == Some(name)
+                })
+        }
+        _ => false,
+    }
+}
+
 fn command_status(status: std::process::ExitStatus, context: &'static str) -> Result<()> {
     if status.success() {
         return Ok(());
@@ -673,7 +868,10 @@ fn project_component_name(project_name: &str, component: &str) -> String {
 
 #[cfg(test)]
 mod exec_tests {
-    use super::{reload_proxy_args, spawn_podman_exec};
+    use super::{
+        CapturedCwdMapping, inspected_cwd_mount_matches, reload_proxy_args, spawn_podman_exec,
+    };
+    use crate::cli::control::MountIdentity;
     use signal_hook::consts::signal::SIGTERM;
     use std::fs;
     use std::process::Command;
@@ -693,6 +891,59 @@ mod exec_tests {
         );
     }
 
+    #[test]
+    fn bind_cwd_mapping_checks_engine_source_separately_from_host_translation() {
+        let mapping = CapturedCwdMapping {
+            host_source: std::path::PathBuf::from("/Users/alice/project"),
+            destination: std::path::PathBuf::from("/workspace"),
+            mount_type: "bind".to_string(),
+            read_only: false,
+            volume_name: None,
+        };
+        let launch_identity = MountIdentity {
+            destination: "/workspace".to_string(),
+            mount_type: "bind".to_string(),
+            source: Some("/var/home/user/project".to_string()),
+            name: None,
+            read_only: false,
+        };
+        let actual = serde_json::json!({
+            "Destination": "/workspace",
+            "Type": "bind",
+            "Source": "/var/home/user/project",
+            "RW": true,
+        });
+
+        assert!(inspected_cwd_mount_matches(
+            &actual,
+            &mapping,
+            &launch_identity,
+            "bind",
+            false,
+        ));
+        let host_cwd = std::path::Path::new("/Users/alice/project/src")
+            .strip_prefix(&mapping.host_source)
+            .unwrap();
+        assert_eq!(
+            mapping.destination.join(host_cwd),
+            std::path::PathBuf::from("/workspace/src")
+        );
+
+        let replaced = serde_json::json!({
+            "Destination": "/workspace",
+            "Type": "bind",
+            "Source": "/var/home/user/other-project",
+            "RW": true,
+        });
+        assert!(!inspected_cwd_mount_matches(
+            &replaced,
+            &mapping,
+            &launch_identity,
+            "bind",
+            false,
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn run_checks_cancellation_immediately_before_spawning_the_workload() {
@@ -710,7 +961,7 @@ mod exec_tests {
             .arg(&marker);
         let cancelled = || Some(SIGTERM);
 
-        let result = spawn_podman_exec(&mut command, "run", Some(&cancelled));
+        let result = spawn_podman_exec(&mut command, "run", Some(&cancelled), None);
 
         assert!(result.is_err());
         assert!(!marker.exists(), "the cancelled workload must not start");

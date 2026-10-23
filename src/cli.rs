@@ -9,6 +9,7 @@ mod inject;
 mod lifecycle;
 mod run;
 mod selection;
+mod terminal;
 
 use anyhow::Context as _;
 use args::{Cli, CommandSpec};

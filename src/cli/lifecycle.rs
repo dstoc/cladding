@@ -442,14 +442,14 @@ fn run_lock_is_released(run: &cladding::podman::DiscoveredRun) -> bool {
         return false;
     };
     let root = std::path::Path::new(root);
-    if !root.is_absolute()
-        || root.file_name().is_none_or(|name| name != ".cladding")
-        || std::fs::canonicalize(root).ok().as_deref() != Some(root)
-    {
+    if !root.is_absolute() || std::fs::canonicalize(root).ok().as_deref() != Some(root) {
         return false;
     }
+    let Some(private_identity) = run.private_identity.as_deref() else {
+        return false;
+    };
     let runtime_root = root.join("runtime/runs").join(&run.name);
-    match control::acquire_recovery_lock(&runtime_root) {
+    match control::acquire_recovery_lock(&runtime_root, private_identity) {
         Ok(lock) => {
             drop(lock);
             true
@@ -496,11 +496,7 @@ pub(super) fn cmd_destroy_selected(selected: &SelectedRun) -> Result<()> {
         .as_deref()
         .ok_or_else(|| Error::message("selected run has no project identity"))?;
     let project_root = std::path::Path::new(project_root);
-    if !project_root.is_absolute()
-        || project_root
-            .file_name()
-            .is_none_or(|name| name != ".cladding")
-    {
+    if !project_root.is_absolute() {
         return Err(Error::message(
             "refusing recovery because the project identity is invalid",
         ));
@@ -514,7 +510,12 @@ pub(super) fn cmd_destroy_selected(selected: &SelectedRun) -> Result<()> {
         ));
     }
     let runtime_root = project_root.join("runtime/runs").join(&selected.run.name);
-    let _lifetime_lock = control::acquire_recovery_lock(&runtime_root)?;
+    let private_identity = selected
+        .run
+        .private_identity
+        .as_deref()
+        .ok_or_else(|| Error::message("selected run has no private ownership identity"))?;
+    let _lifetime_lock = control::acquire_recovery_lock(&runtime_root, private_identity)?;
 
     let fresh_runs = list_discovered_runs(false, false)?;
     let fresh_run = fresh_runs
@@ -555,6 +556,7 @@ pub(super) fn cmd_destroy_selected(selected: &SelectedRun) -> Result<()> {
                 .expected_roles
                 .as_deref()
                 .ok_or_else(|| Error::message("selected run has no expected component metadata"))?,
+            private_identity,
         )?;
     }
     if let Some(socket) = selected.run.control_socket.as_deref() {
@@ -577,6 +579,7 @@ fn remove_run_owned_volume(
     runtime_root: &std::path::Path,
     control_socket: &str,
     expected_roles: &str,
+    private_identity: &str,
 ) -> Result<()> {
     let output = std::process::Command::new("podman")
         .args(["volume", "inspect", volume_name])
@@ -622,8 +625,9 @@ fn remove_run_owned_volume(
         && label("cladding_runtime_root") == Some(runtime_root_text.as_ref());
     if label("cladding") != Some(run_name)
         || label("project_root") != Some(project_root_text.as_ref())
-        || label("cladding_run_metadata_version") != Some("1")
+        || label("cladding_run_metadata_version") != Some("2")
         || label("cladding_run_control_socket") != Some(control_socket)
+        || label("cladding_run_private_identity") != Some(private_identity)
         || label("cladding_run_expected_roles") != Some(expected_roles)
         || !(is_owned_socket || is_owned_mount)
     {
@@ -680,6 +684,7 @@ fn verify_run_inventory_unchanged(
         || current.project_root != selected.project_root
         || current.metadata_version != selected.metadata_version
         || current.control_socket != selected.control_socket
+        || current.private_identity != selected.private_identity
         || current.expected_roles != selected.expected_roles
         || !selected_components_match
         || !selected_helpers_match
@@ -732,10 +737,11 @@ mod tests {
             uuid: uuid.to_string(),
             name: format!("cladding-run-{uuid}"),
             project_root: Some("/tmp/project/.cladding".to_string()),
-            metadata_version: Some("1".to_string()),
+            metadata_version: Some("2".to_string()),
             control_socket: Some(format!(
                 "/tmp/project/.cladding/runtime/runs/cladding-run-{uuid}/control.sock"
             )),
+            private_identity: Some("v1:1:2:3:4".to_string()),
             expected_roles: Some("agent,proxy".to_string()),
             components: ["agent", "proxy"]
                 .into_iter()

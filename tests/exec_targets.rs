@@ -60,8 +60,9 @@ impl Fixture {
                         "app": role,
                         "cladding": run_name,
                         "project_root": cladding_dir.display().to_string(),
-                        "cladding_run_metadata_version": "1",
+                        "cladding_run_metadata_version": "2",
                         "cladding_run_control_socket": socket_path.display().to_string(),
+                        "cladding_run_private_identity": "v1:1:2:3:4",
                         "cladding_run_expected_roles": expected_roles,
                         "cladding_run_cwd_v1": "[]"
                     }
@@ -95,7 +96,7 @@ impl Fixture {
         let args_path = root.join("podman-args.txt");
         let podman_path = bin_dir.join("podman");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = container ] && [ \"$2\" = ps ]; then\nprintf '%s\\n' {}\nexit 0\nfi\nif [ \"$1\" = volume ] && [ \"$2\" = ls ]; then\nprintf '[]\\n'\nexit 0\nfi\nif [ \"$1\" = inspect ]; then\nprintf '%s\\n' '[{{\"Config\":{{\"WorkingDir\":\"/home/user\"}},\"Mounts\":[]}}]'\nexit 0\nfi\nprintf '%s\\n' \"$@\" > \"$CLADDING_TEST_ARGS\"\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = container ] && [ \"$2\" = ps ]; then\nprintf '%s\\n' {}\nexit 0\nfi\nif [ \"$1\" = volume ] && [ \"$2\" = ls ]; then\nprintf '[]\\n'\nexit 0\nfi\nif [ \"$1\" = inspect ]; then\nprintf '[{{\"Id\":\"%s\",\"Config\":{{\"WorkingDir\":\"/home/user\"}},\"Mounts\":[]}}]\\n' \"$2\"\nexit 0\nfi\nprintf '%s\\n' \"$@\" > \"$CLADDING_TEST_ARGS\"\nexit 0\n",
             shell_quote(&serde_json::Value::Array(containers).to_string())
         );
         fs::write(&podman_path, script).expect("mock Podman should be written");
@@ -155,16 +156,27 @@ fn serve_control_request(stream: &mut UnixStream, uuid: &str) {
             Err(_) => return,
         };
     if parsed.get("uuid").and_then(serde_json::Value::as_str) != Some(uuid)
-        || parsed.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || parsed.get("version").and_then(serde_json::Value::as_u64) != Some(2)
     {
         return;
     }
+    let admission = parsed
+        .get("operation")
+        .and_then(|operation| operation.get("admit"));
+    let mount_identity = admission.map(|request| {
+        serde_json::json!({
+            "role": request["role"],
+            "container_id": request["container_id"],
+            "mounts": []
+        })
+    });
     let response = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "uuid": uuid,
         "state": "ready",
         "expected_roles": ["agent", "proxy", "nw-sandbox", "fs-sandbox"],
         "fake_environment": [],
+        "mount_identity": mount_identity,
         "error": null
     });
     if serde_json::to_writer(&mut *stream, &response).is_ok() {

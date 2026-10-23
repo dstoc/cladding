@@ -21,12 +21,12 @@ pub(super) fn cmd_expose_selected(selected: &SelectedRun, args: &ExposeArgs) -> 
         .control_socket
         .as_deref()
         .ok_or_else(|| Error::message("selected run has no supervisor control endpoint"))?;
-    let _ = control::admit(std::path::Path::new(socket), selected.uuid(), "agent")?;
     let agent = selected.component("agent")?;
     let id = agent
         .id
         .as_deref()
         .ok_or_else(|| Error::message("selected agent has no immutable container ID"))?;
+    let _ = control::admit(std::path::Path::new(socket), selected.uuid(), "agent", id)?;
     let host_port = args.host_port.unwrap_or(args.container_port);
     let mut command =
         build_blocking_expose_command(id, args.container_port, host_port, args.bind_address);

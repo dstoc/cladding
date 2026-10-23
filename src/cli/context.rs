@@ -202,6 +202,11 @@ pub(super) fn resolve_project_root(
     command: &CommandSpec,
 ) -> Result<PathBuf> {
     if let Some(root) = override_root {
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            cwd.join(root)
+        };
         if matches!(command, CommandSpec::Init { .. }) {
             if root.exists() && !root.is_dir() {
                 eprintln!(
@@ -209,6 +214,9 @@ pub(super) fn resolve_project_root(
                     root.display()
                 );
                 return Err(Error::message("invalid .cladding path"));
+            }
+            if !root.exists() {
+                return Ok(root);
             }
         } else if !root.is_dir() && matches!(command, CommandSpec::Run { .. }) {
             eprintln!(
@@ -225,11 +233,21 @@ pub(super) fn resolve_project_root(
             eprintln!("hint: pass the path to an existing .cladding directory");
             return Err(Error::message("invalid .cladding directory"));
         }
-        return Ok(root.to_path_buf());
+        return std::fs::canonicalize(&root).map_err(|error| {
+            Error::message(format!(
+                "failed to resolve selected .cladding directory {}: {error}",
+                root.display()
+            ))
+        });
     }
 
     match find_project_root(cwd) {
-        Some(root) => Ok(root),
+        Some(root) => std::fs::canonicalize(&root).map_err(|error| {
+            Error::message(format!(
+                "failed to resolve .cladding directory {}: {error}",
+                root.display()
+            ))
+        }),
         None => match command {
             CommandSpec::Init { .. } => Ok(cwd.join(".cladding")),
             CommandSpec::Run { .. } => {
@@ -369,6 +387,25 @@ mod tests {
         assert_eq!(
             resolve_project_root(&cwd, Some(&project_root), &command).unwrap(),
             project_root
+        );
+    }
+
+    #[test]
+    fn run_normalizes_relative_cladding_dir_with_an_arbitrary_basename() {
+        let temp = create_temp_dir("run-relative-cladding-dir");
+        let selected_root = temp.join("custom-state");
+        fs::create_dir_all(&selected_root).unwrap();
+        let relative_root = PathBuf::from("custom-state");
+        let command = CommandSpec::Run {
+            verbose: false,
+            env: Vec::new(),
+            secret: Vec::new(),
+            args: vec!["true".to_string()],
+        };
+
+        assert_eq!(
+            resolve_project_root(&temp, Some(&relative_root), &command).unwrap(),
+            fs::canonicalize(&selected_root).unwrap()
         );
     }
 

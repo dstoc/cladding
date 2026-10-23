@@ -50,6 +50,7 @@ if [ "$1" = "run" ]; then
   helper_control_socket=
   helper_expected_roles=
   helper_metadata_version=
+  helper_private_identity=
   socket_helper=
   copy_seed_helper=
   next=
@@ -65,6 +66,7 @@ if [ "$1" = "run" ]; then
             cladding_run_control_socket=*) helper_control_socket=${argument#cladding_run_control_socket=} ;;
             cladding_run_expected_roles=*) helper_expected_roles=${argument#cladding_run_expected_roles=} ;;
             cladding_run_metadata_version=*) helper_metadata_version=${argument#cladding_run_metadata_version=} ;;
+            cladding_run_private_identity=*) helper_private_identity=${argument#cladding_run_private_identity=} ;;
           esac
           ;;
         volume)
@@ -85,18 +87,20 @@ if [ "$1" = "run" ]; then
   done
   if [ "${CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP:-}" = "1" ] && [ -n "$socket_helper" ]; then
     if [ -n "$helper_name" ]; then
-      printf '%s|%s|%s|%s|running|present|%s|%s|%s\n' \
+      printf '%s|%s|%s|%s|running|present|%s|%s|%s|%s\n' \
         "$helper_name" "$helper_project" "$helper_root" "$helper_app" \
         "$helper_control_socket" "$helper_expected_roles" "$helper_metadata_version" \
+        "$helper_private_identity" \
         >> "$CLADDING_PODMAN_STATE"
     fi
     exit 44
   fi
   if [ "${CLADDING_TEST_FAIL_COPY_SEED:-}" = "1" ] && [ -n "$copy_seed_helper" ]; then
     if [ -n "$helper_name" ]; then
-      printf '%s|%s|%s|%s|running|present|%s|%s|%s\n' \
+      printf '%s|%s|%s|%s|running|present|%s|%s|%s|%s\n' \
         "$helper_name" "$helper_project" "$helper_root" "$helper_app" \
         "$helper_control_socket" "$helper_expected_roles" "$helper_metadata_version" \
+        "$helper_private_identity" \
         >> "$CLADDING_PODMAN_STATE"
     fi
     exit 45
@@ -241,6 +245,47 @@ if [ "$1" = "container" ] && [ "$2" = "exists" ]; then
   fi
   exit 1
 fi
+if [ "$1" = "inspect" ]; then
+  row=$(awk -F '|' -v name="$2" '$1 == name { print; exit }' "$state")
+  if [ -z "$row" ]; then exit 1; fi
+  app=$(printf '%s\n' "$row" | cut -d '|' -f 4)
+  project_name=$(printf '%s\n' "$row" | cut -d '|' -f 2)
+  project_root=$(printf '%s\n' "$row" | cut -d '|' -f 3)
+  control_socket=$(printf '%s\n' "$row" | cut -d '|' -f 7)
+  expected_roles=$(printf '%s\n' "$row" | cut -d '|' -f 8)
+  metadata_version=$(printf '%s\n' "$row" | cut -d '|' -f 9)
+  private_identity=$(printf '%s\n' "$row" | cut -d '|' -f 10)
+  cwd_mappings=$(printf '%s\n' "$row" | cut -d '|' -f 11-)
+  python3 - "$app" "$project_name" "$project_root" "$control_socket" \
+    "$expected_roles" "$metadata_version" "$private_identity" "$cwd_mappings" <<'PY'
+import json
+import sys
+
+app, project_name, project_root, socket, roles, version, identity, raw = sys.argv[1:]
+mappings = json.loads(raw)
+mounts = []
+for mapping in mappings:
+    copied = mapping["mount_type"] == "copy"
+    mounts.append({
+        "Destination": mapping["destination"],
+        "Type": "volume" if copied else "bind",
+        "Source": "/mock/copy-volume" if copied else mapping["host_source"],
+        "Name": mapping.get("volume_name"),
+        "RW": not mapping["read_only"],
+    })
+labels = {
+    "app": app,
+    "cladding": project_name,
+    "project_root": project_root,
+    "cladding_run_control_socket": socket,
+    "cladding_run_expected_roles": roles,
+    "cladding_run_metadata_version": version,
+    "cladding_run_private_identity": identity,
+}
+print(json.dumps([{"Id": "fake-" + app + "-id", "Config": {"Labels": labels}, "Mounts": mounts}]))
+PY
+  exit 0
+fi
 if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
   if [ "${CLADDING_TEST_FAIL_CONTAINER_INSPECT:-}" = "1" ]; then
     echo 'fake container inspection failure' >&2
@@ -254,8 +299,9 @@ if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
   control_socket=$(printf '%s\n' "$row" | cut -d '|' -f 7)
   expected_roles=$(printf '%s\n' "$row" | cut -d '|' -f 8)
   metadata_version=$(printf '%s\n' "$row" | cut -d '|' -f 9)
-  printf '{"State":{"Status":"running"},"Config":{"Labels":{"app":"%s","cladding":"%s","project_root":"%s","cladding_run_control_socket":"%s","cladding_run_expected_roles":"%s","cladding_run_metadata_version":"%s"}}}\n' \
-    "$app" "$project_name" "$project_root" "$control_socket" "$expected_roles" "$metadata_version"
+  private_identity=$(printf '%s\n' "$row" | cut -d '|' -f 10)
+  printf '{"State":{"Status":"running"},"Config":{"Labels":{"app":"%s","cladding":"%s","project_root":"%s","cladding_run_control_socket":"%s","cladding_run_expected_roles":"%s","cladding_run_metadata_version":"%s","cladding_run_private_identity":"%s"}}}\n' \
+    "$app" "$project_name" "$project_root" "$control_socket" "$expected_roles" "$metadata_version" "$private_identity"
   exit 0
 fi
 if [ "$1" = "rm" ]; then
@@ -276,6 +322,11 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
   project_name=
   project_root=
   app=
+  control_socket=
+  expected_roles=
+  metadata_version=
+  private_identity=
+  cwd_mappings='[]'
   next=
   for argument in "$@"; do
     if [ -n "$next" ]; then
@@ -286,6 +337,11 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
             cladding=*) project_name=${argument#cladding=} ;;
             project_root=*) project_root=${argument#project_root=} ;;
             app=*) app=${argument#app=} ;;
+            cladding_run_control_socket=*) control_socket=${argument#cladding_run_control_socket=} ;;
+            cladding_run_expected_roles=*) expected_roles=${argument#cladding_run_expected_roles=} ;;
+            cladding_run_metadata_version=*) metadata_version=${argument#cladding_run_metadata_version=} ;;
+            cladding_run_private_identity=*) private_identity=${argument#cladding_run_private_identity=} ;;
+            cladding_run_cwd_v1=*) cwd_mappings=${argument#cladding_run_cwd_v1=} ;;
           esac
           ;;
       esac
@@ -383,7 +439,9 @@ if [ "$1" = "run" ] || [ "$1" = "--runtime" ] || [ "$1" = "--runtime-flag" ]; th
       fi
       printf '%s\n' 'ONE_OFF_SECRET_SOURCE_IS_SEPARATE_AND_PRIVATE' >> "$CLADDING_PODMAN_LOG"
     fi
-    printf '%s|%s|%s|%s|running|present\n' "$name" "$project_name" "$project_root" "$app" >> "$state"
+    printf '%s|%s|%s|%s|running|present|%s|%s|%s|%s|%s\n' \
+      "$name" "$project_name" "$project_root" "$app" "$control_socket" \
+      "$expected_roles" "$metadata_version" "$private_identity" "$cwd_mappings" >> "$state"
     exit 0
   fi
   credentials_dir=

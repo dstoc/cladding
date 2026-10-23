@@ -1,7 +1,7 @@
 use cladding::error::{Error, Result};
 use cladding::identity::invoking_uid;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read as _, Write};
 use std::os::unix::fs::{
@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const PROTOCOL_VERSION: u8 = 1;
+const PROTOCOL_VERSION: u8 = 2;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_ERROR_BYTES: usize = 8 * 1024;
 const SOCKET_MODE: u32 = 0o600;
@@ -37,7 +37,7 @@ struct Request {
 #[serde(rename_all = "snake_case")]
 enum Operation {
     Status,
-    Admit { role: String },
+    Admit { role: String, container_id: String },
     Stop,
 }
 
@@ -49,7 +49,32 @@ struct Response {
     state: String,
     expected_roles: Vec<String>,
     fake_environment: Vec<String>,
+    mount_identity: Option<ComponentMountIdentity>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ComponentMountIdentity {
+    pub(super) role: String,
+    pub(super) container_id: String,
+    pub(super) mounts: Vec<MountIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MountIdentity {
+    pub(super) destination: String,
+    pub(super) mount_type: String,
+    pub(super) source: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) read_only: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct Admission {
+    pub(super) fake_environment: Vec<String>,
+    pub(super) mount_identity: ComponentMountIdentity,
 }
 
 struct SharedState {
@@ -57,12 +82,14 @@ struct SharedState {
     status: AtomicU8,
     stop_requested: AtomicBool,
     expected_roles: Vec<String>,
+    component_mounts: std::sync::Mutex<HashMap<String, ComponentMountIdentity>>,
     fake_environment: std::sync::Mutex<Vec<String>>,
     stop_error: std::sync::Mutex<Option<String>>,
 }
 
 pub(super) struct RunControl {
     socket_path: PathBuf,
+    private_identity: String,
     state: Arc<SharedState>,
     stop_server: Arc<AtomicBool>,
     server: Option<JoinHandle<()>>,
@@ -81,9 +108,17 @@ impl RunControl {
         uuid: &str,
         expected_roles: &[String],
     ) -> Result<Self> {
+        validate_private_runtime_root(runtime_root)?;
+        let root_metadata = fs::symlink_metadata(runtime_root).map_err(|error| {
+            Error::message(format!("failed to inspect private run directory: {error}"))
+        })?;
         let lock_path = runtime_root.join("lifetime.lock");
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true).mode(LOCK_MODE);
+        options
+            .write(true)
+            .create_new(true)
+            .mode(LOCK_MODE)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         let lock = options.open(&lock_path).map_err(|error| {
             Error::message(format!(
                 "failed to create run lifetime lock {}: {error}",
@@ -102,6 +137,15 @@ impl RunControl {
             let _ = fs::remove_file(&lock_path);
             return Err(Error::message("failed to acquire run lifetime lock"));
         }
+        let lock_metadata = lock.metadata().map_err(|error| {
+            Error::message(format!("failed to inspect run lifetime lock: {error}"))
+        })?;
+        let private_identity = encode_private_identity(
+            root_metadata.dev(),
+            root_metadata.ino(),
+            lock_metadata.dev(),
+            lock_metadata.ino(),
+        );
 
         let socket_path = control_socket_path(runtime_root, uuid)?;
         match fs::symlink_metadata(&socket_path) {
@@ -148,6 +192,7 @@ impl RunControl {
             status: AtomicU8::new(STATUS_STARTING),
             stop_requested: AtomicBool::new(false),
             expected_roles: expected_roles.to_vec(),
+            component_mounts: std::sync::Mutex::new(HashMap::new()),
             fake_environment: std::sync::Mutex::new(Vec::new()),
             stop_error: std::sync::Mutex::new(None),
         });
@@ -189,6 +234,7 @@ impl RunControl {
         });
         Ok(Self {
             socket_path,
+            private_identity,
             state,
             stop_server,
             server: Some(server),
@@ -198,6 +244,10 @@ impl RunControl {
 
     pub(super) fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    pub(super) fn private_identity(&self) -> &str {
+        &self.private_identity
     }
 
     pub(super) fn mark_ready(&self, fake_environment: Vec<String>) -> bool {
@@ -215,6 +265,57 @@ impl RunControl {
                 Ordering::SeqCst,
             )
             .is_ok()
+    }
+
+    pub(super) fn set_component_mount_identities(
+        &self,
+        identities: Vec<ComponentMountIdentity>,
+    ) -> Result<()> {
+        let mut components = HashMap::new();
+        for identity in identities {
+            let destinations = identity
+                .mounts
+                .iter()
+                .map(|mount| mount.destination.as_str())
+                .collect::<BTreeSet<_>>();
+            let mounts_valid = destinations.len() == identity.mounts.len()
+                && identity.mounts.iter().all(|mount| {
+                    mount.destination.starts_with('/')
+                        && matches!(mount.mount_type.as_str(), "bind" | "volume" | "tmpfs")
+                        && (mount.mount_type != "bind" || mount.source.is_some())
+                        && (mount.mount_type != "volume" || mount.name.is_some())
+                });
+            if identity.container_id.is_empty()
+                || !self
+                    .state
+                    .expected_roles
+                    .iter()
+                    .any(|role| role == &identity.role)
+                || !mounts_valid
+                || components.insert(identity.role.clone(), identity).is_some()
+            {
+                return Err(Error::message(
+                    "run component mount identity metadata is invalid",
+                ));
+            }
+        }
+        if components.len() != self.state.expected_roles.len()
+            || self
+                .state
+                .expected_roles
+                .iter()
+                .any(|role| !components.contains_key(role))
+        {
+            return Err(Error::message(
+                "run component mount identity metadata is incomplete",
+            ));
+        }
+        *self
+            .state
+            .component_mounts
+            .lock()
+            .expect("control mount identity lock") = components;
+        Ok(())
     }
 
     pub(super) fn mark_stopping(&self) {
@@ -272,7 +373,11 @@ impl Drop for RunControl {
     }
 }
 
-pub(super) fn acquire_recovery_lock(runtime_root: &Path) -> Result<File> {
+pub(super) fn acquire_recovery_lock(runtime_root: &Path, expected_identity: &str) -> Result<File> {
+    let expected = parse_private_identity(expected_identity).ok_or_else(|| {
+        Error::message("refusing recovery because the run private identity is malformed")
+    })?;
+    validate_private_runtime_root(runtime_root)?;
     let root_metadata = fs::symlink_metadata(runtime_root).map_err(|error| {
         Error::message(format!("run private directory is unavailable: {error}"))
     })?;
@@ -283,6 +388,11 @@ pub(super) fn acquire_recovery_lock(runtime_root: &Path) -> Result<File> {
     {
         return Err(Error::message(
             "refusing recovery because the run private directory is not a private user-owned directory",
+        ));
+    }
+    if (root_metadata.dev(), root_metadata.ino()) != (expected.0, expected.1) {
+        return Err(Error::message(
+            "refusing recovery because the run private directory identity changed",
         ));
     }
     let lock_path = runtime_root.join("lifetime.lock");
@@ -297,11 +407,25 @@ pub(super) fn acquire_recovery_lock(runtime_root: &Path) -> Result<File> {
             "refusing recovery because the run lifetime lock identity is invalid",
         ));
     }
+    if (metadata.dev(), metadata.ino()) != (expected.2, expected.3) {
+        return Err(Error::message(
+            "refusing recovery because the run lifetime lock identity changed",
+        ));
+    }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&lock_path)
         .map_err(|error| Error::message(format!("failed to open run lifetime lock: {error}")))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| Error::message(format!("failed to verify run lifetime lock: {error}")))?;
+    if (opened_metadata.dev(), opened_metadata.ino()) != (expected.2, expected.3) {
+        return Err(Error::message(
+            "refusing recovery because the opened run lifetime lock identity changed",
+        ));
+    }
     // SAFETY: flock operates on a valid file descriptor and keeps no references.
     if unsafe {
         libc::flock(
@@ -314,7 +438,83 @@ pub(super) fn acquire_recovery_lock(runtime_root: &Path) -> Result<File> {
             "refusing recovery because the run supervisor still owns the lifetime lock",
         ));
     }
+    let final_root = fs::symlink_metadata(runtime_root).map_err(|error| {
+        Error::message(format!("failed to recheck private run directory: {error}"))
+    })?;
+    let final_lock = fs::symlink_metadata(&lock_path)
+        .map_err(|error| Error::message(format!("failed to recheck run lifetime lock: {error}")))?;
+    if (final_root.dev(), final_root.ino()) != (expected.0, expected.1)
+        || (final_lock.dev(), final_lock.ino()) != (expected.2, expected.3)
+    {
+        return Err(Error::message(
+            "refusing recovery because private run ownership changed during verification",
+        ));
+    }
     Ok(file)
+}
+
+fn validate_private_runtime_root(runtime_root: &Path) -> Result<()> {
+    if !runtime_root.is_absolute() {
+        return Err(Error::message("run private directory path is not absolute"));
+    }
+    let mut paths = vec![(runtime_root, true)];
+    if let Some(runs_dir) = runtime_root
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "runs"))
+    {
+        let runtime_dir = runs_dir
+            .parent()
+            .ok_or_else(|| Error::message("run private directory has no runtime parent"))?;
+        let project_root = runtime_dir
+            .parent()
+            .ok_or_else(|| Error::message("run private directory has no project parent"))?;
+        if fs::canonicalize(project_root).ok().as_deref() != Some(project_root) {
+            return Err(Error::message(
+                "refusing recovery because the project path is not canonical",
+            ));
+        }
+        paths.extend([
+            (runs_dir, true),
+            (runtime_dir, false),
+            (project_root, false),
+        ]);
+    }
+    for (path, private) in paths {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| Error::message(format!("run private path is unavailable: {error}")))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != invoking_uid()
+            || (private && metadata.mode() & 0o077 != 0)
+        {
+            return Err(Error::message(
+                "refusing recovery because a run private path is not a user-owned directory with the expected permissions",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn encode_private_identity(
+    root_device: u64,
+    root_inode: u64,
+    lock_device: u64,
+    lock_inode: u64,
+) -> String {
+    format!("v1:{root_device}:{root_inode}:{lock_device}:{lock_inode}")
+}
+
+fn parse_private_identity(value: &str) -> Option<(u64, u64, u64, u64)> {
+    let mut fields = value.split(':');
+    (fields.next()? == "v1").then_some(())?;
+    let root_device = fields.next()?.parse().ok()?;
+    let root_inode = fields.next()?.parse().ok()?;
+    let lock_device = fields.next()?.parse().ok()?;
+    let lock_inode = fields.next()?.parse().ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some((root_device, root_inode, lock_device, lock_inode))
 }
 
 pub(super) fn remove_stale_socket(path: &Path, runtime_root: &Path, uuid: &str) -> Result<()> {
@@ -438,7 +638,7 @@ fn serve_client(mut stream: UnixStream, state: Arc<SharedState>) {
     } else {
         match request.operation {
             Operation::Status => response(&state, Vec::new(), None),
-            Operation::Admit { role } => {
+            Operation::Admit { role, container_id } => {
                 if state.status.load(Ordering::SeqCst) != STATUS_READY {
                     error_response(&state, "run is not accepting attachments")
                 } else if !state
@@ -448,16 +648,29 @@ fn serve_client(mut stream: UnixStream, state: Arc<SharedState>) {
                 {
                     error_response(&state, "requested component is not enabled for this run")
                 } else {
-                    let values = state
-                        .fake_environment
+                    let identity = state
+                        .component_mounts
                         .lock()
-                        .expect("control environment lock")
-                        .clone();
-                    response(
-                        &state,
-                        if role == "agent" { values } else { Vec::new() },
-                        None,
-                    )
+                        .expect("control mount identity lock")
+                        .get(&role)
+                        .filter(|identity| identity.container_id == container_id)
+                        .cloned();
+                    match identity {
+                        Some(identity) => {
+                            let values = state
+                                .fake_environment
+                                .lock()
+                                .expect("control environment lock")
+                                .clone();
+                            response_with_mount_identity(
+                                &state,
+                                if role == "agent" { values } else { Vec::new() },
+                                identity,
+                                None,
+                            )
+                        }
+                        None => error_response(&state, "selected component identity changed"),
+                    }
                 }
             }
             Operation::Stop => {
@@ -499,12 +712,24 @@ fn response(state: &SharedState, fake_environment: Vec<String>, error: Option<St
         state: state_name(state.status.load(Ordering::SeqCst)).to_string(),
         expected_roles: state.expected_roles.clone(),
         fake_environment,
+        mount_identity: None,
         error,
     }
 }
 
 fn error_response(state: &SharedState, error: &str) -> Response {
     response(state, Vec::new(), Some(error.to_string()))
+}
+
+fn response_with_mount_identity(
+    state: &SharedState,
+    fake_environment: Vec<String>,
+    mount_identity: ComponentMountIdentity,
+    error: Option<String>,
+) -> Response {
+    let mut response = response(state, fake_environment, error);
+    response.mount_identity = Some(mount_identity);
+    response
 }
 
 fn state_name(value: u8) -> &'static str {
@@ -548,6 +773,7 @@ fn write_response(stream: &mut UnixStream, response: &Response) -> Result<()> {
             state: response.state.clone(),
             expected_roles: Vec::new(),
             fake_environment: Vec::new(),
+            mount_identity: None,
             error: Some(error),
         };
         bytes = serde_json::to_vec(&bounded_response)
@@ -586,12 +812,18 @@ pub(super) fn status(socket_path: &Path, uuid: &str) -> Result<ControlStatus> {
     })
 }
 
-pub(super) fn admit(socket_path: &Path, uuid: &str, role: &str) -> Result<Vec<String>> {
+pub(super) fn admit(
+    socket_path: &Path,
+    uuid: &str,
+    role: &str,
+    container_id: &str,
+) -> Result<Admission> {
     let response = request(
         socket_path,
         uuid,
         Operation::Admit {
             role: role.to_string(),
+            container_id: container_id.to_string(),
         },
     )?;
     if response.state != "ready" {
@@ -621,7 +853,18 @@ pub(super) fn admit(socket_path: &Path, uuid: &str, role: &str) -> Result<Vec<St
             ));
         }
     }
-    Ok(response.fake_environment)
+    let mount_identity = response
+        .mount_identity
+        .ok_or_else(|| Error::message("run supervisor omitted component mount identity"))?;
+    if mount_identity.role != role || mount_identity.container_id != container_id {
+        return Err(Error::message(
+            "run supervisor returned a different component identity",
+        ));
+    }
+    Ok(Admission {
+        fake_environment: response.fake_environment,
+        mount_identity,
+    })
 }
 
 pub(super) fn stop(socket_path: &Path, uuid: &str, timeout: Duration) -> Result<()> {
@@ -757,6 +1000,31 @@ fn validate_socket(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn run_root(label: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "cladding-control-{label}-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let runtime_root = base
+            .join("project/custom-state/runtime/runs")
+            .join("cladding-run-aabbccdd-1111-4222-8333-123456789abc");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::set_permissions(
+            runtime_root.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(
+            runtime_root.parent().unwrap().parent().unwrap(),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o700)).unwrap();
+        (base, runtime_root)
+    }
 
     #[test]
     fn control_admits_only_after_ready_and_stop_requires_completion() {
@@ -771,30 +1039,40 @@ mod tests {
             &["agent".to_string(), "proxy".to_string()],
         )
         .unwrap();
-        assert!(acquire_recovery_lock(&root).is_err());
+        let identities = ["agent", "proxy"]
+            .into_iter()
+            .map(|role| ComponentMountIdentity {
+                role: role.to_string(),
+                container_id: format!("{role}-id"),
+                mounts: Vec::new(),
+            })
+            .collect();
+        control.set_component_mount_identities(identities).unwrap();
+        assert!(acquire_recovery_lock(&root, control.private_identity()).is_err());
         assert!(
             admit(
                 control.socket_path(),
                 "aabbccdd-1111-4222-8333-123456789abc",
-                "agent"
+                "agent",
+                "agent-id"
             )
             .is_err()
         );
         control.mark_ready(vec!["TOKEN=fake-value".to_string()]);
-        assert_eq!(
-            admit(
-                control.socket_path(),
-                "aabbccdd-1111-4222-8333-123456789abc",
-                "agent"
-            )
-            .unwrap(),
-            ["TOKEN=fake-value"]
-        );
+        let admission = admit(
+            control.socket_path(),
+            "aabbccdd-1111-4222-8333-123456789abc",
+            "agent",
+            "agent-id",
+        )
+        .unwrap();
+        assert_eq!(admission.fake_environment, ["TOKEN=fake-value"]);
         assert!(
             admit(
                 control.socket_path(),
                 "aabbccdd-1111-4222-8333-123456789abc",
-                "nw-sandbox"
+                "nw-sandbox",
+                "sandbox-id"
             )
             .is_err()
         );
@@ -808,10 +1086,76 @@ mod tests {
             )
             .is_ok()
         );
+        let private_identity = control.private_identity().to_string();
         drop(control);
-        let recovery_lock = acquire_recovery_lock(&root).unwrap();
+        let recovery_lock = acquire_recovery_lock(&root, &private_identity).unwrap();
         drop(recovery_lock);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_rejects_replaced_private_directory_and_lock() {
+        for replace_lock in [false, true] {
+            let (base, root) = run_root(if replace_lock {
+                "lock-replacement"
+            } else {
+                "root-replacement"
+            });
+            let uuid = if replace_lock {
+                "aabbccdd-1111-4222-8333-123456789ab2"
+            } else {
+                "aabbccdd-1111-4222-8333-123456789ab1"
+            };
+            let control =
+                RunControl::start(&root, uuid, &["agent".to_string(), "proxy".to_string()])
+                    .unwrap();
+            let identity = control.private_identity().to_string();
+            drop(control);
+
+            if replace_lock {
+                fs::rename(root.join("lifetime.lock"), root.join("original.lock")).unwrap();
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(LOCK_MODE)
+                    .open(root.join("lifetime.lock"))
+                    .unwrap();
+            } else {
+                fs::rename(&root, root.with_extension("original")).unwrap();
+                fs::create_dir(&root).unwrap();
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(LOCK_MODE)
+                    .open(root.join("lifetime.lock"))
+                    .unwrap();
+            }
+
+            assert!(acquire_recovery_lock(&root, &identity).is_err());
+            fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_symlinked_private_parent() {
+        let (base, root) = run_root("symlinked-parent");
+        let control = RunControl::start(
+            &root,
+            "aabbccdd-1111-4222-8333-123456789ab3",
+            &["agent".to_string(), "proxy".to_string()],
+        )
+        .unwrap();
+        let identity = control.private_identity().to_string();
+        drop(control);
+
+        let runs = root.parent().unwrap().to_path_buf();
+        let saved = runs.with_extension("saved");
+        fs::rename(&runs, &saved).unwrap();
+        symlink(&saved, &runs).unwrap();
+
+        assert!(acquire_recovery_lock(&root, &identity).is_err());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

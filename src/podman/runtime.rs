@@ -822,11 +822,17 @@ fn add_run_metadata_labels(labels: &mut BTreeMap<String, String>, spec: &Runtime
     let Some(socket) = &spec.run_control_socket else {
         return;
     };
-    labels.insert("cladding_run_metadata_version".to_string(), "1".to_string());
+    labels.insert("cladding_run_metadata_version".to_string(), "2".to_string());
     labels.insert(
         "cladding_run_control_socket".to_string(),
         socket.display().to_string(),
     );
+    if let Some(identity) = &spec.run_private_identity {
+        labels.insert(
+            "cladding_run_private_identity".to_string(),
+            identity.clone(),
+        );
+    }
     labels.insert(
         "cladding_run_expected_roles".to_string(),
         spec.run_expected_roles.join(","),
@@ -1900,6 +1906,7 @@ mod tests {
             custom_mount_sources: Vec::new(),
             run_control_socket: None,
             run_expected_roles: Vec::new(),
+            run_private_identity: None,
         };
 
         let args = command_args(&build_baffle_ca_init_command(&spec));
@@ -1950,6 +1957,7 @@ mod tests {
             custom_mount_sources: Vec::new(),
             run_control_socket: None,
             run_expected_roles: Vec::new(),
+            run_private_identity: None,
         };
 
         assert!(should_install_baffle_ca(&spec, &spec.agent));

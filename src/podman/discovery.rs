@@ -96,6 +96,7 @@ pub struct DiscoveredRun {
     pub project_root: Option<String>,
     pub metadata_version: Option<String>,
     pub control_socket: Option<String>,
+    pub private_identity: Option<String>,
     pub expected_roles: Option<String>,
     pub components: Vec<RunComponent>,
     pub helper_containers: Vec<RunComponent>,
@@ -197,6 +198,7 @@ fn run_from_items(uuid: String, items: Vec<&ContainerSnapshotItem>) -> Discovere
     let mut roots = HashSet::new();
     let mut versions = HashSet::new();
     let mut sockets = HashSet::new();
+    let mut private_identities = HashSet::new();
     let mut expected_roles = HashSet::new();
     let mut roles = HashSet::new();
     let mut ids = HashSet::new();
@@ -208,6 +210,7 @@ fn run_from_items(uuid: String, items: Vec<&ContainerSnapshotItem>) -> Discovere
             "project_root",
             "cladding_run_metadata_version",
             "cladding_run_control_socket",
+            "cladding_run_private_identity",
             "cladding_run_expected_roles",
         ] {
             if !item.labels.contains_key(label) {
@@ -224,6 +227,9 @@ fn run_from_items(uuid: String, items: Vec<&ContainerSnapshotItem>) -> Discovere
         }
         if let Some(socket) = item.labels.get("cladding_run_control_socket") {
             sockets.insert(socket.clone());
+        }
+        if let Some(identity) = item.labels.get("cladding_run_private_identity") {
+            private_identities.insert(identity.clone());
         }
         if let Some(roles) = item.labels.get("cladding_run_expected_roles") {
             expected_roles.insert(roles.clone());
@@ -321,12 +327,16 @@ fn run_from_items(uuid: String, items: Vec<&ContainerSnapshotItem>) -> Discovere
             "run resources have conflicting project_root labels".to_string()
         });
     }
-    if versions.len() > 1 || sockets.len() > 1 || expected_roles.len() > 1 {
+    if versions.len() > 1
+        || sockets.len() > 1
+        || private_identities.len() > 1
+        || expected_roles.len() > 1
+    {
         malformed.get_or_insert_with(|| {
             "run resources have conflicting supervisor metadata".to_string()
         });
     }
-    if versions.iter().any(|version| version != "1") {
+    if versions.iter().any(|version| version != "2") {
         malformed.get_or_insert_with(|| "run metadata version is unsupported".to_string());
     }
     if !expected_roles
@@ -351,22 +361,25 @@ fn run_from_items(uuid: String, items: Vec<&ContainerSnapshotItem>) -> Discovere
             "run supervisor endpoint is not an absolute host path".to_string()
         });
     }
+    if private_identities
+        .iter()
+        .any(|identity| !valid_private_identity(identity))
+    {
+        malformed.get_or_insert_with(|| "run private identity metadata is malformed".to_string());
+    }
     if roots.len() != 1 {
         malformed.get_or_insert_with(|| {
             "run resources are missing a single project_root identity".to_string()
         });
     }
-    if roots.iter().any(|root| {
-        !Path::new(root).is_absolute()
-            || Path::new(root)
-                .file_name()
-                .is_none_or(|name| name != ".cladding")
-    }) {
-        malformed.get_or_insert_with(|| {
-            "project identity is not an absolute .cladding path".to_string()
-        });
+    if roots.iter().any(|root| !Path::new(root).is_absolute()) {
+        malformed.get_or_insert_with(|| "project identity is not an absolute path".to_string());
     }
-    if versions.len() != 1 || sockets.len() != 1 || expected_roles.len() != 1 {
+    if versions.len() != 1
+        || sockets.len() != 1
+        || private_identities.len() != 1
+        || expected_roles.len() != 1
+    {
         malformed
             .get_or_insert_with(|| "run resources are missing supervisor metadata".to_string());
     }
@@ -376,6 +389,7 @@ fn run_from_items(uuid: String, items: Vec<&ContainerSnapshotItem>) -> Discovere
         project_root: roots.into_iter().next(),
         metadata_version: versions.into_iter().next(),
         control_socket: sockets.into_iter().next(),
+        private_identity: private_identities.into_iter().next(),
         expected_roles: expected_roles.into_iter().next(),
         components,
         helper_containers,
@@ -488,6 +502,7 @@ fn merge_run_volumes(run: &mut DiscoveredRun, volumes: Vec<VolumeSnapshotItem>) 
         if volume.labels.get("project_root") != run.project_root.as_ref()
             || volume.labels.get("cladding_run_metadata_version") != run.metadata_version.as_ref()
             || volume.labels.get("cladding_run_control_socket") != run.control_socket.as_ref()
+            || volume.labels.get("cladding_run_private_identity") != run.private_identity.as_ref()
             || volume.labels.get("cladding_run_expected_roles") != run.expected_roles.as_ref()
         {
             run.malformed.get_or_insert_with(|| {
@@ -524,6 +539,7 @@ fn volume_only_run(uuid: String, volumes: Vec<VolumeSnapshotItem>) -> Discovered
     let mut roots = HashSet::new();
     let mut versions = HashSet::new();
     let mut sockets = HashSet::new();
+    let mut private_identities = HashSet::new();
     let mut expected_roles = HashSet::new();
     let mut malformed = None;
     for volume in &volumes {
@@ -531,6 +547,7 @@ fn volume_only_run(uuid: String, volumes: Vec<VolumeSnapshotItem>) -> Discovered
             "project_root",
             "cladding_run_metadata_version",
             "cladding_run_control_socket",
+            "cladding_run_private_identity",
             "cladding_run_expected_roles",
         ] {
             if !volume.labels.contains_key(label) {
@@ -548,17 +565,31 @@ fn volume_only_run(uuid: String, volumes: Vec<VolumeSnapshotItem>) -> Discovered
         if let Some(value) = volume.labels.get("cladding_run_control_socket") {
             sockets.insert(value.clone());
         }
+        if let Some(value) = volume.labels.get("cladding_run_private_identity") {
+            private_identities.insert(value.clone());
+        }
         if let Some(value) = volume.labels.get("cladding_run_expected_roles") {
             expected_roles.insert(value.clone());
         }
     }
-    if roots.len() != 1 || versions.len() != 1 || sockets.len() != 1 || expected_roles.len() != 1 {
+    if roots.len() != 1
+        || versions.len() != 1
+        || sockets.len() != 1
+        || private_identities.len() != 1
+        || expected_roles.len() != 1
+    {
         malformed.get_or_insert_with(|| {
             "owned volumes have incomplete or conflicting run identity metadata".to_string()
         });
     }
-    if versions.iter().any(|version| version != "1") {
+    if versions.iter().any(|version| version != "2") {
         malformed.get_or_insert_with(|| "run metadata version is unsupported".to_string());
+    }
+    if private_identities
+        .iter()
+        .any(|identity| !valid_private_identity(identity))
+    {
+        malformed.get_or_insert_with(|| "run private identity metadata is malformed".to_string());
     }
     if !expected_roles
         .iter()
@@ -574,15 +605,8 @@ fn volume_only_run(uuid: String, volumes: Vec<VolumeSnapshotItem>) -> Discovered
             "run supervisor endpoint is not an absolute host path".to_string()
         });
     }
-    if roots.iter().any(|root| {
-        !Path::new(root).is_absolute()
-            || Path::new(root)
-                .file_name()
-                .is_none_or(|name| name != ".cladding")
-    }) {
-        malformed.get_or_insert_with(|| {
-            "project identity is not an absolute .cladding path".to_string()
-        });
+    if roots.iter().any(|root| !Path::new(root).is_absolute()) {
+        malformed.get_or_insert_with(|| "project identity is not an absolute path".to_string());
     }
     for volume in &volumes {
         let volume_identity_matches =
@@ -615,6 +639,7 @@ fn volume_only_run(uuid: String, volumes: Vec<VolumeSnapshotItem>) -> Discovered
         project_root: roots.into_iter().next(),
         metadata_version: versions.into_iter().next(),
         control_socket: sockets.into_iter().next(),
+        private_identity: private_identities.into_iter().next(),
         expected_roles: expected_roles.into_iter().next(),
         components: Vec::new(),
         helper_containers: Vec::new(),
@@ -633,6 +658,17 @@ fn valid_expected_roles(value: &str) -> bool {
         && values
             .iter()
             .all(|role| allowed.contains(role) && !role.is_empty())
+}
+
+fn valid_private_identity(value: &str) -> bool {
+    let mut fields = value.split(':');
+    if fields.next() != Some("v1") {
+        return false;
+    }
+    let parsed = (0..4)
+        .map(|_| fields.next().and_then(|field| field.parse::<u64>().ok()))
+        .collect::<Option<Vec<_>>>();
+    parsed.is_some_and(|values| values[1] != 0 && values[3] != 0) && fields.next().is_none()
 }
 
 fn valid_cwd_mappings(raw: &str) -> bool {
@@ -864,7 +900,7 @@ mod tests {
 
     fn run_snapshot(uuid: &str, role: &str, id: &str, state: &str) -> ContainerSnapshot {
         parse_container_snapshot(&format!(
-            r#"[{{"Id":"{id}","Names":["cladding-run-{uuid}-{role}-instance"],"State":"{state}","Labels":{{"cladding":"cladding-run-{uuid}","project_root":"/tmp/project/.cladding","app":"{role}","cladding_run_metadata_version":"1","cladding_run_control_socket":"/tmp/cladding-{uuid}.sock","cladding_run_expected_roles":"agent,proxy","cladding_run_cwd_v1":"[]"}}}}]"#
+            r#"[{{"Id":"{id}","Names":["cladding-run-{uuid}-{role}-instance"],"State":"{state}","Labels":{{"cladding":"cladding-run-{uuid}","project_root":"/tmp/project/.cladding","app":"{role}","cladding_run_metadata_version":"2","cladding_run_control_socket":"/tmp/cladding-{uuid}.sock","cladding_run_private_identity":"v1:1:2:3:4","cladding_run_expected_roles":"agent,proxy","cladding_run_cwd_v1":"[]"}}}}]"#
         ))
         .unwrap()
     }
@@ -921,10 +957,14 @@ mod tests {
                 ("cladding".to_string(), format!("cladding-run-{uuid}")),
                 ("project_root".to_string(), "/tmp/p/.cladding".to_string()),
                 ("app".to_string(), "agent".to_string()),
-                ("cladding_run_metadata_version".to_string(), "1".to_string()),
+                ("cladding_run_metadata_version".to_string(), "2".to_string()),
                 (
                     "cladding_run_control_socket".to_string(),
                     "/tmp/run.sock".to_string(),
+                ),
+                (
+                    "cladding_run_private_identity".to_string(),
+                    "v1:1:2:3:4".to_string(),
                 ),
                 (
                     "cladding_run_expected_roles".to_string(),
@@ -949,8 +989,8 @@ mod tests {
         let uuid = "aabbccdd-1111-4222-8333-123456789abc";
         let snapshot = parse_container_snapshot(&format!(
             r#"[
-                {{"Id":"agent-id","Names":["cladding-run-{uuid}-agent-instance"],"State":"running","Labels":{{"cladding":"cladding-run-{uuid}","project_root":"/tmp/p/.cladding","app":"agent","cladding_run_metadata_version":"1","cladding_run_control_socket":"/tmp/run.sock","cladding_run_expected_roles":"agent,proxy","cladding_run_cwd_v1":"[]"}}}},
-                {{"Id":"seed-id","Names":["cladding-mount-test-seed"],"State":"exited","Labels":{{"cladding":"cladding-run-{uuid}","project_root":"/tmp/p/.cladding","cladding_resource":"managed-mount-seed-helper","cladding_mount_volume":"cladding-mount-test","cladding_run_metadata_version":"1","cladding_run_control_socket":"/tmp/run.sock","cladding_run_expected_roles":"agent,proxy"}}}}
+                {{"Id":"agent-id","Names":["cladding-run-{uuid}-agent-instance"],"State":"running","Labels":{{"cladding":"cladding-run-{uuid}","project_root":"/tmp/p/.cladding","app":"agent","cladding_run_metadata_version":"2","cladding_run_control_socket":"/tmp/run.sock","cladding_run_private_identity":"v1:1:2:3:4","cladding_run_expected_roles":"agent,proxy","cladding_run_cwd_v1":"[]"}}}},
+                {{"Id":"seed-id","Names":["cladding-mount-test-seed"],"State":"exited","Labels":{{"cladding":"cladding-run-{uuid}","project_root":"/tmp/p/.cladding","cladding_resource":"managed-mount-seed-helper","cladding_mount_volume":"cladding-mount-test","cladding_run_metadata_version":"2","cladding_run_control_socket":"/tmp/run.sock","cladding_run_private_identity":"v1:1:2:3:4","cladding_run_expected_roles":"agent,proxy"}}}}
             ]"#
         ))
         .unwrap();
@@ -974,10 +1014,14 @@ mod tests {
                     "cladding_mount_volume".to_string(),
                     "run-mount-volume".to_string(),
                 ),
-                ("cladding_run_metadata_version".to_string(), "1".to_string()),
+                ("cladding_run_metadata_version".to_string(), "2".to_string()),
                 (
                     "cladding_run_control_socket".to_string(),
                     "/tmp/run.sock".to_string(),
+                ),
+                (
+                    "cladding_run_private_identity".to_string(),
+                    "v1:1:2:3:4".to_string(),
                 ),
                 (
                     "cladding_run_expected_roles".to_string(),

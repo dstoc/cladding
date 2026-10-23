@@ -53,7 +53,7 @@ pub(super) fn resolve_run(
             run.uuid
         )));
     }
-    if run.metadata_version.as_deref() != Some("1") {
+    if run.metadata_version.as_deref() != Some("2") {
         return Err(Error::message(format!(
             "run '{}' does not have compatible run metadata",
             run.uuid
@@ -98,11 +98,7 @@ pub(super) fn verified_control_socket_path(run: &DiscoveredRun) -> Result<PathBu
         ))
     })?;
     let project_root = Path::new(project_root);
-    if !project_root.is_absolute()
-        || project_root
-            .file_name()
-            .is_none_or(|name| name != ".cladding")
-    {
+    if !project_root.is_absolute() {
         return Err(Error::message(format!(
             "run '{}' has an invalid project identity for its supervisor endpoint",
             run.uuid
@@ -225,12 +221,12 @@ mod tests {
 
     #[test]
     fn supervisor_endpoint_must_match_the_private_run_path() {
-        let project_root = std::env::temp_dir().join("selection-project/.cladding");
+        let project_root = std::env::temp_dir().join("selection-project/custom-state");
         let run = DiscoveredRun {
             uuid: "aabbccdd-1111-4222-8333-123456789abc".to_string(),
             name: "cladding-run-aabbccdd-1111-4222-8333-123456789abc".to_string(),
             project_root: Some(project_root.display().to_string()),
-            metadata_version: Some("1".to_string()),
+            metadata_version: Some("2".to_string()),
             control_socket: Some(
                 control::expected_control_socket_path(
                     &project_root
@@ -240,6 +236,7 @@ mod tests {
                 .display()
                 .to_string(),
             ),
+            private_identity: Some("v1:1:2:3:4".to_string()),
             expected_roles: Some("agent,proxy".to_string()),
             components: Vec::new(),
             helper_containers: Vec::new(),

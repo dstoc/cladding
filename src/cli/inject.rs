@@ -29,7 +29,12 @@ pub(super) fn cmd_inject_selected(selected: &SelectedRun, args: &InjectArgs) -> 
         .control_socket
         .as_deref()
         .ok_or_else(|| Error::message("selected run has no supervisor control endpoint"))?;
-    let _ = control::admit(std::path::Path::new(socket), selected.uuid(), "agent")?;
+    let _ = control::admit(
+        std::path::Path::new(socket),
+        selected.uuid(),
+        "agent",
+        agent_id,
+    )?;
     if !agent_bridge_available(agent_id)? {
         return Err(Error::message(format!(
             "selected agent is missing {BRIDGE_BINARY}"

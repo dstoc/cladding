@@ -15,6 +15,7 @@ pub struct RuntimeSpec {
     pub custom_mount_sources: Vec<RuntimeMountSourceSnapshot>,
     pub run_control_socket: Option<PathBuf>,
     pub run_expected_roles: Vec<String>,
+    pub run_private_identity: Option<String>,
 }
 
 #[derive(Debug, Clone)]

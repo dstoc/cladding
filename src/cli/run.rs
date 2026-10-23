@@ -191,7 +191,9 @@ pub(super) fn cmd_run(
             )));
         }
     };
-    if let Err(setup_error) = spec.set_run_control_metadata(control.socket_path(), config) {
+    if let Err(setup_error) =
+        spec.set_run_control_metadata(control.socket_path(), control.private_identity(), config)
+    {
         drop(preparation);
         let _cleanup = cladding::runtime_metrics::phase("cleanup");
         let cleanup_error = cleanup_control_only(&runtime_root, &mut control);
@@ -241,39 +243,44 @@ pub(super) fn cmd_run(
         )));
     }
 
-    let command_result = {
-        let _command = cladding::runtime_metrics::phase("user command");
-        match signals.received() {
-            Some(signal) => Err(signal_status_error(signal)),
-            None => match create_agent_session_and_fake_environment(
-                &spec.proxy.container.name,
-                config.agent_session_config(),
-                &fake_mappings,
-                &signals,
-            ) {
-                Ok(fake_environment) => run_if_not_cancelled(signals.received(), || {
-                    if !control.mark_ready(fake_environment.clone()) {
-                        return Err(signal_status_error(SIGTERM));
-                    }
-                    eprintln!("run: {}", instance_name.trim_start_matches("cladding-run-"));
-                    let cancellation_check = || {
-                        signals
-                            .received()
-                            .or_else(|| control.stop_requested().then_some(SIGTERM))
-                    };
-                    let mut effective_env = env_vars.to_vec();
-                    effective_env.extend(fake_environment);
-                    exec::cmd_run_command(
-                        config,
-                        &spec,
-                        &effective_env,
-                        args,
-                        !config_uses_stdin,
-                        &cancellation_check,
-                    )
-                }),
-                Err(error) => Err(error),
-            },
+    let command_result = match exec::capture_run_mount_identities(&spec)
+        .and_then(|identities| control.set_component_mount_identities(identities))
+    {
+        Err(error) => Err(error),
+        Ok(()) => {
+            let _command = cladding::runtime_metrics::phase("user command");
+            match signals.received() {
+                Some(signal) => Err(signal_status_error(signal)),
+                None => match create_agent_session_and_fake_environment(
+                    &spec.proxy.container.name,
+                    config.agent_session_config(),
+                    &fake_mappings,
+                    &signals,
+                ) {
+                    Ok(fake_environment) => run_if_not_cancelled(signals.received(), || {
+                        if !control.mark_ready(fake_environment.clone()) {
+                            return Err(signal_status_error(SIGTERM));
+                        }
+                        eprintln!("run: {}", instance_name.trim_start_matches("cladding-run-"));
+                        let cancellation_check = || {
+                            signals
+                                .received()
+                                .or_else(|| control.stop_requested().then_some(SIGTERM))
+                        };
+                        let mut effective_env = env_vars.to_vec();
+                        effective_env.extend(fake_environment);
+                        exec::cmd_run_command(
+                            config,
+                            &spec,
+                            &effective_env,
+                            args,
+                            !config_uses_stdin,
+                            &cancellation_check,
+                        )
+                    }),
+                    Err(error) => Err(error),
+                },
+            }
         }
     };
     let cleanup_error = {
