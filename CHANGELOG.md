@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/dstoc/cladding/compare/v0.4.8...v0.5.0) (2026-10-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* make cladding run the sole runtime lifecycle ([#142](https://github.com/dstoc/cladding/issues/142))
+
+### Features
+
+* make cladding run the sole runtime lifecycle ([#142](https://github.com/dstoc/cladding/issues/142)) ([f000ceb](https://github.com/dstoc/cladding/commit/f000cebc3d3139340a0d2f0d8f06ae508f789eb1))
+
 ## [0.4.8](https://github.com/dstoc/cladding/compare/v0.4.7...v0.4.8) (2026-10-23)
 
 
