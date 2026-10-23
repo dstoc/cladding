@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.8](https://github.com/dstoc/cladding/compare/v0.4.7...v0.4.8) (2026-10-23)
+
+
+### Features
+
+* add per-session fake credential integration ([#137](https://github.com/dstoc/cladding/issues/137)) ([3d9f427](https://github.com/dstoc/cladding/commit/3d9f4275ae85fb616863dd123f95b15f6b631665))
+* install pinned executable dependencies ([#141](https://github.com/dstoc/cladding/issues/141)) ([35c4b26](https://github.com/dstoc/cladding/commit/35c4b267b7dbd3863cadc57bf06fc6c6b48ca295))
+* migrate sandbox execution to Gantry ([#139](https://github.com/dstoc/cladding/issues/139)) ([9ebe74f](https://github.com/dstoc/cladding/commit/9ebe74fe0ce5c44145f461f6c3878cf0e4981cfb))
+* **release:** publish checksummed cladding-bridge assets ([#140](https://github.com/dstoc/cladding/issues/140)) ([cc959ee](https://github.com/dstoc/cladding/commit/cc959ee34fb77ec531d0fcedcb74a9467d78f60e))
+
 ## [0.4.7](https://github.com/dstoc/cladding/compare/v0.4.6...v0.4.7) (2026-10-17)
 
 
