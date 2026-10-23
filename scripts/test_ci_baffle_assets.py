@@ -3,7 +3,9 @@
 
 import importlib.util
 import re
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -57,6 +59,41 @@ def job_block(name: str, workflow: str = TEXT) -> str:
 
 
 class BaffleCiAssetsTests(unittest.TestCase):
+    def test_bridge_release_assets_reuse_helpers_and_gate_publication(self):
+        build_helpers = job_block("build-helpers", RELEASE_TEXT)
+        package = job_block("package-bridge-assets", RELEASE_TEXT)
+        publish = job_block("publish-release", RELEASE_TEXT)
+        host_upload = job_block("upload-binaries", RELEASE_TEXT)
+
+        self.assertIn("cargo build -p cladding-bridge", build_helpers)
+        self.assertNotIn("cargo build", package)
+        for arch in ("x86_64", "aarch64"):
+            self.assertIn(f"name: cladding-linux-helpers-{arch}", package)
+            self.assertIn(f"{arch}:\"ELF 64-bit\"", package)
+            self.assertIn(f"{arch}_executable_sha256", package)
+
+        self.assertIn("needs: [release-please, build-helpers]", package)
+        self.assertIn("tar -tzf \"$archive\"", package)
+        self.assertIn("cladding-bridge-${RELEASE_TAG}-${target}.tar.gz", package)
+        self.assertIn('archive_sums="$assets_dir/cladding-bridge-SHA256SUMS"', package)
+        self.assertIn("sha256sum", package)
+        self.assertIn("cladding-bridge-executable-SHA256SUMS", package)
+        self.assertIn("gh release upload \"$RELEASE_TAG\"", package)
+
+        self.assertIn(
+            "needs: [release-please, upload-binaries, package-bridge-assets]",
+            publish,
+        )
+        self.assertIn('tar czf "$staging.tar.gz" "$staging"', host_upload)
+
+        package_step = package.split(
+            "- name: Package and verify cladding-bridge release assets", 1
+        )[1].split("\n      - uses:", 1)[0]
+        shell = package_step.split("        run: |\n", 1)[1]
+        subprocess.run(
+            ["bash", "-n"], input=textwrap.dedent(shell), text=True, check=True
+        )
+
     def test_gantry_release_is_pinned_and_verified_before_use(self):
         fetch = GANTRY_FETCH_SCRIPT.read_text()
         self.assertIn("GANTRY_VERSION=0.4.8", fetch)
