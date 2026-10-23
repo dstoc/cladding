@@ -271,8 +271,9 @@ fn expected_executables(manifest: &Manifest) -> Result<BTreeMap<String, String>>
 
         let mut group_executables = BTreeSet::new();
         for executable in &artifact.executables {
+            let archive_path = normalize_archive_path(&executable.archive_path)?;
             ensure!(
-                safe_relative_path(&executable.archive_path),
+                archive_path != ".",
                 "unsafe executable archive path {}",
                 executable.archive_path
             );
@@ -293,10 +294,11 @@ fn expected_executables(manifest: &Manifest) -> Result<BTreeMap<String, String>>
                 executable.install_path
             );
             ensure!(
-                artifact
-                    .archive_entries
-                    .iter()
-                    .any(|entry| entry.path == executable.archive_path && entry.kind == "file"),
+                artifact.archive_entries.iter().any(|entry| {
+                    entry.kind == "file"
+                        && normalize_archive_path(&entry.path)
+                            .is_ok_and(|path| path == archive_path)
+                }),
                 "archive manifest omits executable {}",
                 executable.archive_path
             );
@@ -403,8 +405,9 @@ fn validate_archive_entries(artifact: &Artifact) -> Result<()> {
     );
     let mut paths = BTreeMap::new();
     for entry in &artifact.archive_entries {
+        let path = normalize_archive_path(&entry.path)?;
         ensure!(
-            safe_relative_path(&entry.path),
+            path != "." || entry.kind == "directory",
             "unsafe archive entry {}",
             entry.path
         );
@@ -414,9 +417,7 @@ fn validate_archive_entries(artifact: &Artifact) -> Result<()> {
             entry.kind
         );
         ensure!(
-            paths
-                .insert(entry.path.as_str(), entry.kind.as_str())
-                .is_none(),
+            paths.insert(path.clone(), entry.kind.as_str()).is_none(),
             "duplicate archive entry {}",
             entry.path
         );
@@ -605,16 +606,11 @@ fn validate_archive(archive: &Path, artifact: &Artifact) -> Result<()> {
     let expected = artifact
         .archive_entries
         .iter()
-        .map(|entry| (entry.path.as_str(), entry.kind.as_str()))
-        .collect::<HashMap<_, _>>();
+        .map(|entry| Ok((normalize_archive_path(&entry.path)?, entry.kind.as_str())))
+        .collect::<Result<HashMap<_, _>>>()?;
     let mut found = BTreeSet::new();
     for (name, detail) in listed.iter().zip(detailed.iter()) {
-        let normalized = name.trim_end_matches('/');
-        ensure!(
-            safe_relative_path(normalized),
-            "unsafe entry {name:?} in {}",
-            artifact.archive_filename
-        );
+        let normalized = normalize_archive_path(name)?;
         let kind = match detail.as_bytes().first() {
             Some(b'd') => "directory",
             Some(b'-') => "file",
@@ -624,7 +620,12 @@ fn validate_archive(archive: &Path, artifact: &Artifact) -> Result<()> {
             ),
         };
         ensure!(
-            expected.get(normalized) == Some(&kind),
+            normalized != "." || kind == "directory",
+            "unsafe entry {name:?} in {}",
+            artifact.archive_filename
+        );
+        ensure!(
+            expected.get(&normalized) == Some(&kind),
             "{} contains unexpected archive entry {name:?}",
             artifact.archive_filename
         );
@@ -663,10 +664,8 @@ fn run_tar_list(archive: &Path, verbose: bool) -> Result<Vec<String>> {
 }
 
 fn extract_archive_entry(archive: &Path, entry: &str, destination: &Path) -> Result<()> {
-    ensure!(
-        safe_relative_path(entry),
-        "unsafe archive extraction path {entry}"
-    );
+    let normalized = normalize_archive_path(entry)?;
+    ensure!(normalized != ".", "unsafe archive extraction path {entry}");
     let output_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -675,6 +674,7 @@ fn extract_archive_entry(archive: &Path, entry: &str, destination: &Path) -> Res
     let output = Command::new("tar")
         .args(["-xOzf"])
         .arg(archive)
+        .arg("--")
         .arg(entry)
         .stdout(Stdio::from(output_file))
         .output()
@@ -873,6 +873,20 @@ fn safe_relative_path(value: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
         && !value.contains('\\')
         && !value.contains(':')
+}
+
+fn normalize_archive_path(value: &str) -> Result<String> {
+    let value = if matches!(value, "." | "./") {
+        "."
+    } else {
+        value.strip_prefix("./").unwrap_or(value)
+    };
+    let normalized = value.strip_suffix('/').unwrap_or(value);
+    ensure!(
+        normalized == "." || safe_relative_path(normalized),
+        "unsafe archive path {value:?}"
+    );
+    Ok(normalized.to_string())
 }
 
 fn safe_tool_name(value: &str) -> bool {
@@ -1088,6 +1102,13 @@ mod tests {
         assert!(!safe_tool_name("../baffle"));
         assert!(safe_relative_path("package/bin/tool"));
         assert!(safe_tool_name("run-remote"));
+        assert_eq!(
+            normalize_archive_path("./package/bin/tool").unwrap(),
+            "package/bin/tool"
+        );
+        assert_eq!(normalize_archive_path("./").unwrap(), ".");
+        assert!(normalize_archive_path("./../baffle").is_err());
+        assert!(normalize_archive_path("././baffle").is_err());
     }
 
     #[test]
@@ -1170,6 +1191,83 @@ mod tests {
             )
             .unwrap()
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn installer_extracts_baffle_from_upstream_dot_slash_archive_path() {
+        let temp = test_directory("install-baffle-dot-slash");
+        let bin_dir = temp.join("tools/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let source = temp.join("archives");
+        fs::create_dir_all(&source).unwrap();
+        let manifest = fixture_manifest(&source);
+        let baffle = manifest
+            .platforms
+            .get(LINUX_ARCHITECTURE)
+            .unwrap()
+            .iter()
+            .find(|record| record.name == "baffle")
+            .unwrap();
+        assert_eq!(baffle.executables[0].archive_path, "./baffle");
+
+        install_release_tools_with(
+            &manifest,
+            &bin_dir,
+            &fake_curl(&temp, &source, &temp.join("baffle-dot-slash.log")),
+        )
+        .unwrap();
+
+        assert!(matches_checksum(&bin_dir.join("baffle"), &baffle.executables[0].sha256).unwrap());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn installer_rejects_duplicate_archive_names_after_prefix_normalization() {
+        let temp = test_directory("install-duplicate-dot-slash");
+        let bin_dir = temp.join("tools/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let source = temp.join("archives");
+        fs::create_dir_all(&source).unwrap();
+        let mut manifest = fixture_manifest(&source);
+        let bridge = manifest
+            .platforms
+            .get_mut(LINUX_ARCHITECTURE)
+            .unwrap()
+            .iter_mut()
+            .find(|record| record.name == "cladding-bridge")
+            .unwrap();
+        let archive = source.join(&bridge.archive_filename);
+        let bridge_dir = temp.join("duplicate-bridge-a");
+        let duplicate_dir = temp.join("duplicate-bridge-b");
+        fs::create_dir_all(&bridge_dir).unwrap();
+        fs::create_dir_all(&duplicate_dir).unwrap();
+        let bytes = basic_elf(machine_for_arch());
+        fs::write(bridge_dir.join("cladding-bridge"), &bytes).unwrap();
+        fs::write(duplicate_dir.join("cladding-bridge"), bytes).unwrap();
+        let status = Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&bridge_dir)
+            .arg("cladding-bridge")
+            .arg("-C")
+            .arg(&duplicate_dir)
+            .arg("./cladding-bridge")
+            .status()
+            .expect("run tar for duplicate archive fixture");
+        assert!(status.success(), "create duplicate archive fixture");
+        bridge.archive_sha256 = sha256_file(&archive).unwrap();
+
+        let error = install_release_tools_with(
+            &manifest,
+            &bin_dir,
+            &fake_curl(&temp, &source, &temp.join("duplicate-dot-slash.log")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("duplicate archive entry"), "{error}");
+        assert!(!bin_dir.join("cladding-bridge").exists());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -1416,8 +1514,8 @@ mod tests {
                 "v2.2.0",
                 &baffle_archive,
                 &baffle_source,
-                &["baffle"],
-                vec![("baffle", "baffle", &baffle_bytes)],
+                &["./baffle"],
+                vec![("./baffle", "baffle", &baffle_bytes)],
             ),
         ];
         Manifest {
@@ -1445,7 +1543,7 @@ mod tests {
             .iter()
             .zip(detailed.iter())
             .map(|(path, detail)| ArchiveEntry {
-                path: path.trim_end_matches('/').to_string(),
+                path: normalize_archive_path(path).unwrap(),
                 kind: if detail.starts_with('d') {
                     "directory"
                 } else {

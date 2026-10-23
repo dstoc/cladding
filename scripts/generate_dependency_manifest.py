@@ -30,6 +30,10 @@ def digest(data: bytes) -> str:
 def safe_member_name(name: str) -> str:
     if "\\" in name or name.startswith("/"):
         raise ValueError(f"unsafe archive path: {name!r}")
+    if name in (".", "./"):
+        return "."
+    if name.startswith("./"):
+        name = name[2:]
     clean = name.removesuffix("/")
     parts = clean.split("/")
     if not clean or any(part in ("", ".", "..") for part in parts) or ":" in clean:
@@ -51,6 +55,8 @@ def archive_members(archive: pathlib.Path) -> tuple[dict[str, tarfile.TarInfo], 
                 kind = "file"
             else:
                 raise ValueError(f"archive entry is not a regular file or directory: {name}")
+            if name == "." and kind != "directory":
+                raise ValueError("archive root entry is not a directory")
             members[name] = member
             entries.append({"path": name, "kind": kind})
         package.close()
@@ -200,7 +206,7 @@ def bridge_record(bridge_dir: pathlib.Path, tag: str, arch: str) -> dict:
         "archive_entries": entries,
         "executables": [
             {
-                "archive_path": "cladding-bridge",
+                "archive_path": members["cladding-bridge"].name,
                 "install_path": "cladding-bridge",
                 "sha256": executable_sha,
             }
@@ -235,7 +241,13 @@ def upstream_record(
             path = f"{root}/{name}"
             data = archive_bytes(archive, members, path)
             validate_gantry(data, arch, machine, loader, name)
-            executables.append({"archive_path": path, "install_path": name, "sha256": digest(data)})
+            executables.append(
+                {
+                    "archive_path": members[path].name,
+                    "install_path": name,
+                    "sha256": digest(data),
+                }
+            )
         for source, destination in (
             (f"{root}/LICENSE", docs_dir / "gantry/LICENSE"),
             (f"{root}/README.md", docs_dir / "gantry/README.md"),
@@ -249,7 +261,13 @@ def upstream_record(
     else:
         data = archive_bytes(archive, members, "baffle")
         validate_loader(data, arch, machine, loader)
-        executables = [{"archive_path": "baffle", "install_path": "baffle", "sha256": digest(data)}]
+        executables = [
+            {
+                "archive_path": members["baffle"].name,
+                "install_path": "baffle",
+                "sha256": digest(data),
+            }
+        ]
         if arch == "x86_64":
             for source, destination in (
                 ("LICENSE", docs_dir / "baffle/LICENSE"),
