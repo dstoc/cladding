@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: u8 = 1;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_RESPONSE_ERROR_BYTES: usize = 8 * 1024;
 const SOCKET_MODE: u32 = 0o600;
 const LOCK_MODE: u32 = 0o600;
 const STATUS_STARTING: u8 = 0;
@@ -154,19 +155,36 @@ impl RunControl {
         let thread_state = Arc::clone(&state);
         let thread_stop = Arc::clone(&stop_server);
         let server = thread::spawn(move || {
+            let mut clients = Vec::new();
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let state = Arc::clone(&thread_state);
-                        let _ = thread::Builder::new()
+                        if let Ok(client) = thread::Builder::new()
                             .name("cladding-run-control-client".to_string())
-                            .spawn(move || serve_client(stream, state));
+                            .spawn(move || serve_client(stream, state))
+                        {
+                            clients.push(client);
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(20));
                     }
                     Err(_) => break,
                 }
+
+                let mut index = 0;
+                while index < clients.len() {
+                    if clients[index].is_finished() {
+                        let client = clients.swap_remove(index);
+                        let _ = client.join();
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            for client in clients {
+                let _ = client.join();
             }
         });
         Ok(Self {
@@ -519,14 +537,45 @@ fn write_response(stream: &mut UnixStream, response: &Response) -> Result<()> {
     let mut bytes = serde_json::to_vec(response)
         .map_err(|_| Error::message("failed to encode run control response"))?;
     if bytes.len() > MAX_MESSAGE_BYTES {
-        return Err(Error::message(
-            "run control response exceeded its size limit",
-        ));
+        let error = response
+            .error
+            .as_deref()
+            .map(|error| truncate_response_error(error, MAX_RESPONSE_ERROR_BYTES))
+            .unwrap_or_else(|| "run control response exceeded its size limit".to_string());
+        let bounded_response = Response {
+            version: response.version,
+            uuid: response.uuid.clone(),
+            state: response.state.clone(),
+            expected_roles: Vec::new(),
+            fake_environment: Vec::new(),
+            error: Some(error),
+        };
+        bytes = serde_json::to_vec(&bounded_response)
+            .map_err(|_| Error::message("failed to encode bounded run control response"))?;
+        if bytes.len() > MAX_MESSAGE_BYTES {
+            return Err(Error::message(
+                "bounded run control response exceeded its size limit",
+            ));
+        }
     }
     bytes.push(b'\n');
     stream
         .write_all(&bytes)
         .map_err(|error| Error::message(format!("failed to write run control response: {error}")))
+}
+
+fn truncate_response_error(error: &str, max_bytes: usize) -> String {
+    const SUFFIX: &str = "… [truncated]";
+    if error.len() <= max_bytes {
+        return error.to_string();
+    }
+
+    let content_limit = max_bytes.saturating_sub(SUFFIX.len());
+    let mut boundary = content_limit.min(error.len());
+    while !error.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}{SUFFIX}", &error[..boundary])
 }
 
 pub(super) fn status(socket_path: &Path, uuid: &str) -> Result<ControlStatus> {
@@ -791,6 +840,69 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("container cleanup failed"));
         drop(control);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_cleanup_error_still_returns_a_bounded_stop_response() {
+        let root = std::env::temp_dir().join(format!(
+            "cladding-control-oversized-error-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let control = RunControl::start(
+            &root,
+            "aabbccdd-1111-4222-8333-123456789abc",
+            &["agent".to_string(), "proxy".to_string()],
+        )
+        .unwrap();
+        control.mark_ready(Vec::new());
+        control.mark_stopping();
+        control.mark_stopped(Some("container cleanup failed ".repeat(MAX_MESSAGE_BYTES)));
+
+        let error = stop(
+            control.socket_path(),
+            "aabbccdd-1111-4222-8333-123456789abc",
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().starts_with("container cleanup failed"));
+        assert!(error.to_string().ends_with("[truncated]"));
+        assert!(
+            !error
+                .to_string()
+                .contains("response exceeded its size limit")
+        );
+        drop(control);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_shutdown_waits_for_active_client_handlers() {
+        let root = std::env::temp_dir().join(format!(
+            "cladding-control-active-client-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut control = RunControl::start(
+            &root,
+            "aabbccdd-1111-4222-8333-123456789abc",
+            &["agent".to_string(), "proxy".to_string()],
+        )
+        .unwrap();
+        let mut client = UnixStream::connect(control.socket_path()).unwrap();
+        client.write_all(b"{\"version\":1,").unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        let started = Instant::now();
+        control.finish();
+        assert!(started.elapsed() >= Duration::from_secs(1));
+
+        drop(client);
         fs::remove_dir_all(root).unwrap();
     }
 
