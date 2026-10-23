@@ -515,9 +515,10 @@ pub(super) fn cmd_destroy_selected(selected: &SelectedRun) -> Result<()> {
         .private_identity
         .as_deref()
         .ok_or_else(|| Error::message("selected run has no private ownership identity"))?;
-    let _lifetime_lock = control::acquire_recovery_lock(&runtime_root, private_identity)?;
+    let lifetime_lock = control::acquire_recovery_lock(&runtime_root, private_identity)?;
 
-    let fresh_runs = list_discovered_runs(false, false)?;
+    let fresh_runs =
+        with_recovery_validation(&lifetime_lock, || list_discovered_runs(false, false))?;
     let fresh_run = fresh_runs
         .into_iter()
         .find(|run| run.uuid == selected.run.uuid)
@@ -528,43 +529,53 @@ pub(super) fn cmd_destroy_selected(selected: &SelectedRun) -> Result<()> {
         .iter()
         .chain(&fresh_run.helper_containers)
     {
+        lifetime_lock.verify()?;
         let id = component
             .id
             .as_deref()
             .ok_or_else(|| Error::message("run-owned container has no immutable ID"))?;
-        let status = std::process::Command::new("podman")
-            .args(["container", "rm", "--force", id])
-            .status()
-            .map_err(|error| {
-                Error::message(format!("failed to remove run container {id}: {error}"))
-            })?;
+        let status = with_recovery_validation(&lifetime_lock, || {
+            std::process::Command::new("podman")
+                .args(["container", "rm", "--force", id])
+                .status()
+                .map_err(|error| {
+                    Error::message(format!("failed to remove run container {id}: {error}"))
+                })
+        })?;
         cladding::podman::ensure_success(status, "podman container rm")?;
     }
+    let volume_recovery = RunVolumeRecovery {
+        run_name: &selected.run.name,
+        project_root,
+        runtime_root: &runtime_root,
+        control_socket: selected
+            .run
+            .control_socket
+            .as_deref()
+            .ok_or_else(|| Error::message("selected run has no supervisor endpoint"))?,
+        expected_roles: selected
+            .run
+            .expected_roles
+            .as_deref()
+            .ok_or_else(|| Error::message("selected run has no expected component metadata"))?,
+        private_identity,
+        lifetime_lock: &lifetime_lock,
+    };
     for volume in &fresh_run.volumes {
-        remove_run_owned_volume(
-            volume,
-            &selected.run.name,
-            project_root,
-            &runtime_root,
-            selected
-                .run
-                .control_socket
-                .as_deref()
-                .ok_or_else(|| Error::message("selected run has no supervisor endpoint"))?,
-            selected
-                .run
-                .expected_roles
-                .as_deref()
-                .ok_or_else(|| Error::message("selected run has no expected component metadata"))?,
-            private_identity,
-        )?;
+        remove_run_owned_volume(volume, &volume_recovery)?;
     }
     if let Some(socket) = selected.run.control_socket.as_deref() {
-        control::remove_stale_socket(std::path::Path::new(socket), &runtime_root, selected.uuid())?;
+        with_recovery_validation(&lifetime_lock, || {
+            control::remove_stale_socket(
+                std::path::Path::new(socket),
+                &runtime_root,
+                selected.uuid(),
+            )
+        })?;
     }
-    std::fs::remove_dir_all(&runtime_root).map_err(|error| {
+    lifetime_lock.remove_runtime_root().map_err(|error| {
         Error::message(format!(
-            "run containers were removed but private run cleanup failed at {}: {error}",
+            "run resources were removed but verified private run cleanup failed at {}: {error}",
             runtime_root.display()
         ))
     })?;
@@ -572,23 +583,37 @@ pub(super) fn cmd_destroy_selected(selected: &SelectedRun) -> Result<()> {
     Ok(())
 }
 
-fn remove_run_owned_volume(
-    volume_name: &str,
-    run_name: &str,
-    project_root: &std::path::Path,
-    runtime_root: &std::path::Path,
-    control_socket: &str,
-    expected_roles: &str,
-    private_identity: &str,
-) -> Result<()> {
-    let output = std::process::Command::new("podman")
-        .args(["volume", "inspect", volume_name])
-        .output()
-        .map_err(|error| {
-            Error::message(format!(
-                "failed to inspect run volume {volume_name}: {error}"
-            ))
-        })?;
+fn with_recovery_validation<T>(
+    ownership: &control::RecoveryLock,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    ownership.verify()?;
+    let result = operation();
+    ownership.verify()?;
+    result
+}
+
+struct RunVolumeRecovery<'a> {
+    run_name: &'a str,
+    project_root: &'a std::path::Path,
+    runtime_root: &'a std::path::Path,
+    control_socket: &'a str,
+    expected_roles: &'a str,
+    private_identity: &'a str,
+    lifetime_lock: &'a control::RecoveryLock,
+}
+
+fn remove_run_owned_volume(volume_name: &str, recovery: &RunVolumeRecovery<'_>) -> Result<()> {
+    let output = with_recovery_validation(recovery.lifetime_lock, || {
+        std::process::Command::new("podman")
+            .args(["volume", "inspect", volume_name])
+            .output()
+            .map_err(|error| {
+                Error::message(format!(
+                    "failed to inspect run volume {volume_name}: {error}"
+                ))
+            })
+    })?;
     if !output.status.success() {
         return Err(Error::message(format!(
             "failed to inspect run volume {volume_name}"
@@ -618,31 +643,33 @@ fn remove_run_owned_volume(
     let resource = label("cladding_resource").unwrap_or_default();
     let is_owned_socket = resource == "inter-container-socket"
         && label("cladding_socket_volume") == Some(volume_name);
-    let runtime_root_text = runtime_root.to_string_lossy();
-    let project_root_text = project_root.to_string_lossy();
+    let runtime_root_text = recovery.runtime_root.to_string_lossy();
+    let project_root_text = recovery.project_root.to_string_lossy();
     let is_owned_mount = resource == "managed-mount"
         && label("cladding_mount_volume") == Some(volume_name)
         && label("cladding_runtime_root") == Some(runtime_root_text.as_ref());
-    if label("cladding") != Some(run_name)
+    if label("cladding") != Some(recovery.run_name)
         || label("project_root") != Some(project_root_text.as_ref())
         || label("cladding_run_metadata_version") != Some("2")
-        || label("cladding_run_control_socket") != Some(control_socket)
-        || label("cladding_run_private_identity") != Some(private_identity)
-        || label("cladding_run_expected_roles") != Some(expected_roles)
+        || label("cladding_run_control_socket") != Some(recovery.control_socket)
+        || label("cladding_run_private_identity") != Some(recovery.private_identity)
+        || label("cladding_run_expected_roles") != Some(recovery.expected_roles)
         || !(is_owned_socket || is_owned_mount)
     {
         return Err(Error::message(format!(
             "refusing to remove volume {volume_name} because its ownership labels do not match this run"
         )));
     }
-    let status = std::process::Command::new("podman")
-        .args(["volume", "rm", volume_name])
-        .status()
-        .map_err(|error| {
-            Error::message(format!(
-                "failed to remove run volume {volume_name}: {error}"
-            ))
-        })?;
+    let status = with_recovery_validation(recovery.lifetime_lock, || {
+        std::process::Command::new("podman")
+            .args(["volume", "rm", volume_name])
+            .status()
+            .map_err(|error| {
+                Error::message(format!(
+                    "failed to remove run volume {volume_name}: {error}"
+                ))
+            })
+    })?;
     cladding::podman::ensure_success(status, "podman volume rm")
 }
 

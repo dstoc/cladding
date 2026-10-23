@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read as _, Write};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{
     DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
     PermissionsExt as _,
 };
+use std::os::unix::io::{AsRawFd as _, FromRawFd as _, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -94,6 +96,22 @@ pub(super) struct RunControl {
     stop_server: Arc<AtomicBool>,
     server: Option<JoinHandle<()>>,
     _lifetime_lock: File,
+}
+
+pub(super) struct RecoveryLock {
+    _lock: File,
+    runtime_root: PathBuf,
+    root_directory: File,
+    runs_directory: File,
+    path_identities: Vec<PathIdentity>,
+    root_identity: (u64, u64),
+    lock_identity: (u64, u64),
+}
+
+struct PathIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -373,11 +391,156 @@ impl Drop for RunControl {
     }
 }
 
-pub(super) fn acquire_recovery_lock(runtime_root: &Path, expected_identity: &str) -> Result<File> {
+impl RecoveryLock {
+    pub(super) fn verify(&self) -> Result<()> {
+        self.verify_path_bindings(true)
+    }
+
+    pub(super) fn remove_runtime_root(self) -> Result<()> {
+        self.verify()?;
+        remove_directory_contents(self.root_directory.as_raw_fd()).map_err(|error| {
+            Error::message(format!(
+                "failed to remove verified run directory contents: {error}"
+            ))
+        })?;
+        self.verify_path_bindings(false)?;
+
+        let name = runtime_root_name(&self.runtime_root)?;
+        // SAFETY: both descriptors are held open, name is a NUL-terminated single path
+        // component, and unlinkat does not retain pointers.
+        if unsafe {
+            libc::unlinkat(
+                self.runs_directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        } != 0
+        {
+            return Err(Error::message(format!(
+                "failed to remove verified run directory {}: {}",
+                self.runtime_root.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        match fs::symlink_metadata(&self.runtime_root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(Error::message(
+                    "refusing recovery because the run directory path was replaced during removal",
+                ));
+            }
+            Err(error) => {
+                return Err(Error::message(format!(
+                    "failed to verify removed run directory path: {error}"
+                )));
+            }
+        }
+        self.verify_parent_bindings()?;
+        Ok(())
+    }
+
+    fn verify_path_bindings(&self, check_lock: bool) -> Result<()> {
+        validate_private_runtime_root(&self.runtime_root)?;
+        for identity in &self.path_identities {
+            let metadata = fs::symlink_metadata(&identity.path).map_err(|error| {
+                Error::message(format!(
+                    "refusing recovery because a verified run path is unavailable: {error}"
+                ))
+            })?;
+            if metadata.file_type().is_symlink()
+                || (metadata.dev(), metadata.ino()) != (identity.device, identity.inode)
+            {
+                return Err(Error::message(
+                    "refusing recovery because a verified run path or parent changed",
+                ));
+            }
+        }
+        let root_metadata = self.root_directory.metadata().map_err(|error| {
+            Error::message(format!("failed to verify opened run directory: {error}"))
+        })?;
+        let runs_metadata = self.runs_directory.metadata().map_err(|error| {
+            Error::message(format!("failed to verify opened run parent: {error}"))
+        })?;
+        let parent_identity = self.parent_identity()?;
+        if (root_metadata.dev(), root_metadata.ino()) != self.root_identity
+            || (runs_metadata.dev(), runs_metadata.ino()) != parent_identity
+        {
+            return Err(Error::message(
+                "refusing recovery because opened run directory ownership changed",
+            ));
+        }
+        if check_lock {
+            let lock_path = self.runtime_root.join("lifetime.lock");
+            let lock_metadata = fs::symlink_metadata(&lock_path).map_err(|error| {
+                Error::message(format!(
+                    "refusing recovery because lifetime lock changed: {error}"
+                ))
+            })?;
+            let lock_file_metadata = self._lock.metadata().map_err(|error| {
+                Error::message(format!("failed to verify held run lifetime lock: {error}"))
+            })?;
+            if lock_metadata.file_type().is_symlink()
+                || (lock_metadata.dev(), lock_metadata.ino()) != self.lock_identity
+                || (lock_file_metadata.dev(), lock_file_metadata.ino()) != self.lock_identity
+            {
+                return Err(Error::message(
+                    "refusing recovery because the held run lifetime lock path changed",
+                ));
+            }
+        }
+        let name = runtime_root_name(&self.runtime_root)?;
+        let entry = stat_at(self.runs_directory.as_raw_fd(), &name)?;
+        if (entry.st_dev as u64, entry.st_ino as u64) != self.root_identity {
+            return Err(Error::message(
+                "refusing recovery because the run directory entry was replaced",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_parent_bindings(&self) -> Result<()> {
+        for identity in self.path_identities.iter().skip(1) {
+            let metadata = fs::symlink_metadata(&identity.path).map_err(|error| {
+                Error::message(format!(
+                    "refusing recovery because a verified run parent is unavailable: {error}"
+                ))
+            })?;
+            if metadata.file_type().is_symlink()
+                || (metadata.dev(), metadata.ino()) != (identity.device, identity.inode)
+            {
+                return Err(Error::message(
+                    "refusing recovery because a verified run parent changed",
+                ));
+            }
+        }
+        let runs_metadata = self.runs_directory.metadata().map_err(|error| {
+            Error::message(format!("failed to verify opened run parent: {error}"))
+        })?;
+        if (runs_metadata.dev(), runs_metadata.ino()) != self.parent_identity()? {
+            return Err(Error::message(
+                "refusing recovery because the verified run parent changed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn parent_identity(&self) -> Result<(u64, u64)> {
+        self.path_identities
+            .get(1)
+            .map(|identity| (identity.device, identity.inode))
+            .ok_or_else(|| Error::message("verified run directory has no parent identity"))
+    }
+}
+
+pub(super) fn acquire_recovery_lock(
+    runtime_root: &Path,
+    expected_identity: &str,
+) -> Result<RecoveryLock> {
     let expected = parse_private_identity(expected_identity).ok_or_else(|| {
         Error::message("refusing recovery because the run private identity is malformed")
     })?;
     validate_private_runtime_root(runtime_root)?;
+    let path_identities = snapshot_path_identities(runtime_root)?;
     let root_metadata = fs::symlink_metadata(runtime_root).map_err(|error| {
         Error::message(format!("run private directory is unavailable: {error}"))
     })?;
@@ -438,19 +601,202 @@ pub(super) fn acquire_recovery_lock(runtime_root: &Path, expected_identity: &str
             "refusing recovery because the run supervisor still owns the lifetime lock",
         ));
     }
-    let final_root = fs::symlink_metadata(runtime_root).map_err(|error| {
-        Error::message(format!("failed to recheck private run directory: {error}"))
-    })?;
-    let final_lock = fs::symlink_metadata(&lock_path)
-        .map_err(|error| Error::message(format!("failed to recheck run lifetime lock: {error}")))?;
-    if (final_root.dev(), final_root.ino()) != (expected.0, expected.1)
-        || (final_lock.dev(), final_lock.ino()) != (expected.2, expected.3)
+    let root_directory = open_directory_nofollow(runtime_root)?;
+    let runs_directory = open_directory_nofollow(
+        runtime_root
+            .parent()
+            .ok_or_else(|| Error::message("run private directory has no parent"))?,
+    )?;
+    let ownership = RecoveryLock {
+        _lock: file,
+        runtime_root: runtime_root.to_path_buf(),
+        root_directory,
+        runs_directory,
+        path_identities,
+        root_identity: (expected.0, expected.1),
+        lock_identity: (expected.2, expected.3),
+    };
+    ownership.verify()?;
+    Ok(ownership)
+}
+
+fn snapshot_path_identities(runtime_root: &Path) -> Result<Vec<PathIdentity>> {
+    runtime_root
+        .ancestors()
+        .map(|path| {
+            let metadata = fs::symlink_metadata(path).map_err(|error| {
+                Error::message(format!(
+                    "failed to snapshot run path {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::message(
+                    "refusing recovery because a run path contains a symlink or non-directory",
+                ));
+            }
+            Ok(PathIdentity {
+                path: path.to_path_buf(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        })
+        .collect()
+}
+
+fn open_directory_nofollow(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    options.open(path).map_err(|error| {
+        Error::message(format!(
+            "failed to open verified run directory {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn runtime_root_name(runtime_root: &Path) -> Result<std::ffi::CString> {
+    let name = runtime_root
+        .file_name()
+        .ok_or_else(|| Error::message("run private directory has no name"))?;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| Error::message("run private directory name is invalid"))
+}
+
+fn stat_at(directory: RawFd, name: &std::ffi::CStr) -> Result<libc::stat> {
+    // SAFETY: stat is initialized by fstatat, and name is NUL-terminated.
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: directory is a live directory descriptor and pointers are valid for the call.
+    if unsafe {
+        libc::fstatat(
+            directory,
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
     {
-        return Err(Error::message(
-            "refusing recovery because private run ownership changed during verification",
-        ));
+        return Err(Error::message(format!(
+            "failed to inspect verified run directory entry: {}",
+            std::io::Error::last_os_error()
+        )));
     }
-    Ok(file)
+    Ok(stat)
+}
+
+fn remove_directory_contents(directory: RawFd) -> std::io::Result<()> {
+    let names = directory_entry_names(directory)?;
+    for name in names {
+        let expected =
+            stat_at(directory, &name).map_err(|error| std::io::Error::other(error.to_string()))?;
+        if expected.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            // SAFETY: name is one directory entry and flags prevent following symlinks.
+            let child = unsafe {
+                libc::openat(
+                    directory,
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if child < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: openat returned a fresh descriptor now owned by this File.
+            let child = unsafe { File::from_raw_fd(child) };
+            let opened = child.metadata()?;
+            if (opened.dev(), opened.ino()) != (expected.st_dev as u64, expected.st_ino as u64) {
+                return Err(std::io::Error::other(
+                    "run directory entry changed while opening it",
+                ));
+            }
+            remove_directory_contents(child.as_raw_fd())?;
+            let current = stat_at(directory, &name)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if (current.st_dev as u64, current.st_ino as u64)
+                != (expected.st_dev as u64, expected.st_ino as u64)
+            {
+                return Err(std::io::Error::other(
+                    "run directory entry changed during cleanup",
+                ));
+            }
+            // SAFETY: the entry was verified as the opened directory and is now empty.
+            if unsafe { libc::unlinkat(directory, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        } else {
+            let current = stat_at(directory, &name)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if (current.st_dev as u64, current.st_ino as u64)
+                != (expected.st_dev as u64, expected.st_ino as u64)
+            {
+                return Err(std::io::Error::other(
+                    "run file entry changed during cleanup",
+                ));
+            }
+            // SAFETY: name is a verified entry in the opened run directory.
+            if unsafe { libc::unlinkat(directory, name.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn directory_entry_names(directory: RawFd) -> std::io::Result<Vec<std::ffi::CString>> {
+    // SAFETY: dup creates a new descriptor for fdopendir to take ownership of.
+    let duplicate = unsafe { libc::dup(directory) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fdopendir takes ownership of the duplicated descriptor on success.
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        // SAFETY: fdopendir did not take ownership when it failed.
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = (|| {
+        let mut names = Vec::new();
+        loop {
+            clear_errno();
+            // SAFETY: stream is a live directory stream until closedir below.
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error().unwrap_or_default() != 0 {
+                    return Err(error);
+                }
+                break;
+            }
+            // SAFETY: d_name is NUL-terminated by readdir.
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                names.push(std::ffi::CString::new(name.to_bytes()).expect("entry has no NUL"));
+            }
+        }
+        Ok(names)
+    })();
+    // SAFETY: stream is owned by this function and must be closed exactly once.
+    let close_result = unsafe { libc::closedir(stream) };
+    match (result, close_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), -1) => Err(std::io::Error::last_os_error()),
+        (Ok(names), _) => Ok(names),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clear_errno() {
+    // SAFETY: this returns the current thread's errno location.
+    unsafe { *libc::__errno_location() = 0 };
+}
+
+#[cfg(target_os = "macos")]
+fn clear_errno() {
+    // SAFETY: this returns the current thread's errno location.
+    unsafe { *libc::__error() = 0 };
 }
 
 fn validate_private_runtime_root(runtime_root: &Path) -> Result<()> {
@@ -1155,6 +1501,92 @@ mod tests {
         symlink(&saved, &runs).unwrap();
 
         assert!(acquire_recovery_lock(&root, &identity).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn recovery_lock_rejects_run_root_replaced_after_acquisition() {
+        let (base, root) = run_root("post-lock-root-replacement");
+        let control = RunControl::start(
+            &root,
+            "aabbccdd-1111-4222-8333-123456789ab4",
+            &["agent".to_string(), "proxy".to_string()],
+        )
+        .unwrap();
+        let identity = control.private_identity().to_string();
+        drop(control);
+        let recovery = acquire_recovery_lock(&root, &identity).unwrap();
+
+        let original = root.with_extension("original");
+        fs::rename(&root, &original).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let sentinel = root.join("unrelated-keep.txt");
+        fs::write(&sentinel, "keep").unwrap();
+
+        assert!(recovery.verify().is_err());
+        assert!(recovery.remove_runtime_root().is_err());
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "keep");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn recovery_lock_removes_the_opened_run_tree_and_preserves_siblings() {
+        let (base, root) = run_root("fd-anchored-cleanup");
+        let sibling = root.parent().unwrap().join("cladding-run-sibling");
+        fs::create_dir(&sibling).unwrap();
+        fs::set_permissions(&sibling, fs::Permissions::from_mode(0o700)).unwrap();
+        let nested = root.join("runtime/nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("private-runtime-file"), "remove").unwrap();
+
+        let control = RunControl::start(
+            &root,
+            "aabbccdd-1111-4222-8333-123456789ab6",
+            &["agent".to_string(), "proxy".to_string()],
+        )
+        .unwrap();
+        let identity = control.private_identity().to_string();
+        drop(control);
+        acquire_recovery_lock(&root, &identity)
+            .unwrap()
+            .remove_runtime_root()
+            .unwrap();
+
+        assert!(!root.exists());
+        assert!(sibling.is_dir());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn recovery_lock_rejects_run_parent_redirected_after_acquisition() {
+        let (base, root) = run_root("post-lock-parent-replacement");
+        let control = RunControl::start(
+            &root,
+            "aabbccdd-1111-4222-8333-123456789ab5",
+            &["agent".to_string(), "proxy".to_string()],
+        )
+        .unwrap();
+        let identity = control.private_identity().to_string();
+        drop(control);
+        let recovery = acquire_recovery_lock(&root, &identity).unwrap();
+
+        let runs = root.parent().unwrap().to_path_buf();
+        let original_runs = runs.with_extension("original");
+        let replacement_runs = runs.with_extension("replacement");
+        fs::rename(&runs, &original_runs).unwrap();
+        fs::create_dir(&replacement_runs).unwrap();
+        fs::set_permissions(&replacement_runs, fs::Permissions::from_mode(0o700)).unwrap();
+        let replacement_root = replacement_runs.join(root.file_name().unwrap());
+        fs::create_dir(&replacement_root).unwrap();
+        fs::set_permissions(&replacement_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let sentinel = replacement_root.join("unrelated-keep.txt");
+        fs::write(&sentinel, "keep").unwrap();
+        symlink(&replacement_runs, &runs).unwrap();
+
+        assert!(recovery.verify().is_err());
+        assert!(recovery.remove_runtime_root().is_err());
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "keep");
         fs::remove_dir_all(base).unwrap();
     }
 
