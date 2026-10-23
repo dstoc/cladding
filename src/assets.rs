@@ -13,10 +13,6 @@ const PROXY_STARTUP_SCRIPT: &str = include_str!("../scripts/proxy_startup.sh");
 
 static CONFIG_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/config-template");
 
-static GANTRY_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gantry"));
-static RUN_REMOTE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/run-remote"));
-static CLADDING_BRIDGE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cladding-bridge"));
-static BAFFLE_BIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/baffle"));
 static GANTRY_LICENSE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gantry-LICENSE"));
 static GANTRY_README: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gantry-README.md"));
 static GANTRY_REFERENCE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gantry-reference.md"));
@@ -31,10 +27,6 @@ pub fn materialize_config(base_dir: &Path) -> Result<()> {
 
 pub fn tool_files() -> Vec<(&'static str, &'static [u8])> {
     vec![
-        ("gantry", GANTRY_BIN),
-        ("run-remote", RUN_REMOTE_BIN),
-        ("cladding-bridge", CLADDING_BRIDGE_BIN),
-        ("baffle", BAFFLE_BIN),
         ("run-in-nw-sandbox", RUN_IN_NW_SANDBOX),
         ("run-in-fs-sandbox", RUN_IN_FS_SANDBOX),
     ]
@@ -59,6 +51,9 @@ pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
         bin_dir
     };
     for (name, contents) in gantry_document_files() {
+        if contents.is_empty() {
+            continue;
+        }
         let path = tools_dir.join(name);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -72,7 +67,7 @@ pub fn write_embedded_tools(bin_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn gantry_document_files() -> Vec<(&'static str, &'static [u8])> {
+pub fn gantry_document_files() -> Vec<(&'static str, &'static [u8])> {
     vec![
         ("share/doc/gantry/LICENSE", GANTRY_LICENSE),
         ("share/doc/gantry/README.md", GANTRY_README),
@@ -404,47 +399,17 @@ unmatched = "deny"
     }
 
     #[test]
-    fn baffle_is_embedded_as_a_linux_binary() {
-        let (_, baffle) = tool_files()
-            .into_iter()
-            .find(|(name, _)| *name == "baffle")
-            .expect("embedded Baffle tool");
-        assert!(baffle.len() >= 20);
-        assert_eq!(&baffle[..4], b"\x7fELF");
-        assert_eq!(baffle[4], 2, "Baffle must be 64-bit");
-        assert_eq!(baffle[5], 1, "Baffle must be little-endian");
-
-        let machine = u16::from_le_bytes([baffle[18], baffle[19]]);
-        let expected = match std::env::consts::ARCH {
-            "x86_64" => 62,
-            "aarch64" => 183,
-            arch => panic!("unsupported Cladding target architecture: {arch}"),
-        };
-        assert_eq!(machine, expected, "Baffle architecture must match Cladding");
-    }
-
-    #[test]
-    fn gantry_and_run_remote_are_embedded_as_linux_binaries() {
-        let expected = match std::env::consts::ARCH {
-            "x86_64" => 62,
-            "aarch64" => 183,
-            arch => panic!("unsupported Cladding target architecture: {arch}"),
-        };
-        for name in ["gantry", "run-remote"] {
-            let (_, binary) = tool_files()
-                .into_iter()
-                .find(|(tool_name, _)| *tool_name == name)
-                .unwrap_or_else(|| panic!("embedded {name} tool"));
-            assert!(binary.len() >= 20, "{name} ELF header is truncated");
-            assert_eq!(&binary[..4], b"\x7fELF", "{name} must be ELF");
-            assert_eq!(binary[4], 2, "{name} must be 64-bit");
-            assert_eq!(binary[5], 1, "{name} must be little-endian");
-            assert_eq!(
-                u16::from_le_bytes([binary[18], binary[19]]),
-                expected,
-                "{name} architecture must match Cladding"
-            );
-        }
+    fn embedded_tool_payloads_are_only_the_small_sandbox_scripts() {
+        let files = tool_files();
+        assert_eq!(
+            files.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["run-in-nw-sandbox", "run-in-fs-sandbox"]
+        );
+        assert!(
+            files
+                .iter()
+                .all(|(_, contents)| !contents.starts_with(b"\x7fELF"))
+        );
     }
 
     #[cfg(unix)]
@@ -458,58 +423,20 @@ unmatched = "deny"
         write_embedded_tools(&bin_dir).expect("write embedded tools and documents");
         for (name, expected) in gantry_document_files() {
             let path = temp.join("tools").join(name);
-            assert_eq!(
-                fs::read(&path).expect("read installed Gantry document"),
-                expected
-            );
-            assert_eq!(
-                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o644
-            );
+            if expected.is_empty() {
+                assert!(!path.exists());
+            } else {
+                assert_eq!(
+                    fs::read(&path).expect("read installed Gantry document"),
+                    expected
+                );
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o644
+                );
+            }
         }
         fs::remove_dir_all(temp).expect("remove temporary documents");
-    }
-
-    #[test]
-    fn cladding_bridge_is_embedded_as_a_linux_binary() {
-        let (_, bridge) = tool_files()
-            .into_iter()
-            .find(|(name, _)| *name == "cladding-bridge")
-            .expect("embedded cladding-bridge tool");
-        assert!(bridge.len() >= 20);
-        assert_eq!(&bridge[..4], b"\x7fELF");
-        assert_eq!(bridge[4], 2, "cladding-bridge must be 64-bit");
-        assert_eq!(bridge[5], 1, "cladding-bridge must be little-endian");
-
-        let machine = u16::from_le_bytes([bridge[18], bridge[19]]);
-        let expected = match std::env::consts::ARCH {
-            "x86_64" => 62,
-            "aarch64" => 183,
-            arch => panic!("unsupported Cladding target architecture: {arch}"),
-        };
-        assert_eq!(
-            machine, expected,
-            "cladding-bridge architecture must match Cladding"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cladding_bridge_is_materialized_as_an_executable_tool() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temp = create_temp_dir("cladding-bridge");
-        write_embedded_tools(&temp).expect("write embedded tools");
-        let bridge = temp.join("cladding-bridge");
-        assert_eq!(
-            fs::read(&bridge).expect("read cladding-bridge"),
-            CLADDING_BRIDGE_BIN
-        );
-        assert_eq!(
-            fs::metadata(&bridge).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        fs::remove_dir_all(temp).expect("remove temporary directory");
     }
 
     #[cfg(unix)]

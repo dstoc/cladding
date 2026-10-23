@@ -1,66 +1,75 @@
-# Embedded Baffle binary
+# Pinned Linux helper dependencies
 
-A normal Cladding build requires `CLADDING_BAFFLE_BIN`. The build script checks
-that the supplied executable is a 64-bit Linux GNU binary for the target
-architecture. It does not download or compile Baffle.
+Released Cladding binaries contain a small dependency manifest with trusted
+SHA-256 checksums. They do not contain the `cladding-bridge`, Gantry,
+`run-remote`, or Baffle executable bytes. `cladding build` downloads only the
+Linux architecture required by the selected Cladding binary, verifies each
+archive and executable, and installs the tools under `.cladding/tools/bin/`.
+The bridge comes from the same Cladding release tag. Gantry stays pinned at
+0.4.8 and Baffle stays pinned at 2.2.0.
 
-Fetch the pinned Baffle **2.2.0** release before building. The script selects
-the Linux archive for the requested architecture and verifies its checksum
-against that release's `SHA256SUMS` file:
+The first build and builds after a dependency checksum changes need network
+access. If every installed executable matches its manifest checksum, the build
+uses those files without a download. `cladding check` is offline. It reports
+missing, outdated, and corrupt tools and keeps the remediation hint to run
+`cladding build`.
+
+After upgrading an existing project to a release with this installer, run
+`cladding build` once while online to install or replace its helper executables,
+then run `cladding check` to verify them.
+
+## Development builds
+
+A development Cargo version does not identify a published bridge release. If
+you build Cladding from source and run `cladding build`, provide all three
+explicit local overrides:
 
 ```sh
-scripts/fetch_baffle.sh x86_64 /tmp/cladding-baffle-x86_64
-CLADDING_BAFFLE_BIN=/tmp/cladding-baffle-x86_64/baffle cargo build --locked
+CLADDING_BRIDGE_BIN=/path/to/linux/cladding-bridge \
+CLADDING_GANTRY_DIR=/path/to/gantry-release \
+CLADDING_BAFFLE_BIN=/path/to/linux/baffle \
+cladding build
 ```
 
-Use `aarch64` in both paths when the Cladding target is aarch64. CI uses the
-same fetch script for Linux tests and release builds.
+`CLADDING_GANTRY_DIR` must contain both `gantry` and `run-remote`. Cladding
+checks that all four local files are regular Linux ELF executables for the
+selected architecture. It also checks the GNU loader and pinned GLIBC 2.35
+ceiling for Gantry, plus the GNU loader for Baffle. These variables apply to
+the `cladding build` process; they are not Cargo compile-time inputs.
 
-## Build requirements
+The fetch scripts provide the pinned upstream archives for local work and CI:
 
-Supported architectures are `x86_64` and `aarch64`. The fetch script verifies
-the archive checksum. The build script also checks the executable's ELF format,
-architecture, and GNU loader before it embeds the binary.
+```sh
+scripts/fetch_gantry.sh aarch64 /tmp/cladding-gantry
+scripts/fetch_baffle.sh aarch64 /tmp/cladding-baffle
+```
 
-On Linux, Cladding builds its embedded helper programs with Cargo for the
-matching Linux GNU target. On macOS, it builds them in a Rust container for the
-matching Linux architecture; this path requires a working Podman installation.
-Both paths keep helper outputs under Cargo's `OUT_DIR`. Release builds may
-instead supply the three prebuilt helper paths.
-CI runs `baffle --version` on native Linux x86_64 and aarch64 runners. The
-x86_64 integration suite also starts the executable that Cladding extracts
-during `cladding build` in Cladding's default proxy image.
+Use `x86_64` for an x86_64 Linux guest. Use `aarch64` for an aarch64 Linux
+guest, including Apple Silicon Podman Machine. Supply a matching
+`cladding-bridge` executable as the bridge override.
 
-Published release archives are built for Linux x86_64, Linux aarch64, and
-Apple Silicon macOS. Each archive embeds the Linux GNU Baffle executable for
-the matching Podman guest architecture. The release workflow downloads the
-pinned Baffle v2.2.0 Linux archive and checks its checksum against that
-release's `SHA256SUMS` before extraction. It uses the x86_64 archive for the
-x86_64 Linux package and the aarch64 archive for the aarch64 Linux and Apple
-Silicon macOS packages. CI verifies the same published binaries and runs the
-native executable smoke check for both architectures. The x86_64 integration
-suite checks the binary in the default proxy image. The
-Linux-hosted Podman Machine job checks the x86_64 guest topology. The Apple
-Silicon build job checks the embedded aarch64 executable.
+## Release verification and redistribution
 
-Cladding writes the embedded executable to `.cladding/tools/bin/baffle` and
-sets its mode to executable. `cladding check` reports a missing or outdated
-copy. Run `cladding build` to refresh it.
+The release workflow packages the bridge binaries for both Linux architectures
+and verifies their archive and executable checksums. It verifies the pinned
+Gantry and Baffle release archives against digests kept in
+`scripts/dependency-pins.json`, then generates the full manifest before it
+compiles Cladding host binaries. The manifest records each source repository,
+release tag, archive name, Linux architecture, archive checksum, expected
+archive entries, and executable checksums. Runtime downloads use only these
+manifest values; Cladding does not query a latest version or trust a downloaded
+checksum file.
 
 ## Updating the pinned version
 
-1. Confirm that the new Baffle version publishes Linux GNU release archives
-   for x86_64 and aarch64, with a `SHA256SUMS` file.
-2. Review the release archive contents for the executable, architecture,
-   license, and third-party notices.
-3. Update the published Baffle binary pin in `build.rs` and
-   `scripts/fetch_baffle.sh`. Update the published `baffle-client` dependency
-   when Cladding uses a new client API. Then update CI and release workflows.
-   Keep checksum verification before archive extraction.
-4. Update the architecture and redistribution checks in
-   `scripts/test_ci_baffle_assets.py`.
-5. Run the runtime smoke test against the selected proxy image for each
-   supported architecture.
+1. Verify both Linux GNU releases and their SHA256SUMS files. Update the
+   trusted archive digests in `scripts/dependency-pins.json`.
+2. Review the archive entry list, executable architecture, license, and
+   redistribution notices. Update the generator and its tests if the layout
+   changes.
+3. Update the downstream `baffle-client` dependency only when Cladding needs a
+   new client API. Keep helper release versions unchanged otherwise.
+4. Run the workflow and runtime checks for both supported architectures.
 
 ## Redistribution notices
 

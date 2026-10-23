@@ -26,6 +26,9 @@ tokio = { version = "1.49.0", features = ["macros", "process", "io-util", "rt", 
 toml = "1.1.6"
 x509-parser = { version = "0.18.1", features = ["verify"] }
 
+[build-dependencies]
+serde_json = "1.0.149"
+
 [workspace]
 members = ["crates/cladding-bridge", "crates/fake-credentials"]
 default-members = [".", "crates/cladding-bridge", "crates/fake-credentials"]

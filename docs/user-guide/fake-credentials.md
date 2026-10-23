@@ -92,15 +92,15 @@ substitution.
 
 ## Session and upgrade requirements
 
-Cladding embeds the published Baffle v2.2.0 Linux binary and uses the published
+Cladding installs the published Baffle v2.2.0 Linux binary and uses the published
 `baffle-client` v2.2.0 crate to validate credential identifier syntax. The
 client crate does not expose Baffle's effective composed session policy.
 Baffle v2.2.0 returns session creation details as JSON,
 including the session seed. For `cladding run`, Cladding creates the agent
 session and reads this response in its trusted host process. Run
 `cladding build` after upgrading Cladding to refresh
-`.cladding/tools/bin/baffle`; run `cladding check` to confirm the embedded tool
-is current. Existing version 2 Baffle session files remain in the required
+`.cladding/tools/bin/baffle`; run `cladding check` to confirm the installed tool
+matches its pinned checksum. Existing version 2 Baffle session files remain in the required
 format. Set the mapped credential's effective Baffle mode to `substitute`; the
 default remains `inject`.
 

@@ -22,7 +22,7 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum CommandSpec {
-    /// Build local images, refresh embedded tools, and initialize the project Baffle CA
+    /// Build local images, install pinned tools, and initialize the project Baffle CA
     Build,
     /// Create project config and runtime layout
     Init { name: Option<String> },

@@ -2,6 +2,7 @@
 """Check pinned Baffle releases and architecture-specific CI helper artifacts."""
 
 import importlib.util
+import json
 import re
 import subprocess
 import tempfile
@@ -15,6 +16,9 @@ TEXT = WORKFLOW.read_text()
 RELEASE_WORKFLOW = Path(__file__).parents[1] / ".github/workflows/release-please.yml"
 RELEASE_TEXT = RELEASE_WORKFLOW.read_text()
 BUILD_SCRIPT = Path(__file__).parents[1] / "build.rs"
+DEPENDENCIES_SOURCE = Path(__file__).parents[1] / "src/dependencies.rs"
+DEPENDENCY_PINS = Path(__file__).parents[1] / "scripts/dependency-pins.json"
+DEPENDENCY_GENERATOR = Path(__file__).parents[1] / "scripts/generate_dependency_manifest.py"
 BAFFLE_FETCH_SCRIPT = Path(__file__).parents[1] / "scripts/fetch_baffle.sh"
 GANTRY_FETCH_SCRIPT = Path(__file__).parents[1] / "scripts/fetch_gantry.sh"
 GANTRY_RELEASE_VALIDATOR = (
@@ -59,7 +63,26 @@ def job_block(name: str, workflow: str = TEXT) -> str:
 
 
 class BaffleCiAssetsTests(unittest.TestCase):
-    def test_bridge_release_assets_reuse_helpers_and_gate_publication(self):
+    def test_release_manifest_pins_all_four_tools_without_embedding_executables(self):
+        build = BUILD_SCRIPT.read_text()
+        assets = (Path(__file__).parents[1] / "src/assets.rs").read_text()
+        dependencies = DEPENDENCIES_SOURCE.read_text()
+        pins = json.loads(DEPENDENCY_PINS.read_text())
+        self.assertNotIn("cargo build", build)
+        for binary in ("gantry", "run-remote", "cladding-bridge", "baffle"):
+            self.assertNotIn(f'include_bytes!(concat!(env!("OUT_DIR"), "/{binary}"))', assets)
+        self.assertIn("cladding-bridge", dependencies)
+        self.assertIn("sha256_file(&archive)", dependencies)
+        self.assertIn('"--retry", "3", "--output"', dependencies)
+        self.assertEqual(pins["dependencies"]["gantry"]["version"], "0.4.8")
+        self.assertEqual(pins["dependencies"]["baffle"]["version"], "2.2.0")
+        for arch in ("x86_64", "aarch64"):
+            with self.subTest(arch=arch):
+                self.assertTrue(pins["dependencies"]["gantry"]["archives"][arch]["sha256"])
+                self.assertTrue(pins["dependencies"]["baffle"]["archives"][arch]["sha256"])
+        self.assertIn("provide all three", EMBEDDED_BAFFLE_DOC.read_text())
+
+    def test_bridge_release_assets_generate_manifest_before_host_build_and_gate_publish(self):
         build_helpers = job_block("build-helpers", RELEASE_TEXT)
         package = job_block("package-bridge-assets", RELEASE_TEXT)
         publish = job_block("publish-release", RELEASE_TEXT)
@@ -68,7 +91,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("cargo build -p cladding-bridge", build_helpers)
         self.assertNotIn("cargo build", package)
         for arch in ("x86_64", "aarch64"):
-            self.assertIn(f"name: cladding-linux-helpers-{arch}", package)
+            self.assertIn(f"name: cladding-bridge-binary-{arch}", package)
             self.assertIn(f"{arch}:\"ELF 64-bit\"", package)
             self.assertIn(f"{arch}_executable_sha256", package)
 
@@ -79,9 +102,21 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn("sha256sum", package)
         self.assertIn("cladding-bridge-executable-SHA256SUMS", package)
         self.assertIn("gh release upload \"$RELEASE_TAG\"", package)
+        self.assertIn("name: cladding-bridge-release-assets-${{ needs.release-please.outputs.tag_name }}", package)
+
+        manifest = job_block("generate-dependency-manifest", RELEASE_TEXT)
+        self.assertIn("needs: [release-please, package-bridge-assets]", manifest)
+        self.assertIn("scripts/generate_dependency_manifest.py", manifest)
+        self.assertIn('--release-tag "$RELEASE_TAG"', manifest)
+        self.assertIn("cladding-dependency-manifest-${{ needs.release-please.outputs.tag_name }}", manifest)
+        self.assertIn("needs: [release-please, generate-dependency-manifest]", host_upload)
+        self.assertIn("CLADDING_DEPENDENCY_MANIFEST=$RUNNER_TEMP/cladding-dependencies/dependency-manifest.json", host_upload)
+        self.assertNotIn("CLADDING_BRIDGE_BIN=", host_upload)
+        self.assertNotIn("CLADDING_GANTRY_DIR=", host_upload)
+        self.assertNotIn("CLADDING_BAFFLE_BIN=", host_upload)
 
         self.assertIn(
-            "needs: [release-please, upload-binaries, package-bridge-assets]",
+            "needs: [release-please, upload-binaries, package-bridge-assets, generate-dependency-manifest]",
             publish,
         )
         self.assertIn('tar czf "$staging.tar.gz" "$staging"', host_upload)
@@ -96,17 +131,15 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
     def test_gantry_release_is_pinned_and_verified_before_use(self):
         fetch = GANTRY_FETCH_SCRIPT.read_text()
-        self.assertIn("GANTRY_VERSION=0.4.8", fetch)
-        self.assertIn(
-            "SHA256SUMS_SHA256=3dd698d856c7b8dda1022f03edceedaf1fa6c8a1cb9c4e6703fe153e12933dde",
-            fetch,
-        )
+        pins = json.loads(DEPENDENCY_PINS.read_text())["dependencies"]["gantry"]
+        self.assertEqual(pins["version"], "0.4.8")
+        self.assertEqual(pins["sha256sums_sha256"], "3dd698d856c7b8dda1022f03edceedaf1fa6c8a1cb9c4e6703fe153e12933dde")
         for digest in (
             "f4b5eb7c96a838a094f2312c806a3e4e16a7d3bdb5df21b8b882d05aa5267bc7",
             "1d485e9df255c84f788917bd07ca059a42ab241a2fed31802c054a962a1e07e8",
         ):
             with self.subTest(digest=digest):
-                self.assertIn(digest, fetch)
+                self.assertIn(digest, DEPENDENCY_PINS.read_text())
         self.assertIn('"$release_url/$archive"', fetch)
         self.assertIn('"$release_url/SHA256SUMS"', fetch)
         self.assertIn('actual_sums_sha256=$(sha256 "$temp_root/SHA256SUMS")', fetch)
@@ -114,8 +147,8 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('chmod 0755 "$package/$binary"', fetch)
         self.assertIn("LICENSE README.md docs/reference.md", fetch)
         self.assertLess(fetch.index("actual_archive_sha256=$(sha256"), fetch.index("tar -xzf"))
-        self.assertIn("validate_gnu_elf", BUILD_SCRIPT.read_text())
-        self.assertIn("GANTRY_MAX_GLIBC", BUILD_SCRIPT.read_text())
+        self.assertIn("validate_gnu_elf", DEPENDENCIES_SOURCE.read_text())
+        self.assertIn("GANTRY_MAX_GLIBC", DEPENDENCIES_SOURCE.read_text())
 
     def test_baffle_runtime_reports_each_sandbox_socket_failure(self):
         validator = BAFFLE_RUNTIME_VALIDATOR.read_text()
@@ -447,7 +480,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
     def test_linux_machine_job_uses_the_pinned_rootless_remote_engine(self):
         machine = job_block("baffle-podman-machine")
         self.assertIn("runs-on: ubuntu-24.04", machine)
-        self.assertIn("needs: embedded-linux-tools-x86_64", machine)
+        self.assertIn("needs: linux-test-tools-x86_64", machine)
         self.assertIn("PODMAN_VERSION: 5.8.2", machine)
         self.assertIn("cargo build --locked --bin cladding", machine)
         self.assertIn("podman-machine-default", machine)
@@ -504,31 +537,31 @@ class BaffleCiAssetsTests(unittest.TestCase):
 
     def test_local_build_requires_pinned_verified_baffle_binary(self):
         build = BUILD_SCRIPT.read_text()
-        self.assertIn('const BAFFLE_VERSION: &str = "2.2.0";', build)
-        self.assertIn('env::var_os("CLADDING_BAFFLE_BIN")', build)
-        self.assertIn("scripts/fetch_baffle.sh", build)
-        self.assertNotIn('.arg("install")', build)
+        self.assertNotIn("CLADDING_BAFFLE_BIN", build)
+        self.assertIn('env::var_os("CLADDING_BAFFLE_BIN")', DEPENDENCIES_SOURCE.read_text())
+        self.assertIn('"v2.2.0"', DEPENDENCIES_SOURCE.read_text())
+        self.assertIn("scripts/fetch_baffle.sh", EMBEDDED_BAFFLE_DOC.read_text())
+        self.assertNotIn('.arg("install")', DEPENDENCIES_SOURCE.read_text())
         self.assertNotIn("baffle-proxy", build)
 
         fetch = BAFFLE_FETCH_SCRIPT.read_text()
-        self.assertIn("BAFFLE_VERSION=2.2.0", fetch)
-        self.assertIn('archive="baffle-proxy-v${BAFFLE_VERSION}-${arch}-unknown-linux-gnu.tar.gz"', fetch)
+        self.assertIn('"baffle"', fetch)
+        self.assertIn("dependency-pins.json", fetch)
+        self.assertIn('"version": "2.2.0"', DEPENDENCY_PINS.read_text())
         self.assertIn('"$release_url/SHA256SUMS"', fetch)
         self.assertIn('if [ "$actual" != "$expected" ]', fetch)
         self.assertLess(fetch.index('if [ "$actual" != "$expected" ]'), fetch.index("tar -xzf"))
 
     def test_local_build_requires_pinned_verified_gantry_distribution(self):
         build = BUILD_SCRIPT.read_text()
-        self.assertIn('const GANTRY_VERSION: &str = "0.4.8";', build)
-        self.assertIn('env::var_os("CLADDING_GANTRY_DIR")', build)
-        self.assertIn("validate_gnu_elf", build)
-        self.assertIn("validate_gantry_version", build)
-        self.assertIn("gantry-LICENSE", build)
+        self.assertNotIn("CLADDING_GANTRY_DIR", build)
+        self.assertIn('env::var_os("CLADDING_GANTRY_DIR")', DEPENDENCIES_SOURCE.read_text())
+        self.assertIn("validate_gnu_elf", DEPENDENCIES_SOURCE.read_text())
+        self.assertIn("GANTRY_LICENSE", (Path(__file__).parents[1] / "src/assets.rs").read_text())
 
         fetch = GANTRY_FETCH_SCRIPT.read_text()
-        self.assertIn("GANTRY_VERSION=0.4.8", fetch)
-        self.assertIn("SHA256SUMS_SHA256=", fetch)
-        self.assertIn("expected_archive_sha256=", fetch)
+        self.assertIn("dependency-pins.json", fetch)
+        self.assertIn('"version": "0.4.8"', DEPENDENCY_PINS.read_text())
         self.assertIn('"$release_url/SHA256SUMS"', fetch)
         self.assertIn('"$release_url/$archive"', fetch)
         self.assertIn("actual_sums_sha256", fetch)
@@ -586,14 +619,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertIn('.allowed == false and .backend == "direct"', topology)
         self.assertIn(".filesystem == null and .baffle_session == null", topology)
 
-    def test_complete_embedded_linux_tools_are_built_once_per_architecture(self):
+    def test_linux_helper_ci_assets_are_built_once_per_architecture(self):
         cases = {
-            "embedded-linux-tools-x86_64": (
+            "linux-test-tools-x86_64": (
                 "x86_64",
                 "cargo build --locked --release -p cladding-bridge --bin cladding-bridge --target-dir target/cladding-bridge",
                 "x86-64",
             ),
-            "embedded-linux-tools-aarch64": (
+            "linux-test-tools-aarch64": (
                 "aarch64",
                 "cargo build --locked --release -p cladding-bridge --bin cladding-bridge --target aarch64-unknown-linux-gnu --target-dir target/cladding-bridge",
                 "aarch64",
@@ -625,10 +658,10 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertIn(f'"ELF 64-bit"*{machine}*) ;;', block)
                 self.assertIn('test -x "$tool"', block)
                 self.assertIn("actions/upload-artifact@v4", block)
-                self.assertIn(f"name: embedded-linux-tools-{arch}", block)
+                self.assertIn(f"name: linux-test-tools-{arch}", block)
 
         self.assertEqual(
-            len(re.findall(r"(?m)^  embedded-linux-tools-[a-z0-9_]+:$", TEXT)),
+            len(re.findall(r"(?m)^  linux-test-tools-[a-z0-9_]+:$", TEXT)),
             2,
         )
         self.assertEqual(
@@ -648,14 +681,14 @@ class BaffleCiAssetsTests(unittest.TestCase):
         for job, arch, machine in cases:
             with self.subTest(job=job):
                 block = job_block(job)
-                artifact = f"embedded-linux-tools-{arch}"
+                artifact = f"linux-test-tools-{arch}"
                 self.assertIn(f"needs: {artifact}", block)
                 self.assertIn(f"name: {artifact}", block)
                 self.assertIn("actions/download-artifact@v4", block)
                 if job == "baffle-apple-silicon-build":
                     self.assertIn("Restore and verify Linux aarch64 tools", block)
                 else:
-                    self.assertIn("Restore and verify embedded", block)
+                    self.assertIn("Restore and verify local development", block)
                 self.assertIn('chmod 0755 "$tool"', block)
                 self.assertIn('test -x "$tool"', block)
                 self.assertIn('file -b "$tool"', block)
@@ -704,7 +737,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("cladding-linux-helpers-", TEXT)
         self.assertNotIn("cladding-baffle-linux-tools-", TEXT)
 
-    def test_release_jobs_use_pinned_verified_baffle_release_archives(self):
+    def test_release_jobs_use_generated_manifest_and_pinned_upstream_archives(self):
         self.assertNotIn("  build-baffle:\n", RELEASE_TEXT)
         self.assertNotRegex(
             RELEASE_TEXT, r"(?m)^\s*run: cargo install .*baffle-proxy"
@@ -712,17 +745,17 @@ class BaffleCiAssetsTests(unittest.TestCase):
         self.assertNotIn("scripts/collect-baffle-notices.py", RELEASE_TEXT)
 
         upload = job_block("upload-binaries", RELEASE_TEXT)
-        self.assertIn("needs: [release-please, build-helpers]", upload)
-        self.assertNotIn("embedded-linux-tools-", upload)
-        self.assertIn(
-            "CLADDING_BRIDGE_BIN=$GITHUB_WORKSPACE/helpers/cladding-bridge", upload
-        )
-        self.assertIn(
-            "CLADDING_GANTRY_DIR=$GITHUB_WORKSPACE/helpers/gantry", upload
-        )
+        self.assertIn("if: runner.os == 'Linux'", upload)
+        self.assertIn('run: test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"', upload)
+        self.assertIn("needs: [release-please, generate-dependency-manifest]", upload)
+        self.assertNotIn("linux-test-tools-", upload)
+        self.assertIn("CLADDING_DEPENDENCY_MANIFEST=", upload)
+        self.assertNotIn("CLADDING_BRIDGE_BIN=", upload)
+        self.assertNotIn("CLADDING_GANTRY_DIR=", upload)
+        self.assertNotIn("CLADDING_BAFFLE_BIN=", upload)
         release_platforms = re.findall(
             r"(?m)^          - os: ([^\s]+)\n            target: ([^\s]+)\n"
-            r"            baffle_arch: ([^\s]+)\n            helper_arch: ([^\s]+)$",
+            r"            baffle_arch: ([^\s]+)$",
             upload,
         )
         self.assertEqual(
@@ -732,42 +765,29 @@ class BaffleCiAssetsTests(unittest.TestCase):
                     "ubuntu-latest",
                     "x86_64-unknown-linux-gnu",
                     "x86_64",
-                    "x86_64",
                 ),
                 (
                     "ubuntu-24.04-arm",
                     "aarch64-unknown-linux-gnu",
-                    "aarch64",
                     "aarch64",
                 ),
                 (
                     "macos-latest",
                     "aarch64-apple-darwin",
                     "aarch64",
-                    "aarch64",
                 ),
             ],
         )
 
         helpers = job_block("build-helpers", RELEASE_TEXT)
-        self.assertIn('scripts/fetch_gantry.sh "${{ matrix.arch }}" "$RUNNER_TEMP/gantry"', helpers)
-        self.assertIn(
-            'scripts/validate_gantry_release.sh "$RUNNER_TEMP/gantry"', helpers
-        )
-        self.assertIn('cp -a "$RUNNER_TEMP/gantry/." helpers/gantry/', helpers)
+        self.assertNotIn("scripts/fetch_gantry.sh", helpers)
         self.assertIn('cargo build -p cladding-bridge --release --locked', helpers)
         self.assertIn('cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/cladding-bridge', helpers)
-        self.assertIn('name: cladding-linux-helpers-${{ matrix.arch }}', helpers)
-        self.assertIn('name: cladding-linux-helpers-${{ matrix.helper_arch }}', upload)
-        restore = upload.split(
-            "- name: Restore and verify downloaded Gantry helper executables", 1
-        )[1].split("- name: Point build.rs at prebuilt helpers", 1)[0]
-        self.assertIn("for name in gantry run-remote; do", restore)
-        self.assertIn('chmod 0755 "$tool"', restore)
-        self.assertIn('test -x "$tool"', restore)
-        self.assertIn('file -b "$tool"', restore)
-        self.assertIn('x86_64:"ELF 64-bit"*x86-64*) ;;', helpers)
-        self.assertIn('aarch64:"ELF 64-bit"*aarch64*) ;;', helpers)
+        self.assertIn('name: cladding-bridge-binary-${{ matrix.arch }}', helpers)
+        manifest = job_block("generate-dependency-manifest", RELEASE_TEXT)
+        self.assertIn("cladding-bridge-release-assets-${{ needs.release-please.outputs.tag_name }}", manifest)
+        self.assertIn("python3 scripts/generate_dependency_manifest.py", manifest)
+        self.assertIn("dependency-pins.json", DEPENDENCY_GENERATOR.read_text())
 
         download = upload.split(
             "- name: Download and verify pinned Baffle v2.2.0 release", 1
@@ -777,7 +797,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
             download,
         )
         fetch = BAFFLE_FETCH_SCRIPT.read_text()
-        self.assertIn('release_url="https://github.com/dstoc/baffle/releases/download/v${BAFFLE_VERSION}"', fetch)
+        self.assertIn('release_url="https://github.com/${repository}/releases/download/v${BAFFLE_VERSION}"', fetch)
         self.assertIn('"$release_url/$archive"', fetch)
         self.assertIn('"$release_url/SHA256SUMS"', fetch)
         self.assertIn("awk -v archive=", fetch)
@@ -799,9 +819,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
         self.assertIn('x86_64:"ELF 64-bit"*x86-64*) ;;', download)
         self.assertIn('aarch64:"ELF 64-bit"*aarch64*) ;;', download)
-        self.assertIn(
-            'CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle', upload
-        )
+        self.assertIn("Checksum mismatch for", fetch)
 
     def test_release_package_copies_upstream_baffle_redistribution_files(self):
         upload = job_block("upload-binaries", RELEASE_TEXT)
@@ -823,60 +841,62 @@ class BaffleCiAssetsTests(unittest.TestCase):
         package = upload.split("- name: Package", 1)[1].split(
             "- name: Upload to release", 1
         )[0]
-        self.assertIn('helpers/gantry/README.md "$staging/docs/gantry/"', package)
-        self.assertIn('helpers/gantry/docs/reference.md "$staging/docs/gantry/docs/reference.md"', package)
-        self.assertIn('helpers/gantry/LICENSE "$staging/licenses/gantry/LICENSE"', package)
+        self.assertIn('"$RUNNER_TEMP/cladding-dependencies/docs/gantry/README.md" "$staging/docs/gantry/"', package)
+        self.assertIn('"$RUNNER_TEMP/cladding-dependencies/docs/gantry/docs/reference.md" "$staging/docs/gantry/docs/reference.md"', package)
+        self.assertIn('"$RUNNER_TEMP/cladding-dependencies/docs/gantry/LICENSE" "$staging/licenses/gantry/LICENSE"', package)
         self.assertNotIn("crates/mcp-run", package)
 
     def test_active_helper_workflows_do_not_build_or_package_mcp_run(self):
         self.assertNotIn("mcp-run", TEXT)
         self.assertNotIn("mcp-run", RELEASE_TEXT)
 
-    def test_baffle_docs_describe_explicit_fetch_and_published_release_assets(self):
+    def test_baffle_docs_describe_downloaded_tools_and_development_overrides(self):
         guide = EMBEDDED_BAFFLE_DOC.read_text()
         prd = BAFFLE_PRD.read_text()
-        self.assertIn("pinned Baffle v2.2.0 Linux archive", guide)
-        self.assertIn("`SHA256SUMS` before extraction", guide)
-        self.assertIn("requires `CLADDING_BAFFLE_BIN`", guide)
+        self.assertIn("Baffle stays pinned at 2.2.0", guide)
+        self.assertIn("digests kept in", guide)
+        self.assertIn("provide all three", guide)
+        self.assertIn("Development builds", guide)
+        self.assertIn("CLADDING_BRIDGE_BIN=/path/to/linux/cladding-bridge", guide)
         self.assertIn("scripts/fetch_baffle.sh", guide)
-        self.assertIn("It does not download or compile Baffle.", guide)
         self.assertIn("under `licenses/baffle/`", guide)
         self.assertNotIn("Do not use Baffle's GitHub release assets", guide)
+        self.assertIn("CLADDING_BAFFLE_BIN", prd)
         self.assertIn(
-            "For CI and Cladding release builds, set `CLADDING_BAFFLE_BIN`",
-            prd,
+            "installs the published Baffle v2.2.0 Linux GNU release binary", prd
         )
-        self.assertIn(
-            "The workflows use the explicit v2.2.0 release archives", prd
-        )
+        testing_doc = (
+            Path(__file__).parents[1] / "docs/features/baffle-integration/testing.md"
+        ).read_text()
+        self.assertIn("without embedding helper\nexecutables", testing_doc)
 
     def test_required_test_path_waits_only_for_x86_64_asset_prep(self):
         test = job_block("test")
-        self.assertIn("needs: embedded-linux-tools-x86_64", test)
+        self.assertIn("needs: linux-test-tools-x86_64", test)
         self.assertNotIn("aarch64", test)
         self.assertNotIn("baffle-podman-machine", test)
 
         integration = job_block("linux-integration")
-        self.assertIn("needs: embedded-linux-tools-x86_64", integration)
+        self.assertIn("needs: linux-test-tools-x86_64", integration)
         self.assertNotIn("aarch64", integration)
 
         for arch in ("x86_64", "aarch64"):
             with self.subTest(arch=arch):
-                producer = job_block(f"embedded-linux-tools-{arch}")
+                producer = job_block(f"linux-test-tools-{arch}")
                 self.assertNotRegex(producer, r"(?m)^    needs:")
 
         linux_machine = job_block("baffle-podman-machine")
-        self.assertIn("needs: embedded-linux-tools-x86_64", linux_machine)
+        self.assertIn("needs: linux-test-tools-x86_64", linux_machine)
         self.assertNotIn("linux-integration", linux_machine)
 
         apple_silicon = job_block("baffle-apple-silicon-build")
-        self.assertIn("needs: embedded-linux-tools-aarch64", apple_silicon)
-        self.assertIn("embedded-linux-tools-aarch64", apple_silicon)
+        self.assertIn("needs: linux-test-tools-aarch64", apple_silicon)
+        self.assertIn("linux-test-tools-aarch64", apple_silicon)
         self.assertIn('test -f "$tool"', apple_silicon)
         self.assertIn('test -x "$tool"', apple_silicon)
         self.assertIn('"ELF 64-bit"*aarch64*) ;;', apple_silicon)
         self.assertIn(
-            "cargo test --locked --lib embedded_as_a_linux_binary", apple_silicon
+            "cargo test --locked --lib uses_linux_guest_architecture_for_the_current_target", apple_silicon
         )
 
     def test_ci_and_release_platforms_exclude_intel_macos(self):
@@ -890,9 +910,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
                 self.assertNotIn(reference, TEXT)
                 self.assertNotIn(reference, RELEASE_TEXT)
 
-        self.assertIn("embedded-linux-tools-x86_64", TEXT)
-        self.assertIn("embedded-linux-tools-x86_64", TEXT)
-        self.assertIn("embedded-linux-tools-aarch64", TEXT)
+        self.assertIn("linux-test-tools-x86_64", TEXT)
+        self.assertIn("linux-test-tools-x86_64", TEXT)
+        self.assertIn("linux-test-tools-aarch64", TEXT)
         self.assertIn("baffle-podman-machine:", TEXT)
         self.assertIn("scripts/validate_runtime_topology.sh default", TEXT)
         self.assertIn("baffle-apple-silicon-build:", TEXT)

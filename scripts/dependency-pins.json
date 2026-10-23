@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "dependencies": {
+    "gantry": {
+      "repository": "dstoc/gantry",
+      "version": "0.4.8",
+      "sha256sums_sha256": "3dd698d856c7b8dda1022f03edceedaf1fa6c8a1cb9c4e6703fe153e12933dde",
+      "archives": {
+        "x86_64": {
+          "filename": "gantry-0.4.8-linux-x86_64-gnu.tar.gz",
+          "sha256": "f4b5eb7c96a838a094f2312c806a3e4e16a7d3bdb5df21b8b882d05aa5267bc7",
+          "package_root": "gantry-0.4.8-linux-x86_64-gnu"
+        },
+        "aarch64": {
+          "filename": "gantry-0.4.8-linux-aarch64-gnu.tar.gz",
+          "sha256": "1d485e9df255c84f788917bd07ca059a42ab241a2fed31802c054a962a1e07e8",
+          "package_root": "gantry-0.4.8-linux-aarch64-gnu"
+        }
+      }
+    },
+    "baffle": {
+      "repository": "dstoc/baffle",
+      "version": "2.2.0",
+      "sha256sums_sha256": "fe860a68cb152ba62949abaf7658ea4b41a461ea8d7674928b134ca13ee922f4",
+      "archives": {
+        "x86_64": {
+          "filename": "baffle-proxy-v2.2.0-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "4f96aacb5d84399cc8c46d702461e725d1db1ad1991328d57a98429a1cbbc47a"
+        },
+        "aarch64": {
+          "filename": "baffle-proxy-v2.2.0-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "0be70e2071116327f47f9d57c262b344ffa872e604ad536f15a723cbd01229de"
+        }
+      }
+    }
+  }
+}

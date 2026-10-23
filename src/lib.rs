@@ -7,6 +7,7 @@ compile_error!("Cladding supports Linux and macOS targets on x86_64 and aarch64 
 pub mod assets;
 pub mod config;
 pub mod credentials;
+pub mod dependencies;
 pub mod error;
 pub mod fs_utils;
 pub mod identity;
