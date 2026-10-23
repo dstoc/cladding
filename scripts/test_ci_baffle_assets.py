@@ -405,6 +405,9 @@ class BaffleCiAssetsTests(unittest.TestCase):
         )
         self.assertIn("agent-side client did not observe bridge transport closure", inject)
         self.assertIn('"/run/cladding/agent/inject"', inject)
+        self.assertIn("foreground run resources remain after the agent exited", inject)
+        self.assertNotIn('self.checked_podman("start", self.agent', inject)
+        self.assertIn('start_foreground_run "$temp_root/post-inject-startup.log"', validator)
         for phase in (
             "agent-side listener port already occupied",
             "host destination refuses connections",

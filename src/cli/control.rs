@@ -301,9 +301,7 @@ pub(super) fn acquire_recovery_lock(runtime_root: &Path) -> Result<File> {
 
 pub(super) fn remove_stale_socket(path: &Path, runtime_root: &Path, uuid: &str) -> Result<()> {
     let preferred = runtime_root.join("control.sock");
-    let short = std::env::temp_dir()
-        .join(format!("cladding-control-{}", invoking_uid()))
-        .join(format!("{uuid}.sock"));
+    let short = short_control_socket_path(uuid);
     if path != preferred && path != short {
         return Err(Error::message(
             "refusing to remove a supervisor endpoint outside the expected private run paths",
@@ -356,10 +354,12 @@ fn control_socket_path(runtime_root: &Path, uuid: &str) -> Result<PathBuf> {
     if preferred == runtime_root.join("control.sock") {
         return Ok(preferred);
     }
-    let short_root = std::env::temp_dir().join(format!("cladding-control-{}", invoking_uid()));
+    let short_root = preferred
+        .parent()
+        .expect("short control socket path has a parent");
     let mut builder = fs::DirBuilder::new();
     builder.mode(0o700);
-    match builder.create(&short_root) {
+    match builder.create(short_root) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {
@@ -368,7 +368,7 @@ fn control_socket_path(runtime_root: &Path, uuid: &str) -> Result<PathBuf> {
             )));
         }
     }
-    let metadata = fs::symlink_metadata(&short_root).map_err(|error| {
+    let metadata = fs::symlink_metadata(short_root).map_err(|error| {
         Error::message(format!(
             "failed to inspect control socket directory: {error}"
         ))
@@ -382,18 +382,12 @@ fn control_socket_path(runtime_root: &Path, uuid: &str) -> Result<PathBuf> {
             "run control socket directory is not private and user-owned",
         ));
     }
-    fs::set_permissions(&short_root, fs::Permissions::from_mode(0o700)).map_err(|error| {
+    fs::set_permissions(short_root, fs::Permissions::from_mode(0o700)).map_err(|error| {
         Error::message(format!(
             "failed to secure private control socket directory: {error}"
         ))
     })?;
-    let path = preferred;
-    if path.as_os_str().len() >= 100 {
-        return Err(Error::message(
-            "run UUID is too long for the control socket path",
-        ));
-    }
-    Ok(path)
+    Ok(preferred)
 }
 
 pub(super) fn expected_control_socket_path(runtime_root: &Path, uuid: &str) -> PathBuf {
@@ -401,10 +395,14 @@ pub(super) fn expected_control_socket_path(runtime_root: &Path, uuid: &str) -> P
     if preferred.as_os_str().len() < 100 {
         preferred
     } else {
-        std::env::temp_dir()
-            .join(format!("cladding-control-{}", invoking_uid()))
-            .join(format!("{uuid}.sock"))
+        short_control_socket_path(uuid)
     }
+}
+
+fn short_control_socket_path(uuid: &str) -> PathBuf {
+    Path::new("/tmp")
+        .join(format!("cladding-control-{}", invoking_uid()))
+        .join(format!("{uuid}.sock"))
 }
 
 fn serve_client(mut stream: UnixStream, state: Arc<SharedState>) {
@@ -816,6 +814,14 @@ mod tests {
         assert_eq!(
             control.socket_path(),
             expected_control_socket_path(&root, "aabbccdd-1111-4222-8333-123456789abc")
+        );
+        assert_eq!(
+            control.socket_path().parent(),
+            Some(
+                Path::new("/tmp")
+                    .join(format!("cladding-control-{}", invoking_uid()))
+                    .as_path()
+            )
         );
         assert!(control.socket_path().as_os_str().len() < 100);
         drop(control);

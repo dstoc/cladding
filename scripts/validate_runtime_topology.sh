@@ -564,13 +564,31 @@ phase="verify shared managed mount communication"
 podman exec "$agent" sh -ec 'printf "agent-to-sandbox-ok\n" > /shared/topology-marker'
 test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)" = agent-to-sandbox-ok
 
-# Inject lifecycle validation restarts its agent, so run it before expose stops
-# the selected run.
+# Stopping the foreground run's agent ends the run, so validate expose against a
+# fresh run after this inject lifecycle check.
 phase="validate cladding inject transport and lifecycle"
 python3 "$script_dir/validate_inject.py" \
   --cladding-bin "$cladding_bin" \
   --run "$run_uuid" \
   --agent "$agent"
+
+attempt=0
+while kill -0 "$run_pid" 2>/dev/null && [ "$attempt" -lt 120 ]; do
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+if kill -0 "$run_pid" 2>/dev/null; then
+  echo "foreground run owner did not exit after its agent stopped" >&2
+  exit 1
+fi
+wait "$run_pid" 2>/dev/null || true
+run_pid=
+run_uuid=
+run_name=
+proxy=
+agent=
+nw_sandbox=
+start_foreground_run "$temp_root/post-inject-startup.log"
 
 phase="prepare unrelated and foreign run volumes before selected stop"
 unrelated_volume="cladding-unrelated-$project_name"

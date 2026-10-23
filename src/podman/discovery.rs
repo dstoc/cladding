@@ -228,12 +228,12 @@ fn run_from_items(uuid: String, items: Vec<&ContainerSnapshotItem>) -> Discovere
         if let Some(roles) = item.labels.get("cladding_run_expected_roles") {
             expected_roles.insert(roles.clone());
         }
-        if let Some(id) = &item.id {
-            if !ids.insert(id) {
-                malformed.get_or_insert_with(|| {
-                    format!("run inventory contains duplicate container ID '{id}'")
-                });
-            }
+        if let Some(id) = &item.id
+            && !ids.insert(id)
+        {
+            malformed.get_or_insert_with(|| {
+                format!("run inventory contains duplicate container ID '{id}'")
+            });
         }
         let resource = item.labels.get("cladding_resource").map(String::as_str);
         let app = item.labels.get("app").map(String::as_str);

@@ -324,9 +324,7 @@ pub(super) fn start_run_runtime(
         runtime_create_attempted = true;
         let result = runtime_create(spec, attempts, verbose, quiet_helpers);
         drop(startup);
-        if let Err(startup_error) = result {
-            return Err(startup_error);
-        }
+        result?;
         Ok(())
     })();
     (result, runtime_create_attempted)

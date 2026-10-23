@@ -626,10 +626,10 @@ fn inspect_run_workdir(
     if home_available {
         return Ok(home.to_path_buf());
     }
-    if let Some(workdir) = target_workdir {
-        if Path::new(workdir).is_absolute() {
-            return Ok(PathBuf::from(workdir));
-        }
+    if let Some(workdir) = target_workdir
+        && Path::new(workdir).is_absolute()
+    {
+        return Ok(PathBuf::from(workdir));
     }
     let _ = role;
     Err(Error::message(
@@ -647,7 +647,7 @@ fn command_status(status: std::process::ExitStatus, context: &'static str) -> Re
         let code = status
             .code()
             .unwrap_or_else(|| 128 + status.signal().unwrap_or(1));
-        return Err(Error::CommandFailed { context, code });
+        Err(Error::CommandFailed { context, code })
     }
     #[cfg(not(unix))]
     Err(Error::CommandFailed {
