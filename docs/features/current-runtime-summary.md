@@ -92,7 +92,7 @@ Custom mounts are applied by the direct runtime builder. They do not pass throug
 
 ## Persistent and one-off lifecycle
 
-`cladding init` creates project configuration and layout. It materializes embedded config templates under `.cladding/config/` and refreshes the proxy startup script. `cladding build` builds local images, refreshes embedded binaries in `.cladding/tools/bin/`, and initializes the persistent project Baffle CA when needed. Later builds validate and reuse the CA. `cladding check` and `cladding up` validate the same project prerequisites and CA; neither initializes or rotates the CA.
+`cladding init` creates project configuration and layout. It materializes embedded config templates under `.cladding/config/` and refreshes the proxy startup script. `cladding build` installs the checksum-pinned Linux tools in `.cladding/tools/bin/`, builds local images, and initializes the persistent project Baffle CA when needed. A matching installed checksum avoids a download. Later builds validate and reuse the CA. `cladding check` validates all four tools offline and reports files that need a build refresh. `cladding up` validates the same project prerequisites and CA; neither command initializes or rotates the CA.
 
 `cladding up` starts the persistent project containers and their managed volumes. `cladding down` removes those runtime resources but keeps project config, tools, credentials, home, and CA. `cladding destroy` force-removes the current standalone runtime resources.
 
@@ -129,7 +129,7 @@ Optional gVisor design details live in [the gVisor runtime feature document](cla
 
 - `config/`: generated configuration and policy templates;
 - `home/`: persistent project home for the agent and network sandbox;
-- `tools/`: embedded binaries created or refreshed by `cladding build`;
+- `tools/`: pinned Linux dependency binaries and embedded scripts created or refreshed by `cladding build`;
 - `runtime/`: scripts and generated masks used by the persistent runtime.
 
 One-off runtime files live in the UUID-scoped `runtime/runs/<instance>/` directory. Podman-managed socket volumes remain outside that host path and are removed with the run.

@@ -2042,6 +2042,7 @@ fn cli(
     private_key_source: &Path,
 ) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladding"));
+    let (bridge, gantry_dir, baffle) = write_development_tool_overrides(root);
     let path = format!(
         "{}:{}",
         bin_dir.display(),
@@ -2057,8 +2058,82 @@ fn cli(
             podman_log.with_extension("volumes"),
         )
         .env("CLADDING_TEST_CA_CERT", certificate_source)
-        .env("CLADDING_TEST_CA_KEY", private_key_source);
+        .env("CLADDING_TEST_CA_KEY", private_key_source)
+        .env("CLADDING_BRIDGE_BIN", bridge)
+        .env("CLADDING_GANTRY_DIR", gantry_dir)
+        .env("CLADDING_BAFFLE_BIN", baffle);
     command
+}
+
+fn write_development_tool_overrides(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let arch = env!("CLADDING_LINUX_ARCHITECTURE");
+    let (machine, loader) = match arch {
+        "x86_64-unknown-linux-gnu" => (62u16, "/lib64/ld-linux-x86-64.so.2"),
+        "aarch64-unknown-linux-gnu" => (183u16, "/lib/ld-linux-aarch64.so.1"),
+        other => panic!("unsupported development fixture architecture {other}"),
+    };
+    let override_dir = root.join("development-tool-overrides");
+    let gantry_dir = override_dir.join("gantry");
+    fs::create_dir_all(&gantry_dir).unwrap();
+    let bridge = override_dir.join("cladding-bridge");
+    let baffle = override_dir.join("baffle");
+    fs::write(&bridge, basic_elf(machine)).unwrap();
+    fs::write(&baffle, gnu_elf(machine, loader, None)).unwrap();
+    fs::write(
+        gantry_dir.join("gantry"),
+        gnu_elf(machine, loader, Some("GLIBC_2.34")),
+    )
+    .unwrap();
+    fs::write(
+        gantry_dir.join("run-remote"),
+        gnu_elf(machine, loader, Some("GLIBC_2.34")),
+    )
+    .unwrap();
+    for path in [
+        &bridge,
+        &baffle,
+        &gantry_dir.join("gantry"),
+        &gantry_dir.join("run-remote"),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (bridge, gantry_dir, baffle)
+}
+
+fn basic_elf(machine: u16) -> Vec<u8> {
+    let mut bytes = vec![0; 64];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    bytes[7] = 0;
+    bytes[16..18].copy_from_slice(&3u16.to_le_bytes());
+    bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+    bytes
+}
+
+fn gnu_elf(machine: u16, loader: &str, glibc: Option<&str>) -> Vec<u8> {
+    let mut bytes = vec![0; 320];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    bytes[7] = 0;
+    bytes[16..18].copy_from_slice(&3u16.to_le_bytes());
+    bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+    bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+    bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
+    bytes[64..68].copy_from_slice(&3u32.to_le_bytes());
+    bytes[72..80].copy_from_slice(&160u64.to_le_bytes());
+    bytes[96..104].copy_from_slice(&((loader.len() + 1) as u64).to_le_bytes());
+    bytes[160..160 + loader.len()].copy_from_slice(loader.as_bytes());
+    if let Some(glibc) = glibc {
+        bytes[224..224 + glibc.len()].copy_from_slice(glibc.as_bytes());
+    }
+    bytes
 }
 
 fn assert_success(output: Output) {

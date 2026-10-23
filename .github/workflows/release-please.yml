@@ -24,9 +24,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Cladding embeds Linux execution helpers in its container tools directory.
-  # Build helper artifacts for each Linux guest architecture and reuse them on
-  # host builds, including Apple Silicon macOS.
+  # Build Linux bridge assets once for each container architecture. The host
+  # binaries install these and the pinned upstream helpers from release assets.
   build-helpers:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -47,17 +46,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Download and verify pinned Gantry v0.4.8 release
-        run: |
-          set -euo pipefail
-          scripts/fetch_gantry.sh "${{ matrix.arch }}" "$RUNNER_TEMP/gantry"
-          scripts/validate_gantry_release.sh "$RUNNER_TEMP/gantry"
       - name: Build and stage cladding-bridge
         run: |
           set -euo pipefail
           cargo build -p cladding-bridge --release --locked --target "${{ matrix.target }}" --bin cladding-bridge
-          mkdir -p helpers/gantry
-          cp -a "$RUNNER_TEMP/gantry/." helpers/gantry/
+          mkdir -p helpers
           cp "target/${{ matrix.target }}/release/cladding-bridge" helpers/cladding-bridge
           chmod 0755 helpers/cladding-bridge
           description=$(file -b helpers/cladding-bridge)
@@ -69,13 +62,13 @@ jobs:
           esac
       - uses: actions/upload-artifact@v4
         with:
-          name: cladding-linux-helpers-${{ matrix.arch }}
+          name: cladding-bridge-binary-${{ matrix.arch }}
           path: helpers/
 
   # Only runs on the push that merges the release PR (release_created == true).
   # Builds a release binary per target and attaches it to the draft Release.
   upload-binaries:
-    needs: [release-please, build-helpers]
+    needs: [release-please, generate-dependency-manifest]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     permissions:
       contents: write
@@ -86,15 +79,12 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             baffle_arch: x86_64
-            helper_arch: x86_64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             baffle_arch: aarch64
-            helper_arch: aarch64
           - os: macos-latest
             target: aarch64-apple-darwin
             baffle_arch: aarch64
-            helper_arch: aarch64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -114,39 +104,22 @@ jobs:
             *) echo "Baffle is not the expected Linux ${{ matrix.baffle_arch }} executable" >&2; exit 1 ;;
           esac
           test -x "$RUNNER_TEMP/baffle/baffle"
-          test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"
+      - name: Verify Baffle executable version on Linux
+        if: runner.os == 'Linux'
+        run: test "$("$RUNNER_TEMP/baffle/baffle" --version)" = "baffle 2.2.0"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Fetch prebuilt helpers
+      - name: Fetch dependency manifest and release documentation
         uses: actions/download-artifact@v4
         with:
-          name: cladding-linux-helpers-${{ matrix.helper_arch }}
-          path: helpers
-      - name: Restore and verify downloaded Gantry helper executables
+          name: cladding-dependency-manifest-${{ needs.release-please.outputs.tag_name }}
+          path: ${{ runner.temp }}/cladding-dependencies
+      - name: Point build.rs at the verified manifest and Gantry documents
         run: |
-          set -euo pipefail
-          test "$(cat helpers/gantry/VERSION)" = 0.4.8
-          for name in gantry run-remote; do
-            tool="helpers/gantry/$name"
-            test -f "$tool"
-            chmod 0755 "$tool"
-            test -x "$tool"
-            description=$(file -b "$tool")
-            printf '%s: %s\n' "$tool" "$description"
-            case "${{ matrix.helper_arch }}:$description" in
-              x86_64:"ELF 64-bit"*x86-64*) ;;
-              aarch64:"ELF 64-bit"*aarch64*) ;;
-              *) echo "Expected a Linux ${{ matrix.helper_arch }} Gantry executable: $tool" >&2; exit 1 ;;
-            esac
-          done
-      - name: Point build.rs at prebuilt helpers
-        run: |
-          echo "CLADDING_GANTRY_DIR=$GITHUB_WORKSPACE/helpers/gantry" >> "$GITHUB_ENV"
-          echo "CLADDING_BRIDGE_BIN=$GITHUB_WORKSPACE/helpers/cladding-bridge" >> "$GITHUB_ENV"
-      - name: Point build.rs at the validated Linux Baffle binary
-        run: echo "CLADDING_BAFFLE_BIN=$RUNNER_TEMP/baffle/baffle" >> "$GITHUB_ENV"
+          echo "CLADDING_DEPENDENCY_MANIFEST=$RUNNER_TEMP/cladding-dependencies/dependency-manifest.json" >> "$GITHUB_ENV"
+          echo "CLADDING_GANTRY_DOCS_DIR=$RUNNER_TEMP/cladding-dependencies/docs/gantry" >> "$GITHUB_ENV"
       # --locked is safe: the cargo-workspace plugin keeps the root Cargo.lock
       # in sync with the version bump on the release commit.
       - name: Build
@@ -163,8 +136,8 @@ jobs:
             "$staging/docs/user-guide"
           cp "target/${{ matrix.target }}/release/${bin}" "$staging/"
           cp README.md "$staging/"
-          cp helpers/gantry/README.md "$staging/docs/gantry/"
-          cp helpers/gantry/docs/reference.md "$staging/docs/gantry/docs/reference.md"
+          cp "$RUNNER_TEMP/cladding-dependencies/docs/gantry/README.md" "$staging/docs/gantry/"
+          cp "$RUNNER_TEMP/cladding-dependencies/docs/gantry/docs/reference.md" "$staging/docs/gantry/docs/reference.md"
           cp docs/features/current-runtime-summary.md "$staging/docs/features/"
           cp docs/features/baffle-integration/embedded-baffle.md "$staging/docs/features/baffle-integration/"
           cp docs/features/proxy/summary.md "$staging/docs/features/proxy/"
@@ -174,7 +147,7 @@ jobs:
           cp "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/THIRD-PARTY-NOTICES.txt" "$staging/licenses/baffle/"
           cp "$RUNNER_TEMP/baffle/share/doc/baffle/licenses/webpki-root-certs-CDLA-Permissive-2.0.txt" "$staging/licenses/baffle/"
           mkdir -p "$staging/licenses/gantry"
-          cp helpers/gantry/LICENSE "$staging/licenses/gantry/LICENSE"
+          cp "$RUNNER_TEMP/cladding-dependencies/docs/gantry/LICENSE" "$staging/licenses/gantry/LICENSE"
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
       - name: Upload to release
@@ -182,7 +155,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "$ASSET" --clobber
 
-  # Repackages the helper binaries already built by build-helpers. Keep this
+  # Packages the bridge binaries already built by build-helpers. Keep this
   # separate from upload-binaries so each existing host archive stays intact.
   package-bridge-assets:
     needs: [release-please, build-helpers]
@@ -196,11 +169,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: cladding-linux-helpers-x86_64
+          name: cladding-bridge-binary-x86_64
           path: ${{ runner.temp }}/helpers/x86_64
       - uses: actions/download-artifact@v4
         with:
-          name: cladding-linux-helpers-aarch64
+          name: cladding-bridge-binary-aarch64
           path: ${{ runner.temp }}/helpers/aarch64
       - name: Package and verify cladding-bridge release assets
         id: package
@@ -262,8 +235,8 @@ jobs:
           cat "$executable_sums"
       - uses: actions/upload-artifact@v4
         with:
-          name: cladding-bridge-executable-checksums-${{ needs.release-please.outputs.tag_name }}
-          path: ${{ runner.temp }}/cladding-bridge-release/cladding-bridge-executable-SHA256SUMS
+          name: cladding-bridge-release-assets-${{ needs.release-please.outputs.tag_name }}
+          path: ${{ runner.temp }}/cladding-bridge-release/*
           if-no-files-found: error
       - name: Upload bridge assets to the draft release
         env:
@@ -277,8 +250,43 @@ jobs:
             "$RUNNER_TEMP/cladding-bridge-release/cladding-bridge-SHA256SUMS" \
             --clobber
 
+  # Pins both upstream helper releases and combines them with the bridge
+  # archives created for this exact Cladding release tag before host builds.
+  generate-dependency-manifest:
+    needs: [release-please, package-bridge-assets]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-bridge-release-assets-${{ needs.release-please.outputs.tag_name }}
+          path: ${{ runner.temp }}/cladding-bridge-release
+      - name: Generate and validate the pinned executable manifest
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          python3 scripts/generate_dependency_manifest.py \
+            --release-tag "$RELEASE_TAG" \
+            --bridge-dir "$RUNNER_TEMP/cladding-bridge-release" \
+            --output "$RUNNER_TEMP/cladding-dependencies/dependency-manifest.json" \
+            --docs-dir "$RUNNER_TEMP/cladding-dependencies/docs"
+          python3 -m json.tool "$RUNNER_TEMP/cladding-dependencies/dependency-manifest.json" >/dev/null
+          test -s "$RUNNER_TEMP/cladding-dependencies/docs/gantry/LICENSE"
+          test -s "$RUNNER_TEMP/cladding-dependencies/docs/gantry/README.md"
+          test -s "$RUNNER_TEMP/cladding-dependencies/docs/gantry/docs/reference.md"
+          test -s "$RUNNER_TEMP/cladding-dependencies/docs/baffle/LICENSE"
+          test -s "$RUNNER_TEMP/cladding-dependencies/docs/baffle/THIRD-PARTY-NOTICES.txt"
+          test -s "$RUNNER_TEMP/cladding-dependencies/docs/baffle/webpki-root-certs-CDLA-Permissive-2.0.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cladding-dependency-manifest-${{ needs.release-please.outputs.tag_name }}
+          path: ${{ runner.temp }}/cladding-dependencies
+          if-no-files-found: error
+
   publish-release:
-    needs: [release-please, upload-binaries, package-bridge-assets]
+    needs: [release-please, upload-binaries, package-bridge-assets, generate-dependency-manifest]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:

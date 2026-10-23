@@ -42,9 +42,14 @@ fn check_baffle_ca_readiness(project_root: &Path) -> Result<()> {
 
 pub(super) fn check_required_binaries(context: &Context, config: &ExecutionConfig) -> Result<()> {
     let mut missing = false;
+    for error in cladding::dependencies::check_installed_tools(&context.project_root) {
+        eprintln!("{error}");
+        eprintln!("hint: run cladding build");
+        missing = true;
+    }
     let bin_dir = context.project_root.join("tools/bin");
 
-    let mut required = vec!["gantry", "run-remote", "cladding-bridge", "baffle"];
+    let mut required = Vec::new();
     if config.nw_sandbox_enabled() {
         required.push("run-in-nw-sandbox");
     }
@@ -518,6 +523,7 @@ mod tests {
         let bin_dir = temp.join("tools/bin");
         fs::create_dir_all(&bin_dir).expect("create bin dir");
         write_embedded_tools(&bin_dir).expect("write tools");
+        write_test_dependencies(&temp);
 
         let context = Context::default_for_project(temp.clone());
         let config = execution_config(true, true, Vec::new());
@@ -526,10 +532,63 @@ mod tests {
 
         fs::remove_file(bin_dir.join("cladding-bridge")).expect("remove bridge tool");
         assert!(check_required_binaries(&context, &config).is_err());
-        write_embedded_tools(&bin_dir).expect("restore embedded tools");
+        write_test_dependencies(&temp);
 
         fs::write(bin_dir.join("baffle"), b"stale").expect("stale tool");
         assert!(check_required_binaries(&context, &config).is_err());
+    }
+
+    #[cfg(unix)]
+    fn write_test_dependencies(root: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bin_dir = root.join("tools/bin");
+        fs::create_dir_all(&bin_dir).expect("create test tool directory");
+        let mut executables = std::collections::BTreeMap::new();
+        for name in ["cladding-bridge", "gantry", "run-remote", "baffle"] {
+            let path = bin_dir.join(name);
+            let bytes = format!("test executable for {name}").into_bytes();
+            fs::write(&path, bytes).expect("write test executable");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("set executable mode");
+            executables.insert(name.to_string(), test_sha256(&path));
+        }
+        let metadata = serde_json::json!({
+            "schema_version": 1,
+            "architecture": env!("CLADDING_LINUX_ARCHITECTURE"),
+            "executables": executables,
+        });
+        fs::write(
+            root.join("tools/development-manifest.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .expect("write test dependency metadata");
+    }
+
+    #[cfg(unix)]
+    fn test_sha256(path: &Path) -> String {
+        use std::process::{Command, Stdio};
+
+        for (program, args) in [("sha256sum", vec!["-"]), ("shasum", vec!["-a", "256", "-"])] {
+            let file = fs::File::open(path).expect("open test executable");
+            match Command::new(program)
+                .args(args)
+                .stdin(Stdio::from(file))
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    return String::from_utf8_lossy(&output.stdout)
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                        .to_string();
+                }
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => panic!("failed to run {program}: {error}"),
+            }
+        }
+        panic!("no test SHA-256 utility is available")
     }
 
     fn execution_config(

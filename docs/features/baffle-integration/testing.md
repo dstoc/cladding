@@ -8,7 +8,7 @@ from the **linux-integration** GitHub Actions job with rootless Podman.
 | Ubuntu, default Podman runtime | Actual Cladding proxy, agent, and network-sandbox containers. The suite checks version 2 file-backed session startup, exact host, port, and path policy, plaintext HTTP rejection, separate component policies, disabled network-sandbox lifecycle, trust installation, curl, Git, Node.js, token replacement, same-session fake credential substitution, cross-session fake rejection, secret and control-socket isolation, reload snapshots, invalid reloads, persistent CA reuse, shutdown, and run cleanup after a nonzero command. |
 | Ubuntu, runsc execution runtime | The same Cladding policy and client suite, with the agent and network sandbox running under runsc. The startup validator also checks scoped UDS access under runsc. |
 | Ubuntu, rootless Podman Machine | The Linux x86_64 guest uses the validated Baffle and helper assets. CI checks four host and VM bind combinations, then runs the shared runtime topology validator against the Machine. |
-| Apple Silicon macOS build | Cladding embeds and tests a Linux aarch64 Baffle executable on an ARM64 macOS host. |
+| Apple Silicon macOS build | Cladding builds for an ARM64 macOS host and selects Linux aarch64 helper assets for its Podman guest. |
 
 The CI asset jobs download the published Linux GNU Baffle 2.2.0 archives on
 native x86_64 and aarch64 runners. Each job verifies the archive checksum and
@@ -17,10 +17,11 @@ starts the binary in Cladding's default proxy image, verifies Cladding can
 parse the JSON response from `baffle create`, and runs the policy and client
 suite under default Podman and runsc. The Linux-hosted Podman Machine
 job checks the x86_64 guest topology with the validated Baffle and helper
-assets. The Apple Silicon job builds Cladding with the Linux aarch64
-executable and checks its embedded architecture. The release workflow
-downloads and verifies the published Baffle archives independently, then
-publishes Linux x86_64, Linux aarch64, and Apple Silicon macOS archives.
+assets. The Apple Silicon job builds Cladding and checks its selected Linux
+helper architecture. The release workflow verifies the pinned Baffle archives
+while generating the trusted dependency manifest, then publishes Linux x86_64,
+Linux aarch64, and Apple Silicon macOS archives without embedding helper
+executables.
 
 GitHub-hosted macOS ARM runners do not support nested virtualization, so CI
 runs the Podman Machine topology checks on Linux
@@ -36,8 +37,9 @@ partial CA material, credential file permissions, direct project-state mounts
 for `cladding run`, symlinked tools, per-run runtime isolation, and runtime
 cleanup with mocked Podman.
 
-To run the client suite locally, build Cladding with the pinned Baffle binary
-and run these commands from the repository root:
+To run the client suite locally, build Cladding and provide matching local
+Linux helper overrides as described in the [tool installation guide](embedded-baffle.md#development-builds),
+then run these commands from the repository root:
 
     CLADDING_BIN="$(pwd)/target/debug/cladding" scripts/validate_baffle_runtime.sh default
     CLADDING_BIN="$(pwd)/target/debug/cladding" scripts/validate_baffle_runtime.sh runsc

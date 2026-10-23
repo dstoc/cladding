@@ -63,7 +63,7 @@ Edit `.cladding/cladding.json` and add this top-level `mounts` entry. It gives o
 ]
 ```
 
-Create a marker file, build the images and embedded tools, check the project, and start the containers:
+Create a marker file, install the pinned tools, build the images, check the project, and start the containers:
 
 ```bash
 printf 'workspace mount works\n' > .cladding-quickstart
@@ -76,6 +76,8 @@ cladding down
 ```
 
 The `cat` command verifies that the agent can read an explicitly mounted host file. The read-only mount prevents the agent from changing host files. A successful `cladding up` does not grant workspace access or network access. Add only the host paths and Baffle destinations your workflow needs.
+
+The first `cladding build` downloads the checksum-pinned Linux tools for the selected Podman guest architecture. Later builds reuse matching files without a download. See the [tool installation guide](docs/features/baffle-integration/embedded-baffle.md) for development overrides and release verification.
 
 ## Runtime overview
 

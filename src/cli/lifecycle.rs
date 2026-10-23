@@ -35,8 +35,7 @@ pub(super) fn cmd_build(context: &Context) -> Result<()> {
     }
 
     let tools_bin_dir = tools_dir.join("bin");
-    fs::create_dir_all(&tools_bin_dir).with_context(|| "failed to create tools directory")?;
-
+    cladding::dependencies::install_tools(&context.project_root)?;
     write_embedded_tools(&tools_bin_dir)?;
     write_proxy_startup_script(
         &context
