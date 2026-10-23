@@ -44,10 +44,14 @@ class ValidationFailure(RuntimeError):
 
 
 class ExposeValidator:
-    def __init__(self, cladding: str, cladding_dir: str, agent: str) -> None:
+    def __init__(
+        self, cladding: str, cladding_dir: str, agent: str, run_uuid: str, stop_run: bool
+    ) -> None:
         self.cladding = cladding
         self.cladding_dir = Path(cladding_dir)
         self.agent = agent
+        self.run_uuid = run_uuid
+        self.stop_run = stop_run
         self.phase = "initialize"
         self.expose: subprocess.Popen[str] | None = None
         self.marker = f"/tmp/cladding-expose-{secrets.token_hex(8)}"
@@ -132,18 +136,14 @@ class ExposeValidator:
             f"last_error={last_error!r} stdout={stdout.strip()!r} stderr={stderr.strip()!r}"
         )
 
-    def start_expose(
-        self, agent_port: int, host_port: int, config_path: Path, working_directory: Path
-    ) -> None:
-        self.phase = "start expose with explicit Cladding directory and config"
+    def start_expose(self, agent_port: int, host_port: int, working_directory: Path) -> None:
+        self.phase = "start expose with explicit run selection"
         self.expose = subprocess.Popen(
             [
                 self.cladding,
-                "--cladding-dir",
-                str(self.cladding_dir),
-                "--config",
-                str(config_path),
                 "expose",
+                "--run",
+                self.run_uuid,
                 str(agent_port),
                 str(host_port),
             ],
@@ -187,69 +187,94 @@ class ExposeValidator:
             raise ValidationFailure(f"{self.phase}: expose exited unexpectedly; {details}")
 
     def validate_forwarding_and_selection(self) -> None:
-        config_path = self.cladding_dir / "expose-selection.json"
-        default_config = self.cladding_dir / "cladding.json"
-        original_config = default_config.read_bytes()
-        config_path.write_bytes(original_config)
-        config_path.chmod(0o600)
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             host_port = reservation.getsockname()[1]
 
-        # The selected config copy remains valid and names the running agent.
-        # If expose ignores --config, the invalid default config makes it fail.
-        default_config.write_text("not a valid Cladding config\n", encoding="ascii")
+        agent_port = self.start_agent_echo_server()
+        baseline_resources = self.project_resources()
+        with tempfile.TemporaryDirectory(
+            prefix="cladding-expose-decoy-", dir=self.cladding_dir.parent
+        ) as decoy_workspace:
+            decoy_cladding_dir = Path(decoy_workspace) / ".cladding"
+            decoy_cladding_dir.mkdir()
+            (decoy_cladding_dir / "cladding.json").write_text(
+                "not a valid Cladding config\n", encoding="ascii"
+            )
+            self.start_expose(agent_port, host_port, Path(decoy_workspace))
+            self.wait_for_host_listener(host_port)
+
+            self.phase = "forward a host connection to the selected run agent"
+            payload = b"cladding expose reaches the selected run agent\x00\xff"
+            with socket.create_connection(("127.0.0.1", host_port), timeout=8) as client:
+                client.settimeout(8)
+                client.sendall(payload)
+                client.shutdown(socket.SHUT_WR)
+                response = bytearray()
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+
+            if bytes(response) != payload:
+                raise ValidationFailure(
+                    f"host received incorrect agent response: {bytes(response)!r}"
+                )
+            self.assert_expose_running()
+            if self.project_resources() != baseline_resources:
+                raise ValidationFailure(
+                    "expose changed run containers or volumes while forwarding"
+                )
+
+        self.finish_expose()
+        self.stop_agent_echo_server()
+        print(
+            "Expose integration passed: explicit run selection works outside the project "
+            "with invalid local config, forwards bytes, and creates no resources"
+        )
+
+    def validate_idle_listener_closes_on_run_shutdown(self) -> None:
+        self.phase = "close an idle expose listener when its run stops"
+        agent_port = self.start_agent_echo_server()
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            host_port = reservation.getsockname()[1]
+        self.start_expose(agent_port, host_port, Path(tempfile.gettempdir()))
+        self.wait_for_host_listener(host_port)
+        self.assert_expose_running()
+        self.stop_agent_echo_server()
+        stopped = subprocess.run(
+            [self.cladding, "stop", "--run", self.run_uuid],
+            capture_output=True,
+            text=True,
+            timeout=130,
+            check=False,
+        )
+        if stopped.returncode != 0:
+            raise ValidationFailure(
+                f"run stop failed (exit {stopped.returncode}); "
+                f"stdout={stopped.stdout.strip()!r} stderr={stopped.stderr.strip()!r}"
+            )
+        if self.expose is None:
+            raise ValidationFailure("expose listener disappeared before run shutdown")
         try:
-            agent_port = self.start_agent_echo_server()
-            baseline_resources = self.project_resources()
-            with tempfile.TemporaryDirectory(
-                prefix="cladding-expose-decoy-", dir=self.cladding_dir.parent
-            ) as decoy_workspace:
-                decoy_cladding_dir = Path(decoy_workspace) / ".cladding"
-                decoy_cladding_dir.mkdir()
-                (decoy_cladding_dir / "cladding.json").write_text(
-                    "not a valid Cladding config\n", encoding="ascii"
-                )
-                self.start_expose(
-                    agent_port, host_port, config_path, Path(decoy_workspace)
-                )
-                self.wait_for_host_listener(host_port)
-
-                self.phase = "forward a host connection to the selected running agent"
-                payload = b"cladding expose reaches the existing agent\x00\xff"
-                with socket.create_connection(("127.0.0.1", host_port), timeout=8) as client:
-                    client.settimeout(8)
-                    client.sendall(payload)
-                    client.shutdown(socket.SHUT_WR)
-                    response = bytearray()
-                    while True:
-                        chunk = client.recv(4096)
-                        if not chunk:
-                            break
-                        response.extend(chunk)
-
-                if bytes(response) != payload:
-                    raise ValidationFailure(
-                        f"host received incorrect agent response: {bytes(response)!r}"
-                    )
-                self.assert_expose_running()
-                if self.project_resources() != baseline_resources:
-                    raise ValidationFailure(
-                        "expose changed project containers or volumes while forwarding; "
-                        "it must not create a one-off runtime"
-                    )
-
-                print(
-                    "Expose integration passed: explicit project and config selection "
-                    "reached the active agent, forwarded bytes, and created no runtime resources"
-                )
-        finally:
-            try:
-                self.finish_expose()
-            finally:
-                default_config.write_bytes(original_config)
-                config_path.unlink(missing_ok=True)
-                self.stop_agent_echo_server()
+            stdout, stderr = self.expose.communicate(timeout=10)
+        except subprocess.TimeoutExpired as error:
+            raise ValidationFailure("idle expose listener did not close after run shutdown") from error
+        process = self.expose
+        self.expose = None
+        if process.returncode == 0 or "run stopped" not in stderr.lower():
+            raise ValidationFailure(
+                "expose did not report run shutdown; "
+                f"exit={process.returncode} stdout={stdout.strip()!r} stderr={stderr.strip()!r}"
+            )
+        try:
+            with socket.create_connection(("127.0.0.1", host_port), timeout=0.3):
+                pass
+        except OSError:
+            return
+        raise ValidationFailure("expose host port remained open after run shutdown")
 
     def stop_agent_echo_server(self) -> None:
         pid_file = f"{self.marker}.pid"
@@ -264,6 +289,8 @@ class ExposeValidator:
     def run(self) -> None:
         try:
             self.validate_forwarding_and_selection()
+            if self.stop_run:
+                self.validate_idle_listener_closes_on_run_shutdown()
         finally:
             try:
                 self.finish_expose()
@@ -278,8 +305,12 @@ def main() -> int:
     parser.add_argument("--cladding-bin", required=True)
     parser.add_argument("--cladding-dir", required=True)
     parser.add_argument("--agent", required=True)
+    parser.add_argument("--run", required=True)
+    parser.add_argument("--stop-run", action="store_true")
     args = parser.parse_args()
-    validator = ExposeValidator(args.cladding_bin, args.cladding_dir, args.agent)
+    validator = ExposeValidator(
+        args.cladding_bin, args.cladding_dir, args.agent, args.run, args.stop_run
+    )
     try:
         validator.run()
         return 0

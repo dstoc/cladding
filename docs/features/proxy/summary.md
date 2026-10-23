@@ -33,9 +33,9 @@ and component socket name for each enabled component. A disabled network
 sandbox does not require its selected file. Baffle validates the session
 policy schema and rules when it creates or reloads a session. `cladding run`
 uses the selected files directly from the project config directory.
-`cladding reload-proxy` reloads the active sessions from their selected files.
-To change a selection, recreate the proxy runtime with `cladding down` and
-`cladding up`.
+`cladding reload-proxy --run SELECTOR` reloads the active sessions in the
+selected run from their selected files. A run reads its session selections at
+launch; start a new run to use changed selections.
 
 Example `cladding.json`:
 
@@ -58,21 +58,19 @@ cladding init
 # Edit .cladding/config/proxy/daemon.toml and the session files as needed.
 cladding build
 cladding check
-cladding up
+cladding run -- sleep 300
 ```
 
-`cladding build` initializes the persistent project CA when needed and
-validates and reuses it on later builds. `cladding check` and `cladding up`
-validate the CA but do not initialize or rotate it. Run `cladding build` before
-`up` when the project CA is not initialized.
+`cladding build` initializes the project CA when needed and validates and
+reuses it on later builds. `cladding check` and `cladding run` validate the CA
+but do not initialize or rotate it. Run `cladding build` before `run` when the
+project CA is not initialized.
 
-`cladding up` starts the standalone Baffle proxy container and enabled execution containers. The
-proxy starts its daemon and creates the persistent agent session. It creates
-the network-sandbox session only when that component is enabled. Cladding does
-not wait for session readiness before starting execution containers, so an
-early request to `127.0.0.1:3128` can fail during startup. Retry the request
-after the proxy starts and inspect `cladding logs proxy` if it continues to
-fail.
+`cladding run` starts the Baffle proxy and enabled execution containers. The
+proxy creates the agent session and creates the network-sandbox session only
+when that component is enabled. Cladding waits for these sessions before it
+marks the run ready. Attach with `cladding logs --run SELECTOR proxy` if a
+request continues to fail.
 
 ## File ownership and access
 
@@ -91,17 +89,17 @@ default.
 
 ## Runtime status
 
-The proxy container runs one Baffle daemon in a minimal Debian trixie-slim image. Its startup script verifies the mounted config and credentials, starts the daemon, waits until `baffle list` accepts control commands, then creates the persistent agent session and the network-sandbox session when enabled. On shutdown, the script forwards the signal to Baffle; the daemon stops its persistent sessions with the proxy container.
+Each run's proxy container runs one Baffle daemon in a minimal Debian trixie-slim image. Its startup script verifies the mounted config and credentials, starts the daemon, waits until `baffle list` accepts control commands, then creates the agent session and the network-sandbox session when enabled. Cladding marks the run ready only after these sessions and any fake defaults are available. On shutdown, the script forwards the signal to Baffle; the daemon stops its sessions with the proxy container.
 
-Cladding does not wait for Baffle session readiness before it starts execution containers. Early proxy requests can fail while the proxy container starts. Startup errors appear in proxy logs and the container exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime. CI installs the pinned Baffle binary and validates both session files in rootless Podman.
+Cladding waits for the required Baffle sessions before it starts the primary workload. Startup errors appear in proxy logs and the run's exit status. `cladding reload-proxy --run SELECTOR` invokes `baffle reload --all` in the selected run's proxy. CI installs the pinned Baffle binary and validates both session files in rootless Podman.
 
 ## Reloading policy
 
-`cladding reload-proxy` asks Baffle to reload every active file-backed session from the existing native TOML files. Cladding does not regenerate those files. Baffle prints a `reloaded`, `unchanged`, or `failed` result for each session. It continues after a session failure, and the command exits unsuccessfully if any session fails.
+`cladding reload-proxy --run SELECTOR` asks Baffle to reload every active file-backed session in that run from the existing native TOML files. Cladding does not regenerate those files. Baffle prints a `reloaded`, `unchanged`, or `failed` result for each session. It continues after a session failure, and the command exits unsuccessfully if any session fails.
 
 A successful reload applies changed policy, resolved injection credentials, and data-socket paths to newly accepted connections. Connections that Baffle already accepted keep their previous policy and credentials until they close. A credential reload does not revoke credentials from open connections. Invalid file updates leave the session's previous effective configuration in place.
 
-Baffle can reject a non-disruptive reload when it cannot retain an old policy generation or listener. Inspect `cladding logs proxy` when a session reports `failed`. Reload applies file-backed session changes only. Changes to daemon settings, the CA, or the Baffle binary require a proxy container restart.
+Baffle can reject a non-disruptive reload when it cannot retain an old policy generation or listener. Inspect `cladding logs --run SELECTOR proxy` when a session reports `failed`. Reload applies file-backed session changes only. Changes to daemon settings, the CA, or the Baffle binary require a new run.
 
 ## Adding an allow rule
 
@@ -152,7 +150,7 @@ successful `cladding build`, Cladding runs
 `baffle ca init --config /opt/config/proxy/daemon.toml` in the selected proxy
 image. Baffle writes the configured CA pair under
 `.cladding/credentials/baffle/`. Cladding validates and reuses the pair on
-later builds. `cladding check` and `cladding up` validate it before runtime
+later builds. `cladding check` and `cladding run` validate it before runtime
 creation. Baffle creates an ECDSA P-256 certificate that
 expires after 365 days, a mode-`0600` private key, and a mode-`0644` public
 certificate. A missing or invalid pair after bootstrap is an error; Cladding
@@ -212,10 +210,9 @@ exceptions. The filesystem sandbox remains without proxy egress by default.
   session rule matches both `[secrets].allowed` and a file under the secrets
   directory. Confirm that the file is readable by the proxy's mapped UID and
   has mode `0600` on the host.
-- **A request fails just after `up`:** Cladding does not wait for Baffle
-  session readiness. Retry after startup. Check `cladding logs proxy` and the
-  proxy container exit status for startup errors.
+- **A request fails after run startup:** Check `cladding logs --run SELECTOR
+  proxy` and the proxy container exit status for startup errors.
 - **A reload fails or policy seems stale:** Read each `reloaded`, `unchanged`,
-  or `failed` result, then inspect `cladding logs proxy`. A failed update keeps
+  or `failed` result, then inspect `cladding logs --run SELECTOR proxy`. A failed update keeps
   the previous session policy. Existing connections keep their old policy
   and credentials until they close.

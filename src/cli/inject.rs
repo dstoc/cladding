@@ -1,9 +1,9 @@
 use super::args::{InjectArgs, InjectHostEndpoint};
-use super::context::{Context, project_runtime_status};
-use super::exec::agent_runtime_names;
+use super::control;
+use super::selection::SelectedRun;
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
-use cladding::podman::{podman_container_exists, podman_required};
+use cladding::podman::podman_required;
 use cladding_bridge::{BridgeError, HostTarget, run_host_session};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -16,38 +16,40 @@ use tokio::process::{Child, Command};
 const BRIDGE_BINARY: &str = "/opt/tools/bin/cladding-bridge";
 const EXEC_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
-pub(super) fn cmd_inject(context: &Context, args: &InjectArgs) -> Result<()> {
+pub(super) fn cmd_inject_selected(selected: &SelectedRun, args: &InjectArgs) -> Result<()> {
     podman_required("podman (required for cladding inject)")?;
-
-    let config = context.load_config()?;
-    let status = project_runtime_status(context, &config, false, false)?;
-    if !status.already_running {
-        eprintln!("error: cladding project '{}' is not running", config.name);
-        eprintln!("hint: run 'cladding up'");
-        return Err(Error::message("project is not running"));
+    selected.require_ready()?;
+    let agent = selected.component("agent")?;
+    let agent_id = agent
+        .id
+        .as_deref()
+        .ok_or_else(|| Error::message("selected agent has no immutable container ID"))?;
+    let socket = selected
+        .run
+        .control_socket
+        .as_deref()
+        .ok_or_else(|| Error::message("selected run has no supervisor control endpoint"))?;
+    let _ = control::admit(
+        std::path::Path::new(socket),
+        selected.uuid(),
+        "agent",
+        agent_id,
+    )?;
+    if !agent_bridge_available(agent_id)? {
+        return Err(Error::message(format!(
+            "selected agent is missing {BRIDGE_BINARY}"
+        )));
     }
-
-    let (_, agent_container_name) = agent_runtime_names(&config.name);
-    if !podman_container_exists(&agent_container_name)? {
-        eprintln!(
-            "error: target container '{}' is missing for project '{}'",
-            agent_container_name, config.name
-        );
-        eprintln!("hint: run 'cladding up'");
-        return Err(Error::message("missing agent container"));
-    }
-
-    if !agent_bridge_available(&agent_container_name)? {
-        eprintln!(
-            "error: target container '{}' is missing {}",
-            agent_container_name, BRIDGE_BINARY
-        );
-        eprintln!("hint: run 'cladding build' then 'cladding up'");
-        return Err(Error::message("missing cladding-bridge helper"));
-    }
-
     let container_port = args.container_port.unwrap_or(args.host_endpoint.port);
-    run_inject_bridge(&agent_container_name, &args.host_endpoint, container_port)
+    run_inject_bridge_with_control(
+        agent_id,
+        &args.host_endpoint,
+        container_port,
+        (
+            std::path::PathBuf::from(socket),
+            selected.uuid().to_string(),
+        ),
+    )
 }
 
 fn agent_bridge_available(agent_container_name: &str) -> Result<bool> {
@@ -91,27 +93,30 @@ fn host_target(endpoint: &InjectHostEndpoint) -> HostTarget {
     HostTarget::tcp(endpoint.host.clone(), endpoint.port)
 }
 
-fn run_inject_bridge(
+fn run_inject_bridge_with_control(
     agent_container_name: &str,
     endpoint: &InjectHostEndpoint,
     container_port: u16,
+    control_endpoint: (std::path::PathBuf, String),
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .with_context(|| "failed to create inject bridge runtime")?;
 
-    runtime.block_on(run_inject_bridge_async(
+    runtime.block_on(run_inject_bridge_async_with_control(
         agent_container_name,
         endpoint,
         container_port,
+        control_endpoint,
     ))
 }
 
-async fn run_inject_bridge_async(
+async fn run_inject_bridge_async_with_control(
     agent_container_name: &str,
     endpoint: &InjectHostEndpoint,
     container_port: u16,
+    control_endpoint: (std::path::PathBuf, String),
 ) -> Result<()> {
     let signals = Signals::new([SIGINT, SIGTERM])
         .with_context(|| "failed to install inject signal handlers")?;
@@ -140,15 +145,19 @@ async fn run_inject_bridge_async(
 
     enum SessionEnd {
         Interrupted,
+        RunEnded,
         Transport(std::result::Result<(), cladding_bridge::BridgeError>),
     }
 
     let session_end = {
         let session = run_host_session(transport, host_target(endpoint));
         tokio::pin!(session);
+        let run_end = wait_for_run_end(control_endpoint);
+        tokio::pin!(run_end);
         tokio::select! {
             result = &mut session => SessionEnd::Transport(result),
             _ = signal_rx => SessionEnd::Interrupted,
+            _ = &mut run_end => SessionEnd::RunEnded,
         }
     };
 
@@ -165,6 +174,9 @@ async fn run_inject_bridge_async(
             }
             Ok(())
         }
+        SessionEnd::RunEnded => Err(Error::message(
+            "selected run stopped or lost its supervisor; inject bridge was closed",
+        )),
         SessionEnd::Transport(Err(error)) => Err(inject_transport_error(error)),
         SessionEnd::Transport(Ok(())) if forced => Err(Error::message(
             "podman exec did not exit after the bridge transport closed",
@@ -176,6 +188,17 @@ async fn run_inject_bridge_async(
         SessionEnd::Transport(Ok(())) => Err(Error::message(
             "inject bridge transport closed unexpectedly",
         )),
+    }
+}
+
+async fn wait_for_run_end(endpoint: (std::path::PathBuf, String)) {
+    let (socket, uuid) = endpoint;
+    loop {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        match control::status(&socket, &uuid) {
+            Ok(status) if status.state == "ready" => {}
+            _ => return,
+        }
     }
 }
 
@@ -202,6 +225,16 @@ async fn wait_for_inject_exec_with_grace(
             false,
         )),
         Err(_) => {
+            #[cfg(unix)]
+            {
+                if let Some(pid) = child.id() {
+                    // SAFETY: the child was started in its own process group.
+                    unsafe {
+                        libc::kill(-(pid as i32), signal_hook::consts::signal::SIGKILL);
+                    }
+                }
+            }
+            #[cfg(not(unix))]
             child
                 .kill()
                 .await
@@ -304,13 +337,18 @@ mod tests {
 
     #[tokio::test]
     async fn inject_exec_is_killed_after_grace_period() {
-        let mut child = Command::new("sleep")
+        let mut command = Command::new("sleep");
+        command
             .arg("10")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start long-running process");
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.as_std_mut().process_group(0);
+        }
+        let mut child = command.spawn().expect("start long-running process");
 
         let (status, forced) =
             wait_for_inject_exec_with_grace(&mut child, Duration::from_millis(10))

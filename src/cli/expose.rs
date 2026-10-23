@@ -1,46 +1,124 @@
 use super::args::ExposeArgs;
-use super::context::{Context, project_runtime_status};
-use super::exec::agent_runtime_names;
+use super::control;
+use super::selection::SelectedRun;
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
 use cladding::fs_utils::command_exists_in_path;
-use cladding::podman::{podman_container_exists, podman_required};
+use cladding::podman::podman_required;
+use signal_hook::consts::signal::{SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 use std::net::IpAddr;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
-pub(super) fn cmd_expose(context: &Context, args: &ExposeArgs) -> Result<()> {
+pub(super) fn cmd_expose_selected(selected: &SelectedRun, args: &ExposeArgs) -> Result<()> {
     podman_required("podman (required for cladding expose)")?;
     socat_required("expose")?;
-
-    let config = context.load_config()?;
-    let status = project_runtime_status(context, &config, false, false)?;
-    if !status.already_running {
-        eprintln!("error: cladding project '{}' is not running", config.name);
-        eprintln!("hint: run 'cladding up'");
-        return Err(Error::message("project is not running"));
-    }
-
-    let (_, agent_container_name) = agent_runtime_names(&config.name);
-    if !podman_container_exists(&agent_container_name)? {
-        eprintln!(
-            "error: target container '{}' is missing for project '{}'",
-            agent_container_name, config.name
-        );
-        eprintln!("hint: run 'cladding up'");
-        return Err(Error::message("missing agent container"));
-    }
-
+    selected.require_ready()?;
+    let socket = selected
+        .run
+        .control_socket
+        .as_deref()
+        .ok_or_else(|| Error::message("selected run has no supervisor control endpoint"))?;
+    let agent = selected.component("agent")?;
+    let id = agent
+        .id
+        .as_deref()
+        .ok_or_else(|| Error::message("selected agent has no immutable container ID"))?;
+    let _ = control::admit(std::path::Path::new(socket), selected.uuid(), "agent", id)?;
     let host_port = args.host_port.unwrap_or(args.container_port);
-    let status = build_blocking_expose_command(
-        &agent_container_name,
-        args.container_port,
-        host_port,
-        args.bind_address,
-    )
-    .status()
-    .with_context(|| "failed to run socat")?;
+    let mut command =
+        build_blocking_expose_command(id, args.container_port, host_port, args.bind_address);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| "failed to run socat")?;
+    let signals = match Signals::new([SIGINT, SIGTERM]) {
+        Ok(signals) => signals,
+        Err(error) => {
+            stop_listener_process(&mut child);
+            return Err(anyhow::Error::new(error)
+                .context("failed to install expose signal handlers")
+                .into());
+        }
+    };
+    let handle = signals.handle();
+    let (signal_tx, signal_rx) = std::sync::mpsc::channel();
+    let signal_thread = thread::spawn(move || {
+        let mut signals = signals;
+        if let Some(signal) = signals.forever().next() {
+            let _ = signal_tx.send(signal);
+        }
+    });
+    let socket = selected.run.control_socket.as_deref().unwrap_or_default();
+    let mut last_control_check = Instant::now();
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break cladding::podman::ensure_success(status, "socat"),
+            Ok(None) => {}
+            Err(error) => {
+                stop_listener_process(&mut child);
+                break Err(Error::message(format!("failed to wait for socat: {error}")));
+            }
+        }
+        if let Ok(signal) = signal_rx.try_recv() {
+            stop_listener_process(&mut child);
+            break Err(Error::CommandFailed {
+                context: "socat",
+                code: 128 + signal,
+            });
+        }
+        if last_control_check.elapsed() >= Duration::from_millis(200) {
+            last_control_check = Instant::now();
+            match control::status(std::path::Path::new(socket), selected.uuid()) {
+                Ok(status) if status.state == "ready" => {}
+                Ok(_) | Err(_) => {
+                    stop_listener_process(&mut child);
+                    break Err(Error::message(
+                        "selected run stopped or lost its supervisor; expose listener was closed",
+                    ));
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    handle.close();
+    let _ = signal_thread.join();
+    result
+}
 
-    cladding::podman::ensure_success(status, "socat")
+fn stop_listener_process(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: this process group was created for the socat listener above.
+        unsafe {
+            libc::kill(-(child.id() as i32), signal_hook::consts::signal::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: this is the same listener process group.
+        unsafe {
+            libc::kill(-(child.id() as i32), signal_hook::consts::signal::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 pub(super) fn socat_required(command_name: &str) -> Result<()> {
@@ -90,9 +168,8 @@ mod tests {
 
     #[test]
     fn build_blocking_expose_command_targets_the_selected_agent_without_starting_a_runtime() {
-        let (_, agent_container_name) = agent_runtime_names("selected-config");
         let cmd = build_blocking_expose_command(
-            &agent_container_name,
+            "immutable-agent-id",
             5432,
             15432,
             "127.0.0.1".parse::<IpAddr>().unwrap(),
@@ -104,7 +181,7 @@ mod tests {
         assert_eq!(args[0], "TCP4-LISTEN:15432,bind=127.0.0.1,reuseaddr,fork");
         assert_eq!(
             args[1],
-            "EXEC:podman exec -i 'selected-config-agent-instance' socat STDIO TCP\\:127.0.0.1\\:5432"
+            "EXEC:podman exec -i 'immutable-agent-id' socat STDIO TCP\\:127.0.0.1\\:5432"
         );
         assert!(!args.iter().any(|arg| arg.contains("cladding run")));
     }

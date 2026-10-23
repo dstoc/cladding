@@ -204,9 +204,9 @@ class EchoServer(socketserver.ThreadingTCPServer):
 
 
 class InjectValidator:
-    def __init__(self, cladding: str, cladding_dir: str, agent: str) -> None:
+    def __init__(self, cladding: str, run_uuid: str, agent: str) -> None:
         self.cladding = cladding
-        self.cladding_dir = cladding_dir
+        self.run_uuid = run_uuid
         self.agent = agent
         self.phase = "initialize"
         self.inject: subprocess.Popen[str] | None = None
@@ -351,9 +351,9 @@ class InjectValidator:
         self.inject = subprocess.Popen(
             [
                 self.cladding,
-                "--cladding-dir",
-                self.cladding_dir,
                 "inject",
+                "--run",
+                self.run_uuid,
                 f"localhost:{host_port}",
                 str(agent_port),
             ],
@@ -667,7 +667,7 @@ class InjectValidator:
         self, server: EchoServer, host_port: int
     ) -> None:
         phase = "agent container exits during an active stream"
-        port, client = self.active_stream(server, host_port, phase)
+        _, client = self.active_stream(server, host_port, phase)
         self.checked_podman("stop", "--time", "1", self.agent, timeout=12)
         status, stdout, stderr = self.collect_inject(12, phase)
         if status == 0 or not any(
@@ -679,17 +679,38 @@ class InjectValidator:
                 f"exit={status} stdout={stdout.strip()!r} stderr={stderr.strip()!r}"
             )
         self.collect(client, 8, phase)
-        self.checked_podman("start", self.agent, timeout=12)
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
-            state = self.podman("inspect", "--format", "{{.State.Running}}", self.agent)
-            if state.returncode == 0 and state.stdout.strip() == "true":
-                break
+            containers = self.podman(
+                "ps",
+                "--all",
+                "--filter",
+                f"label=cladding=cladding-run-{self.run_uuid}",
+                "--format",
+                "{{.ID}}",
+            )
+            volumes = self.podman(
+                "volume",
+                "ls",
+                "--filter",
+                f"label=cladding=cladding-run-{self.run_uuid}",
+                "--format",
+                "{{.Name}}",
+            )
+            if (
+                containers.returncode == 0
+                and volumes.returncode == 0
+                and not containers.stdout.strip()
+                and not volumes.stdout.strip()
+            ):
+                return
             time.sleep(0.2)
-        else:
-            raise ValidationFailure(f"{phase}: agent container did not restart")
-        self.assert_listener_closed(port, phase)
-        self.assert_no_bridge_process(phase)
+        raise ValidationFailure(
+            f"{phase}: foreground run resources remain after the agent exited; "
+            f"containers=({containers.returncode}) {containers.stdout.strip()!r} "
+            f"{containers.stderr.strip()!r}; volumes=({volumes.returncode}) "
+            f"{volumes.stdout.strip()!r} {volumes.stderr.strip()!r}"
+        )
 
     def validate_exec_transport_close(self, server: EchoServer, host_port: int) -> None:
         phase = "agent bridge exec/mux transport closes unexpectedly"
@@ -751,8 +772,10 @@ class InjectValidator:
             self.validate_echo_transport(server)
             self.validate_host_refusal(server)
             self.validate_signals(server)
-            self.validate_agent_exit(server, server.server_address[1])
             self.validate_exec_transport_close(server, server.server_address[1])
+            # Stopping the foreground workload ends this run, so this must be
+            # the final inject probe before the topology validator starts a new run.
+            self.validate_agent_exit(server, server.server_address[1])
             print("Inject integration checks passed: transport, concurrency, and lifecycle")
         finally:
             self.cleanup()
@@ -766,10 +789,10 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cladding-bin", required=True)
-    parser.add_argument("--cladding-dir", required=True)
+    parser.add_argument("--run", required=True)
     parser.add_argument("--agent", required=True)
     args = parser.parse_args()
-    validator = InjectValidator(args.cladding_bin, args.cladding_dir, args.agent)
+    validator = InjectValidator(args.cladding_bin, args.run, args.agent)
     try:
         validator.run()
         return 0

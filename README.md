@@ -63,19 +63,29 @@ Edit `.cladding/cladding.json` and add this top-level `mounts` entry. It gives o
 ]
 ```
 
-Create a marker file, install the pinned tools, build the images, check the project, and start the containers:
+Create a marker file, install the pinned tools, build the images, and check the project:
 
 ```bash
 printf 'workspace mount works\n' > .cladding-quickstart
 cladding build
 cladding check
-cladding up
-cladding exec --target agent cat /workspace/.cladding-quickstart
-rm .cladding-quickstart
-cladding down
 ```
 
-The `cat` command verifies that the agent can read an explicitly mounted host file. The read-only mount prevents the agent from changing host files. A successful `cladding up` does not grant workspace access or network access. Add only the host paths and Baffle destinations your workflow needs.
+Start a foreground run from the project directory. It prints the full run UUID to stderr when the containers are ready:
+
+```bash
+cladding run -- sleep 300
+```
+
+In another terminal, attach by that UUID. This verifies that the agent can read the explicitly mounted host file. The read-only mount prevents the agent from changing host files. A run does not grant workspace access or network access unless the selected component has a matching configured mount and Baffle rule.
+
+```bash
+cladding exec --run <UUID> --target agent cat /workspace/.cladding-quickstart
+cladding stop --run <UUID>
+rm .cladding-quickstart
+```
+
+`cladding run` owns the runtime and removes its containers and Cladding-managed volumes when its command exits. `cladding ps` lists runs on the selected Podman connection. Add only the host paths and Baffle destinations your workflow needs.
 
 The first `cladding build` downloads the checksum-pinned Linux tools for the selected Podman guest architecture. Later builds reuse matching files without a download. See the [tool installation guide](docs/features/baffle-integration/embedded-baffle.md) for development overrides and release verification.
 

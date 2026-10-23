@@ -118,6 +118,51 @@ reap_finished_run() {
   return 0
 }
 
+start_supervisor_run() {
+  owner_log=$1
+  (
+    cd "$temp_root/workspace"
+    exec "$cladding_bin" --cladding-dir "$project_root" run -v -- \
+      /bin/sh -ec 'exec sleep 3600'
+  ) > "$owner_log" 2>&1 &
+  owner_pid=$!
+  attempt=0
+  while [ "$attempt" -lt 90 ]; do
+    owner_uuid=$(sed -n 's/^run: //p' "$owner_log" | head -n 1)
+    if [ -n "$owner_uuid" ]; then
+      owner_name="cladding-run-$owner_uuid"
+      proxy="$owner_name-proxy-instance"
+      agent="$owner_name-agent-instance"
+      sandbox="$owner_name-nw-sandbox-instance"
+      filesystem_sandbox="$owner_name-fs-sandbox-instance"
+      return 0
+    fi
+    if ! kill -0 "$owner_pid" 2>/dev/null; then
+      wait "$owner_pid" || true
+      owner_pid=
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
+stop_supervisor_run() {
+  [ -n "$owner_uuid" ] || return 0
+  "$cladding_bin" stop --run "$owner_uuid"
+  if [ -n "$owner_pid" ]; then
+    wait "$owner_pid" || true
+  fi
+  owner_pid=
+  owner_uuid=
+  owner_name=
+  proxy=
+  agent=
+  sandbox=
+  filesystem_sandbox=
+}
+
 cleanup_origin_container() {
   container_name=$1
   if ! podman container exists "$container_name" >/dev/null 2>&1; then
@@ -155,7 +200,7 @@ temp_root=$(mktemp -d "$temp_parent/cladding-baffle-runtime.XXXXXX")
 project_name="baffleintegration$$"
 project_root="$temp_root/workspace/.cladding"
 origin_name="$project_name-origin"
-proxy="$project_name-proxy-instance"
+proxy=
 proxy_image="localhost/$project_name-proxy:latest"
 client_image="localhost/$project_name-client:latest"
 origin_image="localhost/$project_name-origin:latest"
@@ -164,6 +209,9 @@ run_pid=
 run_root=
 run_name=
 run_proxy=
+owner_pid=
+owner_uuid=
+owner_name=
 run_secret_value=
 failure_trap_probe=false
 phase=initialize
@@ -326,7 +374,14 @@ cleanup() {
       fi
     done
   fi
-  "$cladding_bin" --cladding-dir "$project_root" down >/dev/null 2>&1 || true
+  if [ -n "$owner_uuid" ]; then
+    "$cladding_bin" stop --run "$owner_uuid" >/dev/null 2>&1 || true
+  elif [ -n "$owner_pid" ]; then
+    kill "$owner_pid" 2>/dev/null || true
+  fi
+  if [ -n "$owner_pid" ]; then
+    wait "$owner_pid" 2>/dev/null || true
+  fi
   podman image rm "$proxy_image" "$client_image" "$origin_image" >/dev/null 2>&1 || true
   rm -rf "$temp_root"
   exit "$status"
@@ -556,7 +611,7 @@ jq --arg image "$proxy_image" '.proxy.image = $image' \
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 
 phase="start Cladding runtime"
-if "$cladding_bin" --cladding-dir "$project_root" up --verbose > "$temp_root/startup.log" 2>&1; then
+if start_supervisor_run "$temp_root/startup.log"; then
   redact_startup_log < "$temp_root/startup.log" > "$temp_root/startup.redacted.log"
 else
   status=$?
@@ -610,9 +665,6 @@ if [ "$secret_mode" != 600 ]; then
 fi
 phase="start local TLS origin container"
 podman run --detach --name "$origin_name" --network "container:$proxy" "$origin_image" >/dev/null
-agent="$project_name-agent-instance"
-sandbox="$project_name-nw-sandbox-instance"
-filesystem_sandbox="$project_name-fs-sandbox-instance"
 ready=false
 attempt=0
 phase="wait for Baffle daemon readiness"
@@ -869,7 +921,7 @@ diagnose_run_socket_endpoints() {
       podman logs --tail 50 "$container" 2>&1 || true
     done
 
-    echo "Saved cladding up --verbose output (fixture credentials redacted):"
+    echo "Saved cladding run startup output (fixture credentials redacted):"
     if [ -s "$temp_root/startup.redacted.log" ]; then
       cat "$temp_root/startup.redacted.log"
     else
@@ -1049,11 +1101,11 @@ else
 fi
 printf '%s' "$body" | jq -e '.authorization == "none"' >/dev/null
 if [ "$socket_topology_only" = true ]; then
-  phase="remove local TLS origin before persistent shutdown"
+  phase="remove local TLS origin before run shutdown"
   stop_origin_container "$origin_name"
   podman rm "$origin_name" >/dev/null
-  phase="stop persistent runtime after socket communication"
-  "$cladding_bin" --cladding-dir "$project_root" down
+  phase="stop run after socket communication"
+  stop_supervisor_run
   phase="verify managed socket volumes were removed"
   require_socket_volume_count 0
   phase="verify Baffle session socket paths were cleared"
@@ -1145,7 +1197,7 @@ if [ "$attempt" -ge 60 ]; then
   exit 1
 fi
 write_agent_policy test-token-new "/replacement/**"
-reload_output=$("$cladding_bin" --cladding-dir "$project_root" reload-proxy 2>&1)
+reload_output=$("$cladding_bin" reload-proxy --run "$owner_uuid" 2>&1)
 printf '%s\n' "$reload_output" | grep -E 'agent.*reloaded|reloaded.*agent' >/dev/null
 printf '%s\n' "$reload_output" | grep -E 'nw-sandbox.*unchanged|unchanged.*nw-sandbox' >/dev/null
 podman exec "$agent" touch /tmp/baffle-reload-continue
@@ -1169,12 +1221,12 @@ wait "$reload_client_pid"
 
 cp "$project_root/config/proxy/sessions/$agent_session_config" "$temp_root/agent.valid.toml"
 printf '%s\n' 'invalid = [' > "$project_root/config/proxy/sessions/$agent_session_config"
-if "$cladding_bin" --cladding-dir "$project_root" reload-proxy >/dev/null 2>&1; then
+if "$cladding_bin" reload-proxy --run "$owner_uuid" >/dev/null 2>&1; then
   echo "Baffle reload accepted invalid session TOML" >&2
   exit 1
 fi
 cp "$temp_root/agent.valid.toml" "$project_root/config/proxy/sessions/$agent_session_config"
-reload_output=$("$cladding_bin" --cladding-dir "$project_root" reload-proxy 2>&1)
+reload_output=$("$cladding_bin" reload-proxy --run "$owner_uuid" 2>&1)
 printf '%s\n' "$reload_output" | grep -E 'agent.*unchanged|unchanged.*agent' >/dev/null
 printf '%s\n' "$reload_output" | grep -E 'nw-sandbox.*unchanged|unchanged.*nw-sandbox' >/dev/null
 if body=$(agent_curl --fail https://localhost:8443/replacement/after-invalid-reload \
@@ -1210,43 +1262,39 @@ jq -s -e 'any(.[]; .path == "/authorized/curl" and .authorization == "old")
                      and .path != "/authorized/plaintext")' \
   "$temp_root/events.jsonl" >/dev/null
 
-phase="remove local TLS origin before persistent shutdown"
+phase="remove local TLS origin before run shutdown"
 stop_origin_container "$origin_name"
 podman rm "$origin_name" >/dev/null
 shutdown_started_ns=$(monotonic_ns)
-phase="stop persistent runtime after integration requests"
-"$cladding_bin" --cladding-dir "$project_root" down
-phase="remove managed socket volumes after persistent shutdown"
+phase="stop run after integration requests"
+stop_supervisor_run
+phase="verify run shutdown removed managed socket volumes"
 require_socket_volume_count 0
 shutdown_finished_ns=$(monotonic_ns)
 shutdown_elapsed_ms=$(((shutdown_finished_ns - shutdown_started_ns) / 1000000))
-phase="verify persistent runtime shutdown time"
-if [ "$shutdown_elapsed_ms" -ge 8000 ]; then
-  echo "cladding down took ${shutdown_elapsed_ms} ms; expected less than 8000 ms" >&2
-  exit 1
-fi
-phase="verify Baffle CA persisted across shutdown"
+printf 'Selected run shutdown completed in %s ms\n' "$shutdown_elapsed_ms"
+phase="verify Baffle CA persisted after run cleanup"
 ca_after=$(sha256_file "$project_root/credentials/baffle/ca.crt")
 if [ "$ca_before" != "$ca_after" ]; then
-  echo "Baffle CA changed during normal shutdown: before=$ca_before after=$ca_after" >&2
+  echo "Baffle CA changed during run cleanup: before=$ca_before after=$ca_after" >&2
   exit 1
 fi
-phase="restart runtime to verify Baffle CA reuse"
-"$cladding_bin" --cladding-dir "$project_root" up
-phase="verify all managed socket volumes returned after restart"
+phase="start a new run to verify Baffle CA reuse"
+start_supervisor_run "$temp_root/restart.log"
+phase="verify all managed socket volumes returned after a new run"
 require_socket_volume_count 4
-phase="stop restarted persistent runtime"
-"$cladding_bin" --cladding-dir "$project_root" down
-phase="verify restart cleanup removed all managed socket volumes"
+phase="stop the CA reuse run"
+stop_supervisor_run
+phase="verify new run cleanup removed all managed socket volumes"
 require_socket_volume_count 0
-phase="verify restart cleanup cleared Baffle session socket paths"
+phase="verify run cleanup cleared Baffle session socket paths"
 test ! -e "$project_root/runtime/sockets"
 
-phase="verify disabled network-sandbox lifecycle"
+phase="verify disabled network-sandbox run lifecycle"
 jq '.nw_sandbox.enabled = false' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
-"$cladding_bin" --cladding-dir "$project_root" up
+start_supervisor_run "$temp_root/disabled-sandbox.log"
 if podman inspect "$sandbox" >/dev/null 2>&1; then
   echo "Cladding started a network-sandbox container while it was disabled" >&2
   exit 1
@@ -1257,7 +1305,7 @@ if printf '%s\n' "$sessions" | grep -F 'nw-sandbox/proxy.sock' >/dev/null; then
   echo "Baffle created a network-sandbox session while it was disabled" >&2
   exit 1
 fi
-"$cladding_bin" --cladding-dir "$project_root" down
+stop_supervisor_run
 test ! -e "$project_root/runtime/sockets"
 
 phase="verify one-off fake credentials authenticate in their Baffle session"

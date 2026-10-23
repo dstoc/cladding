@@ -4,16 +4,16 @@ This file summarizes the current Cladding runtime. See the [user guide](../user-
 
 ## Managed resources
 
-- One standalone proxy container per project: `<name>-proxy-instance`.
-- One standalone agent container: `<name>-agent-instance`.
-- Optional standalone network and filesystem sandbox containers: `<name>-nw-sandbox-instance` and `<name>-fs-sandbox-instance`.
+- One standalone proxy container per active run: `<run-name>-proxy-instance`.
+- One standalone agent container per active run: `<run-name>-agent-instance`.
+- Optional standalone network and filesystem sandbox containers per run: `<run-name>-nw-sandbox-instance` and `<run-name>-fs-sandbox-instance`.
 - Podman-managed volumes carry Baffle data sockets and sandbox run sockets between their owning containers. Cladding does not create host runtime socket directories.
 
-## Persistent runtime topology
+## Per-run topology
 
 All components run as standalone containers with `--userns keep-id`. The proxy uses Podman's default network. The agent and enabled sandboxes use `--network none`. `use_runsc`, when enabled, applies only to the execution containers.
 
-The proxy runs Baffle and creates a persistent session for the agent and, when enabled, the network sandbox. Each of those clients has a local listener at `127.0.0.1:3128` and its own Baffle data socket. The filesystem sandbox has no Baffle socket, local proxy listener, or proxy environment.
+The proxy runs Baffle and creates persistent sessions for the agent and, when enabled, the network sandbox for the lifetime of this run. Each of those clients has a local listener at `127.0.0.1:3128` and its own Baffle data socket. The filesystem sandbox has no Baffle socket, local proxy listener, or proxy environment.
 
 ```mermaid
 flowchart LR
@@ -90,15 +90,19 @@ These built-in mounts do not expose the host workspace. Add a host-backed mount 
 
 Custom mounts are applied by the direct runtime builder. They do not pass through Kubernetes YAML.
 
-## Persistent and one-off lifecycle
+## Run lifecycle
 
-`cladding init` creates project configuration and layout. It materializes embedded config templates under `.cladding/config/` and refreshes the proxy startup script. `cladding build` installs the checksum-pinned Linux tools in `.cladding/tools/bin/`, builds local images, and initializes the persistent project Baffle CA when needed. A matching installed checksum avoids a download. Later builds validate and reuse the CA. `cladding check` validates all four tools offline and reports files that need a build refresh. `cladding up` validates the same project prerequisites and CA; neither command initializes or rotates the CA.
+`cladding init` creates project configuration and layout. It materializes embedded config templates under `.cladding/config/` and refreshes the proxy startup script. `cladding build` installs the checksum-pinned Linux tools in `.cladding/tools/bin/`, builds local images, and initializes the project Baffle CA when needed. A matching installed checksum avoids a download. Later builds validate and reuse the CA. `cladding check` validates all four tools offline and reports files that need a build refresh. Neither command initializes or rotates an existing CA.
 
-`cladding up` starts the persistent project containers and their managed volumes. `cladding down` removes those runtime resources but keeps project config, tools, credentials, home, and CA. `cladding destroy` force-removes the current standalone runtime resources.
+`cladding run [--env KEY[=VALUE] ...] -- <command> [args...]` owns one UUID-scoped run. The foreground supervisor acquires a private lifetime lock and control socket before it creates containers. It marks the run ready only after required components, Baffle sessions, and fake defaults are available, then prints the full UUID to stderr. Attachments use that UUID to select the run without rereading project configuration. `cladding ps` lists runs across projects on the selected Podman connection.
 
-`cladding run [--env KEY[=VALUE] ...] -- <command> [args...]` creates a UUID-scoped one-off runtime, runs the command in its agent container, then removes the containers and Cladding-managed volumes. Its private bind sources, generated scripts, and masks live under `.cladding/runtime/runs/<instance>`. The sockets live in Podman-managed volumes, not in this private directory. The run uses the selected project's config, tools, credentials, home, selected Baffle sessions, and persistent CA directly. It does not copy those project files into the run directory or initialize a new CA.
+`cladding exec`, `inject`, `expose`, `logs`, and `reload-proxy` accept `--run SELECTOR`; without a selector, they require exactly one run for the current project. Exact UUID or internal-name matches take precedence over unique substrings. Explicit selection works outside the project and rejects `--config` and `--cladding-dir`.
 
-The proxy and execution containers start independently. Cladding does not wait for Baffle sessions to become ready before starting execution containers, so early requests to the local proxy can fail while Baffle starts. Startup errors appear in proxy logs and exit status. `cladding reload-proxy` invokes `baffle reload --all` and requires a Baffle-enabled proxy runtime.
+`cladding stop --run SELECTOR` asks the supervisor to stop the workload, close admissions, and clean up. It confirms completion before returning. `cladding destroy --run SELECTOR` is for orphan recovery; it requires exclusive lifetime-lock ownership and verifies each run-owned container and volume before removal. It preserves project config, tools, credentials, home, CA, and user-named volumes.
+
+Private bind sources, generated scripts, masks, the lifetime lock, and control socket metadata live under `.cladding/runtime/runs/cladding-run-<UUID>` (the socket may use a short private host path if needed). Podman-managed sockets and disposable mounts use run-labeled volumes. The run uses the selected project's config, tools, credentials, home, selected Baffle sessions, and project CA directly. It does not copy those project files into the run directory or initialize a new CA.
+
+The foreground run starts the proxy and enabled execution containers, creates the required Baffle sessions, and waits for those sessions before admitting attachments or starting the primary workload. Startup errors appear in proxy logs and the run exit status. `cladding reload-proxy --run SELECTOR` invokes `baffle reload --all` in the selected run's proxy.
 
 ## Baffle policy and trust
 
@@ -119,9 +123,9 @@ Optional gVisor design details live in [the gVisor runtime feature document](cla
 
 ## Host connection commands
 
-`cladding expose <container-port> [host-port]` runs a foreground host listener and forwards to the agent. It listens on `127.0.0.1` by default and creates no persistent expose container.
+`cladding expose --run SELECTOR <container-port> [host-port]` runs a foreground host listener and forwards to the selected agent. It listens on `127.0.0.1` by default and closes when the run shuts down or supervisor control is lost.
 
-`cladding inject <host-endpoint> [container-port]` runs `cladding-bridge` in the agent over a multiplexed `podman exec` stream. Host Cladding opens each stream to the fixed TCP endpoint selected by the command. The agent listens on `127.0.0.1:<container-port>` and cannot choose another host destination. A bare port selects host `127.0.0.1` on the same port. An explicit `host:port` selects that host endpoint. See the [Cladding bridge architecture](cladding-bridge/proposal.md) for the transport design.
+`cladding inject --run SELECTOR <host-endpoint> [container-port]` runs `cladding-bridge` in the selected agent over a multiplexed `podman exec` stream. Host Cladding opens each stream to the fixed TCP endpoint selected by the command. The agent listens on `127.0.0.1:<container-port>` and cannot choose another host destination. A bare port selects host `127.0.0.1` on the same port. An explicit `host:port` selects that host endpoint. The foreground bridge closes when the run shuts down or supervisor control is lost. See the [Cladding bridge architecture](cladding-bridge/proposal.md) for the transport design.
 
 ## Config and generated files
 
@@ -130,6 +134,6 @@ Optional gVisor design details live in [the gVisor runtime feature document](cla
 - `config/`: generated configuration and policy templates;
 - `home/`: persistent project home for the agent and network sandbox;
 - `tools/`: pinned Linux dependency binaries and embedded scripts created or refreshed by `cladding build`;
-- `runtime/`: scripts and generated masks used by the persistent runtime.
+- `runtime/`: project scripts and private files for active runs.
 
-One-off runtime files live in the UUID-scoped `runtime/runs/<instance>/` directory. Podman-managed socket volumes remain outside that host path and are removed with the run.
+Run files live in the UUID-scoped `runtime/runs/cladding-run-<UUID>/` directory. Podman-managed socket and mount volumes remain outside that host path and are removed with the run.

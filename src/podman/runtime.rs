@@ -449,8 +449,12 @@ fn runtime_cleanup_normal_report(
         remove_stale_managed_mount_volumes(spec, verbose, quiet_helpers, &mut errors);
     }
 
+    let result = errors.finish();
+    if result.is_err() {
+        runtime_root_safe_to_remove = false;
+    }
     RuntimeCleanupReport {
-        result: errors.finish(),
+        result,
         runtime_root_safe_to_remove,
     }
 }
@@ -641,7 +645,7 @@ fn remove_socket_volumes(spec: &RuntimeSpec, verbose: bool, quiet_helpers: bool)
 }
 
 fn socket_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut labels = BTreeMap::from([
         ("cladding".to_string(), spec.project_name.clone()),
         (
             "project_root".to_string(),
@@ -652,7 +656,9 @@ fn socket_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, Stri
             "inter-container-socket".to_string(),
         ),
         ("cladding_socket_volume".to_string(), name.to_string()),
-    ])
+    ]);
+    add_run_metadata_labels(&mut labels, spec);
+    labels
 }
 
 fn socket_volume_labels_match(
@@ -668,7 +674,7 @@ fn baffle_socket_permissions_helper_name(spec: &RuntimeSpec) -> String {
 }
 
 fn baffle_socket_permissions_helper_labels(spec: &RuntimeSpec) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut labels = BTreeMap::from([
         (
             "app".to_string(),
             "baffle-socket-volume-permissions".to_string(),
@@ -678,7 +684,9 @@ fn baffle_socket_permissions_helper_labels(spec: &RuntimeSpec) -> BTreeMap<Strin
             "project_root".to_string(),
             spec.project_root.to_string_lossy().into_owned(),
         ),
-    ])
+    ]);
+    add_run_metadata_labels(&mut labels, spec);
+    labels
 }
 
 fn remove_baffle_socket_permissions_helper(
@@ -793,7 +801,7 @@ fn ensure_managed_mount_volumes(
 }
 
 fn managed_mount_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut labels = BTreeMap::from([
         ("cladding".to_string(), spec.project_name.clone()),
         (
             "project_root".to_string(),
@@ -805,7 +813,30 @@ fn managed_mount_volume_labels(spec: &RuntimeSpec, name: &str) -> BTreeMap<Strin
             spec.runtime_root.to_string_lossy().into_owned(),
         ),
         ("cladding_mount_volume".to_string(), name.to_string()),
-    ])
+    ]);
+    add_run_metadata_labels(&mut labels, spec);
+    labels
+}
+
+fn add_run_metadata_labels(labels: &mut BTreeMap<String, String>, spec: &RuntimeSpec) {
+    let Some(socket) = &spec.run_control_socket else {
+        return;
+    };
+    labels.insert("cladding_run_metadata_version".to_string(), "2".to_string());
+    labels.insert(
+        "cladding_run_control_socket".to_string(),
+        socket.display().to_string(),
+    );
+    if let Some(identity) = &spec.run_private_identity {
+        labels.insert(
+            "cladding_run_private_identity".to_string(),
+            identity.clone(),
+        );
+    }
+    labels.insert(
+        "cladding_run_expected_roles".to_string(),
+        spec.run_expected_roles.join(","),
+    );
 }
 
 fn managed_mount_seed_helper_name(name: &str) -> String {
@@ -1873,6 +1904,9 @@ mod tests {
             nw_sandbox: None,
             fs_sandbox: None,
             custom_mount_sources: Vec::new(),
+            run_control_socket: None,
+            run_expected_roles: Vec::new(),
+            run_private_identity: None,
         };
 
         let args = command_args(&build_baffle_ca_init_command(&spec));
@@ -1921,6 +1955,9 @@ mod tests {
             nw_sandbox: Some(component("demo-nw-sandbox")),
             fs_sandbox: Some(component("demo-fs-sandbox")),
             custom_mount_sources: Vec::new(),
+            run_control_socket: None,
+            run_expected_roles: Vec::new(),
+            run_private_identity: None,
         };
 
         assert!(should_install_baffle_ca(&spec, &spec.agent));
