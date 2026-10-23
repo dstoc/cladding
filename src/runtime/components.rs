@@ -1,7 +1,7 @@
 use super::commands::build_supervisor_command;
 use super::mounts::{
     apply_custom_mounts, build_custom_mounts_with_snapshots, build_execution_mounts,
-    build_fs_sandbox_mounts, build_proxy_mounts,
+    build_fs_sandbox_mounts, build_proxy_mounts, canonical_or_normalized,
 };
 use super::runtime_container_name;
 use super::sockets::{
@@ -10,10 +10,12 @@ use super::sockets::{
     build_socket_volume_mount, runtime_socket_mount_path,
 };
 use super::types::{
-    RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar, RuntimeNames,
-    RuntimeSpec,
+    ManagedVolumeKind, RuntimeComponent, RuntimeContainer, RuntimeCustomMount, RuntimeEnvVar,
+    RuntimeNames, RuntimeSpec,
 };
-use crate::config::{ExecutionConfig, MountTarget};
+use crate::config::{ExecutionConfig, MountTarget, MountType, ResolvedMountConfig};
+use crate::error::{Error, Result};
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -61,7 +63,54 @@ impl RuntimeSpec {
             nw_sandbox,
             fs_sandbox,
             custom_mount_sources,
+            run_control_socket: None,
+            run_expected_roles: Vec::new(),
         }
+    }
+
+    pub fn set_run_control_metadata(
+        &mut self,
+        socket_path: &Path,
+        config: &ExecutionConfig,
+    ) -> Result<()> {
+        let mut expected_roles = vec!["proxy".to_string(), "agent".to_string()];
+        if self.nw_sandbox.is_some() {
+            expected_roles.push("nw-sandbox".to_string());
+        }
+        if self.fs_sandbox.is_some() {
+            expected_roles.push("fs-sandbox".to_string());
+        }
+        self.run_control_socket = Some(socket_path.to_path_buf());
+        self.run_expected_roles = expected_roles.clone();
+        set_run_component_metadata(&mut self.proxy, socket_path, &expected_roles, Vec::new())?;
+        let agent_mappings = run_cwd_mappings(
+            &self.agent.container.mounts,
+            &config.mounts,
+            MountTarget::Agent,
+        );
+        set_run_component_metadata(
+            &mut self.agent,
+            socket_path,
+            &expected_roles,
+            agent_mappings,
+        )?;
+        if let Some(component) = &mut self.nw_sandbox {
+            let mappings = run_cwd_mappings(
+                &component.container.mounts,
+                &config.mounts,
+                MountTarget::NwSandbox,
+            );
+            set_run_component_metadata(component, socket_path, &expected_roles, mappings)?;
+        }
+        if let Some(component) = &mut self.fs_sandbox {
+            let mappings = run_cwd_mappings(
+                &component.container.mounts,
+                &config.mounts,
+                MountTarget::FsSandbox,
+            );
+            set_run_component_metadata(component, socket_path, &expected_roles, mappings)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn components(&self) -> Vec<&RuntimeComponent> {
@@ -74,6 +123,110 @@ impl RuntimeSpec {
         }
         components
     }
+}
+
+#[derive(Serialize)]
+struct RunCwdMapping {
+    host_source: String,
+    destination: String,
+    mount_type: &'static str,
+    read_only: bool,
+    volume_name: Option<String>,
+}
+
+fn set_run_component_metadata(
+    component: &mut RuntimeComponent,
+    socket_path: &Path,
+    expected_roles: &[String],
+    mappings: Vec<RunCwdMapping>,
+) -> Result<()> {
+    component
+        .labels
+        .insert("cladding_run_metadata_version".to_string(), "1".to_string());
+    component.labels.insert(
+        "cladding_run_control_socket".to_string(),
+        socket_path.display().to_string(),
+    );
+    component.labels.insert(
+        "cladding_run_expected_roles".to_string(),
+        expected_roles.join(","),
+    );
+    component.labels.insert(
+        "cladding_run_cwd_v1".to_string(),
+        serde_json::to_string(&mappings)
+            .map_err(|_| Error::message("failed to encode run working-directory metadata"))?,
+    );
+    Ok(())
+}
+
+fn run_cwd_mappings(
+    runtime_mounts: &[super::types::RuntimeMount],
+    configured_mounts: &[ResolvedMountConfig],
+    target: MountTarget,
+) -> Vec<RunCwdMapping> {
+    configured_mounts
+        .iter()
+        .filter(|mount| {
+            !mount.ignore
+                && mount.targets.contains(&target)
+                && matches!(
+                    mount.mount_type,
+                    MountType::Bind | MountType::Readonly | MountType::Copy
+                )
+        })
+        .filter_map(|mount| {
+            let configured_host_source = mount.host_path.as_ref()?;
+            let host_source = canonical_or_normalized(configured_host_source);
+            let host_source_label = host_source.to_str()?;
+            if !host_source.is_absolute()
+                || host_source
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+                || Path::new(&mount.mount_path)
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return None;
+            }
+            let actual = runtime_mounts.iter().find(|runtime| {
+                if runtime.mount_path != mount.mount_path {
+                    return false;
+                }
+                match (mount.mount_type, &runtime.source) {
+                    (
+                        MountType::Bind | MountType::Readonly,
+                        super::types::RuntimeMountSource::HostPath { path },
+                    ) => path == configured_host_source,
+                    (
+                        MountType::Copy,
+                        super::types::RuntimeMountSource::ManagedVolume {
+                            kind: ManagedVolumeKind::Copy { source },
+                            ..
+                        },
+                    ) => source == configured_host_source,
+                    _ => false,
+                }
+            })?;
+            let volume_name = match &actual.source {
+                super::types::RuntimeMountSource::ManagedVolume { claim_name, .. } => {
+                    Some(claim_name.clone())
+                }
+                _ => None,
+            };
+            Some(RunCwdMapping {
+                host_source: host_source_label.to_string(),
+                destination: mount.mount_path.clone(),
+                mount_type: match mount.mount_type {
+                    MountType::Bind => "bind",
+                    MountType::Readonly => "readonly",
+                    MountType::Copy => "copy",
+                    MountType::Tmpfs => return None,
+                },
+                read_only: mount.read_only,
+                volume_name,
+            })
+        })
+        .collect()
 }
 
 fn build_proxy_component(
@@ -472,6 +625,65 @@ mod tests {
                 super::super::types::RuntimeMountSource::HostPath { path } => Some(path.as_path()),
                 _ => None,
             })
+    }
+
+    #[test]
+    fn run_metadata_records_only_active_host_backed_mounts_for_each_target() {
+        let mounts = vec![
+            ResolvedMountConfig {
+                mount_path: "/workspace".to_string(),
+                host_path: Some(PathBuf::from("/tmp/../tmp/workspace")),
+                volume: None,
+                mount_type: MountType::Bind,
+                tmpfs_size_bytes: None,
+                read_only: true,
+                targets: vec![MountTarget::Agent, MountTarget::NwSandbox],
+                ignore: false,
+            },
+            ResolvedMountConfig {
+                mount_path: "/workspace/src".to_string(),
+                host_path: Some(PathBuf::from("/tmp/workspace/src")),
+                volume: None,
+                mount_type: MountType::Copy,
+                tmpfs_size_bytes: None,
+                read_only: false,
+                targets: vec![MountTarget::Agent],
+                ignore: false,
+            },
+            ResolvedMountConfig {
+                mount_path: "/ignored".to_string(),
+                host_path: Some(PathBuf::from("/tmp/ignored")),
+                volume: None,
+                mount_type: MountType::Bind,
+                tmpfs_size_bytes: None,
+                read_only: false,
+                targets: vec![MountTarget::Agent],
+                ignore: true,
+            },
+        ];
+        let config = execution_config(true, false, mounts, false);
+        let mut spec = RuntimeSpec::build(Path::new("/tmp/project/.cladding"), &config);
+        spec.set_run_control_metadata(Path::new("/tmp/run/control.sock"), &config)
+            .unwrap();
+
+        let agent: serde_json::Value =
+            serde_json::from_str(spec.agent.labels.get("cladding_run_cwd_v1").unwrap()).unwrap();
+        let nw: serde_json::Value = serde_json::from_str(
+            spec.nw_sandbox
+                .as_ref()
+                .unwrap()
+                .labels
+                .get("cladding_run_cwd_v1")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(agent.as_array().unwrap().len(), 2);
+        assert_eq!(agent[0]["mount_type"], "bind");
+        assert_eq!(agent[1]["mount_type"], "copy");
+        assert!(agent[1]["volume_name"].as_str().is_some());
+        assert_eq!(nw.as_array().unwrap().len(), 1);
+        assert_eq!(nw[0]["host_source"], "/tmp/workspace");
+        assert_eq!(nw[0]["read_only"], true);
     }
 
     fn assert_socket_volume(

@@ -47,6 +47,9 @@ if [ "$1" = "run" ]; then
   helper_project=
   helper_root=
   helper_app=
+  helper_control_socket=
+  helper_expected_roles=
+  helper_metadata_version=
   socket_helper=
   copy_seed_helper=
   next=
@@ -59,6 +62,9 @@ if [ "$1" = "run" ]; then
             app=*) helper_app=${argument#app=} ;;
             cladding=*) helper_project=${argument#cladding=} ;;
             project_root=*) helper_root=${argument#project_root=} ;;
+            cladding_run_control_socket=*) helper_control_socket=${argument#cladding_run_control_socket=} ;;
+            cladding_run_expected_roles=*) helper_expected_roles=${argument#cladding_run_expected_roles=} ;;
+            cladding_run_metadata_version=*) helper_metadata_version=${argument#cladding_run_metadata_version=} ;;
           esac
           ;;
         volume)
@@ -79,15 +85,19 @@ if [ "$1" = "run" ]; then
   done
   if [ "${CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP:-}" = "1" ] && [ -n "$socket_helper" ]; then
     if [ -n "$helper_name" ]; then
-      printf '%s|%s|%s|%s|running|present\n' \
-        "$helper_name" "$helper_project" "$helper_root" "$helper_app" >> "$CLADDING_PODMAN_STATE"
+      printf '%s|%s|%s|%s|running|present|%s|%s|%s\n' \
+        "$helper_name" "$helper_project" "$helper_root" "$helper_app" \
+        "$helper_control_socket" "$helper_expected_roles" "$helper_metadata_version" \
+        >> "$CLADDING_PODMAN_STATE"
     fi
     exit 44
   fi
   if [ "${CLADDING_TEST_FAIL_COPY_SEED:-}" = "1" ] && [ -n "$copy_seed_helper" ]; then
     if [ -n "$helper_name" ]; then
-      printf '%s|%s|%s|%s|running|present\n' \
-        "$helper_name" "$helper_project" "$helper_root" "$helper_app" >> "$CLADDING_PODMAN_STATE"
+      printf '%s|%s|%s|%s|running|present|%s|%s|%s\n' \
+        "$helper_name" "$helper_project" "$helper_root" "$helper_app" \
+        "$helper_control_socket" "$helper_expected_roles" "$helper_metadata_version" \
+        >> "$CLADDING_PODMAN_STATE"
     fi
     exit 45
   fi
@@ -241,8 +251,11 @@ if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
   project_name=$(printf '%s\n' "$row" | cut -d '|' -f 2)
   project_root=$(printf '%s\n' "$row" | cut -d '|' -f 3)
   app=$(printf '%s\n' "$row" | cut -d '|' -f 4)
-  printf '{"State":{"Status":"running"},"Config":{"Labels":{"app":"%s","cladding":"%s","project_root":"%s"}}}\n' \
-    "$app" "$project_name" "$project_root"
+  control_socket=$(printf '%s\n' "$row" | cut -d '|' -f 7)
+  expected_roles=$(printf '%s\n' "$row" | cut -d '|' -f 8)
+  metadata_version=$(printf '%s\n' "$row" | cut -d '|' -f 9)
+  printf '{"State":{"Status":"running"},"Config":{"Labels":{"app":"%s","cladding":"%s","project_root":"%s","cladding_run_control_socket":"%s","cladding_run_expected_roles":"%s","cladding_run_metadata_version":"%s"}}}\n' \
+    "$app" "$project_name" "$project_root" "$control_socket" "$expected_roles" "$metadata_version"
   exit 0
 fi
 if [ "$1" = "rm" ]; then
@@ -667,35 +680,6 @@ exit 0
     assert!(!project_root.join("credentials/baffle/ca.crt").exists());
     assert!(!project_root.join("credentials/baffle/ca-key.pem").exists());
 
-    let mut up = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
-    let up_result = up.output().unwrap();
-    assert!(!up_result.status.success());
-    let up_stderr = String::from_utf8_lossy(&up_result.stderr);
-    assert!(
-        up_stderr.contains("incomplete Baffle CA"),
-        "up failed for an unexpected reason: {up_stderr}"
-    );
-    let up_calls = read_log(&podman_log);
-    assert!(
-        !up_calls.contains("pod create"),
-        "up created a pod before CA validation"
-    );
-    assert!(
-        !up_calls.lines().any(is_detached_container_run),
-        "up started a container before CA validation"
-    );
-    assert!(
-        !up_calls.contains("run --rm"),
-        "up attempted CA initialization"
-    );
-
     fs::write(project_root.join("credentials/baffle/ca.crt"), &certificate).unwrap();
     fs::write(
         project_root.join("credentials/baffle/ca-key.pem"),
@@ -734,7 +718,7 @@ exit 0
     assert_success(verbose_run_output.clone());
     let verbose_stdout = String::from_utf8_lossy(&verbose_run_output.stdout);
     let verbose_stderr = String::from_utf8_lossy(&verbose_run_output.stderr);
-    assert!(verbose_stdout.contains("starting one-off instance:"));
+    assert!(verbose_stderr.contains("starting one-off instance:"));
     assert!(verbose_stdout.contains("helper stdout: run -d"));
     assert!(verbose_stdout.contains("container-id: fake-podman-id"));
     assert!(verbose_stdout.contains("user-output"));
@@ -1093,7 +1077,7 @@ exit 0
         !copy_seed_failure_log.contains("volume ls"),
         "complete one-off attempt records should avoid stale volume discovery: {copy_seed_failure_log}"
     );
-    let copy_instance = String::from_utf8_lossy(&copy_seed_failure_output.stdout)
+    let copy_instance = String::from_utf8_lossy(&copy_seed_failure_output.stderr)
         .lines()
         .find_map(|line| line.strip_prefix("starting one-off instance: "))
         .expect("verbose copy run reports its instance name")
@@ -1226,60 +1210,6 @@ exit 0
 
     fs::write(&socket_volume_state, "cladding-kache||||\n").unwrap();
     fs::write(&podman_log, "").unwrap();
-    let mut failed_socket_prepare = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    failed_socket_prepare
-        .args(["--cladding-dir", project_root.to_str().unwrap(), "up", "-v"])
-        .env("CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP", "1");
-    let failed_socket_prepare_output = failed_socket_prepare.output().unwrap();
-    assert!(!failed_socket_prepare_output.status.success());
-    assert!(
-        String::from_utf8_lossy(&failed_socket_prepare_output.stderr)
-            .contains("failed to secure Baffle socket volumes")
-    );
-    let failed_socket_prepare_log = read_log(&podman_log);
-    let failed_socket_prepare_helpers: Vec<_> = failed_socket_prepare_log
-        .lines()
-        .filter(|line| line.starts_with("run --rm --network none --userns keep-id"))
-        .collect();
-    assert_eq!(
-        failed_socket_prepare_helpers.len(),
-        1,
-        "{failed_socket_prepare_log}"
-    );
-    assert!(
-        failed_socket_prepare_helpers[0].contains("cladding-demo-socket-baffle-agent:/socket/0:U")
-    );
-    assert!(
-        failed_socket_prepare_helpers[0]
-            .contains("cladding-demo-socket-baffle-nw-sandbox:/socket/1:U")
-    );
-    assert!(
-        failed_socket_prepare_helpers[0].contains("--name demo-baffle-socket-volume-permissions")
-    );
-    assert!(failed_socket_prepare_log.contains("rm -f demo-baffle-socket-volume-permissions"));
-    assert!(
-        !failed_socket_prepare_log.contains("--name demo-proxy-instance"),
-        "a failed socket preparation must stop before runtime consumers start: {failed_socket_prepare_log}"
-    );
-    assert!(
-        !failed_socket_prepare_log
-            .lines()
-            .any(|line| line.split_whitespace().any(|argument| argument == "-d")),
-        "a failed socket preparation must not start any runtime consumer: {failed_socket_prepare_log}"
-    );
-    assert_eq!(
-        fs::read_to_string(&socket_volume_state).unwrap(),
-        "cladding-kache||||\n",
-        "failed socket preparation must clean up every created socket volume"
-    );
-
-    fs::write(&podman_log, "").unwrap();
     let mut failed_socket_run = cli(
         &root,
         &bin_dir,
@@ -1298,7 +1228,7 @@ exit 0
         .env("CLADDING_TEST_FAIL_SOCKET_VOLUME_PREP", "1");
     let failed_socket_run_output = failed_socket_run.output().unwrap();
     assert!(!failed_socket_run_output.status.success());
-    let failed_socket_instance = String::from_utf8_lossy(&failed_socket_run_output.stdout)
+    let failed_socket_instance = String::from_utf8_lossy(&failed_socket_run_output.stderr)
         .lines()
         .find_map(|line| line.strip_prefix("starting one-off instance: "))
         .expect("verbose failed run reports its instance name")
@@ -1347,475 +1277,6 @@ exit 0
     );
 
     fs::write(&podman_log, "").unwrap();
-    let mut up = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    up.args(["--cladding-dir", project_root.to_str().unwrap(), "up", "-v"]);
-    let up_output = up.output().unwrap();
-    assert_success(up_output.clone());
-    let up_stderr = String::from_utf8_lossy(&up_output.stderr);
-    assert!(up_stderr.contains("runtime metrics: up total="));
-    assert!(up_stderr.contains("startup="));
-    assert!(
-        !project_root.join("home/workspace").exists(),
-        "cladding up must not create the former default workspace mount point"
-    );
-    let startup_log = read_log(&podman_log);
-    assert_eq!(
-        startup_log
-            .lines()
-            .filter(|line| line.starts_with("container ps "))
-            .collect::<Vec<_>>(),
-        ["container ps --all --format json"],
-        "up should use one all-container snapshot for project and name discovery: {startup_log}"
-    );
-    for name in [
-        "demo-proxy-instance",
-        "demo-agent-instance",
-        "demo-nw-sandbox-instance",
-    ] {
-        assert!(
-            !startup_log.lines().any(|line| {
-                line == format!("container exists {name}")
-                    || line.contains("container inspect ") && line.ends_with(name)
-            }),
-            "startup must not issue per-container presence or state queries: {startup_log}"
-        );
-    }
-    assert!(
-        !startup_log.contains("pod create"),
-        "cladding up must not create Podman pods: {startup_log}"
-    );
-    assert!(
-        !startup_log.lines().any(|line| line.starts_with("pod ")),
-        "cladding up must not query Podman pods: {startup_log}"
-    );
-    let proxy_start = startup_log
-        .lines()
-        .find(|line| line.contains("--name demo-proxy-instance"))
-        .expect("up starts the named proxy container");
-    assert!(proxy_start.contains("--network default"), "{proxy_start}");
-    assert!(proxy_start.contains("--userns keep-id"), "{proxy_start}");
-    assert!(proxy_start.contains("--init"), "{proxy_start}");
-    assert!(proxy_start.contains("app=proxy"), "{proxy_start}");
-    let proxy_start_index = startup_log
-        .lines()
-        .position(|line| line.contains("--name demo-proxy-instance"))
-        .expect("proxy start command is logged");
-    let helper_index = startup_log
-        .lines()
-        .position(|line| {
-            line.contains("run --rm --network none --userns keep-id --name demo-baffle-socket-volume-permissions")
-                && line.contains("app=baffle-socket-volume-permissions")
-                && line.contains("cladding=demo")
-                && line.contains("cladding-demo-socket-baffle-agent:/socket/0:U")
-                && line.contains("cladding-demo-socket-baffle-nw-sandbox:/socket/1:U")
-                && line.ends_with("mkdir -p /socket/0 /socket/1 && chmod 0700 /socket/0 /socket/1")
-        })
-        .unwrap_or_else(|| panic!("missing batched Baffle volume preparation: {startup_log}"));
-    assert!(
-        helper_index < proxy_start_index,
-        "Baffle volume permissions must be set before proxy startup: {startup_log}"
-    );
-    assert_eq!(
-        startup_log
-            .lines()
-            .filter(|line| line.starts_with("run --rm --network none --userns keep-id"))
-            .count(),
-        1,
-        "two Baffle socket volumes must share one preparation helper: {startup_log}"
-    );
-    assert!(
-        !startup_log.contains("cladding-demo-socket-run-nw-sandbox:/socket:U"),
-        "Baffle permission preparation must not change sandbox run-volume setup"
-    );
-    let created_socket_volumes = fs::read_to_string(&socket_volume_state).unwrap();
-    assert_eq!(
-        created_socket_volumes
-            .lines()
-            .filter(|line| line.starts_with("cladding-demo-socket-"))
-            .count(),
-        3,
-        "{created_socket_volumes}"
-    );
-    for channel in ["baffle-agent", "baffle-nw-sandbox", "run-nw-sandbox"] {
-        assert!(
-            created_socket_volumes.contains(&format!("cladding-demo-socket-{channel}")),
-            "missing managed socket channel {channel}: {created_socket_volumes}"
-        );
-    }
-    assert!(created_socket_volumes.contains("|demo|"));
-    assert!(created_socket_volumes.contains("|inter-container-socket|"));
-    let agent_start = startup_log
-        .lines()
-        .find(|line| line.contains("--name demo-agent-instance"))
-        .expect("up starts the named agent container");
-    assert!(
-        agent_start.contains("--volume cladding-kache:/home/user/.cache/kache"),
-        "persistent runtime should mount the explicitly named Podman volume verbatim: {agent_start}"
-    );
-    assert!(
-        agent_start
-            .contains("--mount type=tmpfs,dst=/empty,tmpfs-mode=1777,U=true,notmpcopyup,ro=true"),
-        "persistent runtime should mount a typeless mount as an empty read-only tmpfs: {agent_start}"
-    );
-    assert!(
-        !agent_start.contains("-empty-empty"),
-        "persistent runtime must not create or mount an implicit named volume: {agent_start}"
-    );
-
-    let running_state = fs::read_to_string(&podman_state).unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut already_up = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    already_up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
-    let already_up_output = already_up.output().unwrap();
-    assert_success(already_up_output.clone());
-    assert!(String::from_utf8_lossy(&already_up_output.stdout).contains("already running"));
-    let already_up_log = read_log(&podman_log);
-    assert_eq!(
-        already_up_log
-            .lines()
-            .filter(|line| line.starts_with("container ps "))
-            .count(),
-        1,
-        "running runtime preflight should use one snapshot: {already_up_log}"
-    );
-    assert!(
-        !already_up_log.lines().any(|line| {
-            line.starts_with("container exists demo-") || line.starts_with("container inspect ")
-        }),
-        "running runtime preflight should not inspect expected names individually: {already_up_log}"
-    );
-
-    for (state, description) in [
-        (
-            format!(
-                "demo-agent-instance|demo|{}|agent|exited|present\n",
-                project_root.display()
-            ),
-            "stopped expected container",
-        ),
-        (
-            "demo-agent-instance|foreign|/tmp/foreign/.cladding|agent|running|present\n"
-                .to_string(),
-            "foreign exact-name collision",
-        ),
-        (
-            format!(
-                "demo-agent-instance|demo|{}|foreign-app|running|present\n",
-                project_root.display()
-            ),
-            "exact-name collision with foreign component labels",
-        ),
-        (
-            "demo-agent-instance||||running|missing\n".to_string(),
-            "exact-name collision with missing labels",
-        ),
-    ] {
-        fs::write(&podman_state, state).unwrap();
-        fs::write(&podman_log, "").unwrap();
-        let mut conflicting_up = cli(
-            &root,
-            &bin_dir,
-            &podman_log,
-            &certificate_source,
-            &private_key_source,
-        );
-        conflicting_up.args(["--cladding-dir", project_root.to_str().unwrap(), "up"]);
-        let output = conflicting_up.output().unwrap();
-        assert!(
-            !output.status.success(),
-            "{description} must prevent startup: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !read_log(&podman_log)
-                .lines()
-                .any(|line| line.contains("run -d")),
-            "{description} must not start containers: {}",
-            read_log(&podman_log)
-        );
-    }
-
-    fs::write(&podman_state, "").unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut malformed_labels_up = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    malformed_labels_up
-        .args(["--cladding-dir", project_root.to_str().unwrap(), "up"])
-        .env(
-            "CLADDING_TEST_CONTAINER_PS_JSON",
-            r#"[{"Names":["demo-agent-instance"],"State":"running","Labels":"cladding=foreign"}]"#,
-        );
-    assert!(!malformed_labels_up.output().unwrap().status.success());
-    assert!(
-        !read_log(&podman_log)
-            .lines()
-            .any(|line| line.contains("run -d")),
-        "malformed labels on an expected name must remain a collision"
-    );
-
-    for (env_name, env_value, description) in [
-        (
-            "CLADDING_TEST_CONTAINER_PS_JSON",
-            "not-json",
-            "malformed container snapshot",
-        ),
-        (
-            "CLADDING_TEST_FAIL_CONTAINER_PS",
-            "1",
-            "container listing engine failure",
-        ),
-    ] {
-        fs::write(&podman_log, "").unwrap();
-        let mut invalid_up = cli(
-            &root,
-            &bin_dir,
-            &podman_log,
-            &certificate_source,
-            &private_key_source,
-        );
-        invalid_up
-            .args(["--cladding-dir", project_root.to_str().unwrap(), "up"])
-            .env(env_name, env_value);
-        assert!(
-            !invalid_up.output().unwrap().status.success(),
-            "{description} must fail preflight"
-        );
-        let log = read_log(&podman_log);
-        assert!(
-            !log.lines().any(|line| line.contains("run -d")),
-            "{description} must not start containers: {log}"
-        );
-    }
-
-    fs::write(&podman_state, running_state).unwrap();
-
-    fs::write(&podman_log, "").unwrap();
-    let mut down = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    down.args([
-        "--cladding-dir",
-        project_root.to_str().unwrap(),
-        "down",
-        "-v",
-    ]);
-    let down_output = down.output().unwrap();
-    assert_success(down_output.clone());
-    let down_stderr = String::from_utf8_lossy(&down_output.stderr);
-    assert!(down_stderr.contains("runtime metrics: down total="));
-    assert!(down_stderr.contains("teardown="));
-    let cleanup_log = read_log(&podman_log);
-    assert!(
-        !cleanup_log.lines().any(|line| line.starts_with("pod ")),
-        "down must not query or remove pods: {cleanup_log}"
-    );
-    assert!(
-        !cleanup_log.lines().any(|line| {
-            line.contains(" exists ")
-                || line.starts_with("container inspect ")
-                || line.starts_with("volume exists ")
-                || line.starts_with("volume inspect ")
-                || line.contains(" ps ")
-        }),
-        "normal shutdown must remove current-spec resources without per-resource inspection: {cleanup_log}"
-    );
-    assert_eq!(
-        fs::read_to_string(&socket_volume_state).unwrap(),
-        "cladding-kache||||\n",
-        "normal shutdown must remove owned socket volumes and preserve the external volume"
-    );
-    assert!(
-        !cleanup_log
-            .lines()
-            .any(|line| line == "volume rm cladding-kache"),
-        "normal shutdown must not remove an explicitly named volume: {cleanup_log}"
-    );
-
-    let mut failed_up = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    failed_up
-        .args(["--cladding-dir", project_root.to_str().unwrap(), "up", "-v"])
-        .env("CLADDING_TEST_FAIL_CA_INSTALL", "1")
-        .env("CLADDING_TEST_PODMAN_REMOVE_DELAY", "0.12");
-    let failed_up_output = failed_up.output().unwrap();
-    assert!(!failed_up_output.status.success());
-    let failed_up_stderr = String::from_utf8_lossy(&failed_up_output.stderr);
-    let failed_up_metrics = failed_up_stderr
-        .lines()
-        .find(|line| line.starts_with("runtime metrics: up "))
-        .expect("failed direct up prints runtime metrics");
-    let failed_up_startup = metric_duration(failed_up_metrics, "startup");
-    let failed_up_cleanup = metric_duration(failed_up_metrics, "cleanup");
-    assert!(
-        failed_up_cleanup >= 0.12,
-        "delayed failed-start cleanup was not measured: {failed_up_metrics}"
-    );
-    assert!(
-        failed_up_startup < failed_up_cleanup,
-        "failed-start cleanup must not be counted as startup: {failed_up_metrics}"
-    );
-    assert_eq!(
-        fs::read_to_string(&socket_volume_state).unwrap(),
-        "cladding-kache||||\n",
-        "failed direct up must remove its owned socket volumes and preserve external volumes"
-    );
-
-    let foreign_socket_volume = "cladding-demo-socket-baffle-agent|foreign|/tmp/foreign/.cladding|inter-container-socket|cladding-demo-socket-baffle-agent\n";
-    fs::write(&socket_volume_state, foreign_socket_volume).unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut down_foreign_volume = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    down_foreign_volume.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
-    assert_success(down_foreign_volume.output().unwrap());
-    assert!(fs::read_to_string(&socket_volume_state).unwrap().is_empty());
-    assert!(
-        read_log(&podman_log).contains("volume rm cladding-demo-socket-baffle-agent"),
-        "normal shutdown should remove the exact socket volume from its runtime spec"
-    );
-    fs::write(&socket_volume_state, "").unwrap();
-
-    let container_state = podman_log.with_extension("state");
-    fs::write(
-        &container_state,
-        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n",
-    )
-    .unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut down_foreign_container = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    down_foreign_container.args(["--cladding-dir", project_root.to_str().unwrap(), "down"]);
-    assert_success(down_foreign_container.output().unwrap());
-    assert!(read_log(&podman_log).contains("rm -f demo-agent-instance"));
-    assert!(
-        fs::read_to_string(&container_state).unwrap().is_empty(),
-        "normal shutdown should remove the exact container name from its runtime spec"
-    );
-
-    fs::write(
-        &container_state,
-        format!(
-            "demo-agent-instance|demo|{}|agent\n",
-            project_root.display()
-        ),
-    )
-    .unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut destroy = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    destroy.args(["--cladding-dir", project_root.to_str().unwrap(), "destroy"]);
-    assert_success(destroy.output().unwrap());
-    let destroy_log = read_log(&podman_log);
-    assert!(
-        destroy_log.contains("container exists demo-agent-instance")
-            && destroy_log.contains("container inspect --format {{json .}} demo-agent-instance")
-            && destroy_log.contains("rm -f demo-agent-instance"),
-        "destroy should verify and remove the owned standalone container: {destroy_log}"
-    );
-    assert!(
-        !destroy_log.lines().any(|line| line.starts_with("pod ")),
-        "destroy must not query or remove pods: {destroy_log}"
-    );
-    assert!(fs::read_to_string(&container_state).unwrap().is_empty());
-
-    fs::write(
-        &container_state,
-        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n",
-    )
-    .unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut destroy_foreign = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    destroy_foreign.args(["--cladding-dir", project_root.to_str().unwrap(), "destroy"]);
-    assert!(!destroy_foreign.output().unwrap().status.success());
-    let destroy_foreign_log = read_log(&podman_log);
-    assert!(
-        destroy_foreign_log.contains("container inspect --format {{json .}} demo-agent-instance")
-    );
-    assert!(!destroy_foreign_log.contains("rm -f demo-agent-instance"));
-    assert_eq!(
-        fs::read_to_string(&container_state).unwrap(),
-        "demo-agent-instance|unrelated|/tmp/foreign/.cladding|agent\n"
-    );
-
-    fs::write(
-        &container_state,
-        format!(
-            "demo-agent-instance|demo|{}|agent|running|present\n",
-            project_root.display()
-        ),
-    )
-    .unwrap();
-    fs::write(&podman_log, "").unwrap();
-    let mut destroy_inspect_failure = cli(
-        &root,
-        &bin_dir,
-        &podman_log,
-        &certificate_source,
-        &private_key_source,
-    );
-    destroy_inspect_failure
-        .args(["--cladding-dir", project_root.to_str().unwrap(), "destroy"])
-        .env("CLADDING_TEST_FAIL_CONTAINER_INSPECT", "1");
-    assert!(!destroy_inspect_failure.output().unwrap().status.success());
-    assert!(
-        !read_log(&podman_log).contains("rm -f demo-agent-instance"),
-        "inspection failure must not be treated as absence or ownership"
-    );
-    assert_eq!(
-        fs::read_to_string(&container_state).unwrap(),
-        format!(
-            "demo-agent-instance|demo|{}|agent|running|present\n",
-            project_root.display()
-        )
-    );
-
-    fs::write(&container_state, "").unwrap();
     fs::write(&socket_volume_state, "").unwrap();
     let parallel_logs = [root.join("parallel-a.log"), root.join("parallel-b.log")];
     let mut parallel_a = cli(

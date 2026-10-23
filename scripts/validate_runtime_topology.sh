@@ -39,9 +39,14 @@ workspace="$temp_root/workspace"
 project_root="$workspace/.cladding"
 project_name="topology$$"
 topology_image=localhost/cladding-runtime-topology:latest
-proxy="$project_name-proxy-instance"
-agent="$project_name-agent-instance"
-nw_sandbox="$project_name-nw-sandbox-instance"
+proxy=
+agent=
+nw_sandbox=
+run_pid=
+run_uuid=
+run_name=
+unrelated_volume=
+foreign_runtime_volume=
 cancel_ready="/tmp/${project_name}-cancel-ready"
 cancel_complete="/tmp/${project_name}-cancel-complete"
 cancel_client_pid="/tmp/${project_name}-cancel-client.pid"
@@ -84,6 +89,59 @@ require_no_project_resources() {
   fi
 }
 
+start_foreground_run() {
+  run_log=$1
+  (
+    cd "$workspace"
+    exec "$cladding_bin" --cladding-dir "$project_root" run -v -- \
+      /bin/sh -ec 'exec sleep 3600'
+  ) > "$run_log" 2>&1 &
+  run_pid=$!
+  attempt=0
+  while [ "$attempt" -lt 90 ]; do
+    run_uuid=$(sed -n 's/^run: //p' "$run_log" | head -n 1)
+    if [ -n "$run_uuid" ]; then
+      run_name="cladding-run-$run_uuid"
+      proxy="$run_name-proxy-instance"
+      agent="$run_name-agent-instance"
+      nw_sandbox="$run_name-nw-sandbox-instance"
+      if ! "$cladding_bin" ps | grep -F "$run_uuid  ready " >/dev/null; then
+        echo "cladding ps did not report run $run_uuid ready" >&2
+        cat "$run_log" >&2
+        return 1
+      fi
+      return 0
+    fi
+    if ! kill -0 "$run_pid" 2>/dev/null; then
+      wait "$run_pid" || true
+      run_pid=
+      cat "$run_log" >&2
+      echo "Cladding run exited before reporting readiness" >&2
+      return 1
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  cat "$run_log" >&2
+  echo "Cladding run did not report readiness within 90 seconds" >&2
+  return 1
+}
+
+stop_foreground_run() {
+  if [ -n "$run_uuid" ]; then
+    "$cladding_bin" stop --run "$run_uuid"
+  fi
+  if [ -n "$run_pid" ]; then
+    wait "$run_pid" || true
+  fi
+  run_pid=
+  run_uuid=
+  run_name=
+  proxy=
+  agent=
+  nw_sandbox=
+}
+
 cleanup() {
   status=$?
   trap - EXIT
@@ -100,6 +158,7 @@ cleanup() {
       cat "$temp_root/partial-startup.log" >&2
     fi
     for container in "$proxy" "$agent" "$nw_sandbox"; do
+      [ -n "$container" ] || continue
       if podman inspect "$container" >/dev/null 2>&1; then
         echo "Podman state for $container:" >&2
         podman inspect --format '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' \
@@ -142,7 +201,20 @@ cleanup() {
       } >> "$GITHUB_STEP_SUMMARY"
     fi
   fi
-  "$cladding_bin" --cladding-dir "$project_root" down >/dev/null 2>&1 || true
+  if [ -n "$run_uuid" ]; then
+    "$cladding_bin" stop --run "$run_uuid" >/dev/null 2>&1 || true
+  elif [ -n "$run_pid" ]; then
+    kill "$run_pid" 2>/dev/null || true
+  fi
+  if [ -n "$run_pid" ]; then
+    wait "$run_pid" 2>/dev/null || true
+  fi
+  if [ -n "$foreign_runtime_volume" ]; then
+    podman volume rm "$foreign_runtime_volume" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$unrelated_volume" ]; then
+    podman volume rm "$unrelated_volume" >/dev/null 2>&1 || true
+  fi
   rm -rf "$temp_root"
   exit "$status"
 }
@@ -270,14 +342,8 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 fi
 
 phase="start Cladding topology"
-if (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up --verbose) \
-  > "$temp_root/startup.log" 2>&1; then
-  cat "$temp_root/startup.log"
-else
-  status=$?
-  cat "$temp_root/startup.log" >&2
-  exit "$status"
-fi
+start_foreground_run "$temp_root/startup.log"
+cat "$temp_root/startup.log"
 require_volume_count inter-container-socket 3
 require_volume_count managed-mount 1
 
@@ -498,66 +564,70 @@ phase="verify shared managed mount communication"
 podman exec "$agent" sh -ec 'printf "agent-to-sandbox-ok\n" > /shared/topology-marker'
 test "$(podman exec "$nw_sandbox" cat /shared/topology-marker)" = agent-to-sandbox-ok
 
-# The expose and inject checks run after the topology assertions. The inject
-# lifecycle check stops and restarts the agent, so it must run last.
-phase="validate cladding expose forwarding and selection"
-python3 "$script_dir/validate_expose.py" \
-  --cladding-bin "$cladding_bin" \
-  --cladding-dir "$project_root" \
-  --agent "$agent"
-
+# Inject lifecycle validation restarts its agent, so run it before expose stops
+# the selected run.
 phase="validate cladding inject transport and lifecycle"
 python3 "$script_dir/validate_inject.py" \
   --cladding-bin "$cladding_bin" \
-  --cladding-dir "$project_root" \
+  --run "$run_uuid" \
   --agent "$agent"
 
-phase="remove a managed mount after configuration drift"
-managed_before_drift=$(volume_names managed-mount)
-test -n "$managed_before_drift"
+phase="prepare unrelated and foreign run volumes before selected stop"
 unrelated_volume="cladding-unrelated-$project_name"
-foreign_runtime_volume="cladding-foreign-runtime-$project_name"
+foreign_runtime_uuid="aaaaaaaa-1111-4222-8333-000000000001"
+foreign_runtime_volume="cladding-mount-foreign-$project_name"
 podman volume create "$unrelated_volume" >/dev/null
 podman volume create --opt nocopy \
-  --label "cladding=$project_name" \
+  --label "cladding=cladding-run-$foreign_runtime_uuid" \
   --label "project_root=$project_root" \
   --label cladding_resource=managed-mount \
-  --label "cladding_runtime_root=$project_root/runtime/foreign" \
+  --label "cladding_runtime_root=$project_root/runtime/runs/cladding-run-$foreign_runtime_uuid" \
   --label "cladding_mount_volume=$foreign_runtime_volume" \
+  --label "cladding_run_control_socket=/tmp/cladding-$foreign_runtime_uuid.sock" \
+  --label cladding_run_expected_roles=agent,proxy \
+  --label cladding_run_metadata_version=1 \
   "$foreign_runtime_volume" >/dev/null
-jq '.mounts = []' "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
-mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
-(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
-remaining_managed=$(volume_names managed-mount)
-if [ "$remaining_managed" != "$foreign_runtime_volume" ]; then
-  echo "down did not remove only the stale volume for this runtime: $remaining_managed" >&2
-  exit 1
-fi
+
+phase="validate expose forwarding, explicit run selection, and shutdown"
+python3 "$script_dir/validate_expose.py" \
+  --cladding-bin "$cladding_bin" \
+  --cladding-dir "$project_root" \
+  --run "$run_uuid" \
+  --stop-run \
+  --agent "$agent"
+wait "$run_pid" || true
+run_pid=
+run_uuid=
+run_name=
+proxy=
+agent=
+nw_sandbox=
 if ! podman volume exists "$unrelated_volume"; then
-  echo "down removed an unrelated external volume: $unrelated_volume" >&2
+  echo "stopping the selected run removed an unrelated user volume" >&2
   exit 1
 fi
 if ! podman volume exists "$foreign_runtime_volume"; then
-  echo "down removed a managed volume belonging to another runtime: $foreign_runtime_volume" >&2
+  echo "stopping the selected run removed a foreign run volume" >&2
   exit 1
 fi
-podman volume rm "$foreign_runtime_volume" >/dev/null
-podman volume rm "$unrelated_volume" >/dev/null
+remaining_managed=$(volume_names managed-mount)
+if [ "$remaining_managed" != "$foreign_runtime_volume" ]; then
+  echo "stopping the selected run removed the wrong managed volumes: $remaining_managed" >&2
+  exit 1
+fi
+podman volume rm "$foreign_runtime_volume" "$unrelated_volume" >/dev/null
+foreign_runtime_volume=
+unrelated_volume=
 require_no_project_resources
+
 test ! -e "$project_root/runtime/sockets"
 
 phase="configure and verify an explicit host workspace mount"
 jq '.mounts += [{"mount":"/host-project", "hostPath":"..", "targets":["agent", "nw-sandbox"]}]' \
   "$project_root/cladding.json" > "$project_root/cladding.json.tmp"
 mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
-if (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up --verbose) \
-  > "$temp_root/startup.log" 2>&1; then
-  cat "$temp_root/startup.log"
-else
-  status=$?
-  cat "$temp_root/startup.log" >&2
-  exit "$status"
-fi
+start_foreground_run "$temp_root/explicit-mount-startup.log"
+cat "$temp_root/explicit-mount-startup.log"
 for container in "$agent" "$nw_sandbox"; do
   if ! podman inspect "$container" | jq -e \
     '.[0].Mounts | any(.Destination == "/host-project")' >/dev/null; then
@@ -576,10 +646,15 @@ for container in "$agent" "$nw_sandbox"; do
      test ! -e /host-project/.cladding/config/proxy/daemon.toml'
 done
 for target in agent nw-sandbox; do
-  (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" \
-    exec --target "$target" sh -ec 'test "$PWD" = /host-project')
+  config_backup="$temp_root/cladding.json.$target"
+  cp "$project_root/cladding.json" "$config_backup"
+  printf 'not valid JSON\n' > "$project_root/cladding.json"
+  (cd "$workspace" && "$cladding_bin" exec --run "$run_uuid" \
+    --target "$target" sh -ec 'test "$PWD" = /host-project')
+  mv "$config_backup" "$project_root/cladding.json"
 done
-(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
+phase="stop the explicit-mount run and verify cleanup"
+stop_foreground_run
 require_no_project_resources
 
 phase="run a one-off command with shared project-state bind sources"
@@ -680,11 +755,9 @@ if [ -e "$project_root/runtime/runs/$failed_run_name" ]; then
 fi
 require_no_project_resources
 
-phase="fail after partial startup and clean owned resources"
-# The network sandbox starts after the proxy and agent, so this runtime option
-# fails after Cladding has created several owned resources.
+phase="fail after partial run startup and clean owned resources"
 startup_status=0
-(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up --verbose) \
+(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" run -v -- /bin/echo should-not-run) \
   > "$temp_root/partial-startup.log" 2>&1 || startup_status=$?
 if [ "$startup_status" -eq 0 ]; then
   echo "Cladding accepted the deliberate network-sandbox startup failure" >&2

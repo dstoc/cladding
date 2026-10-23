@@ -41,6 +41,7 @@ workspace="$temp_root/workspace"
 project_root="$workspace/.cladding"
 project_name="managedmounts$$"
 run_pid=
+run_uuid=
 phase="initialize fixture"
 
 managed_volume_names() {
@@ -81,24 +82,24 @@ require_copy_seed_marker_count() {
 exec_in() {
   target=$1
   shift
-  "$cladding_bin" --cladding-dir "$project_root" exec --target "$target" "$@"
+  "$cladding_bin" exec --run "$run_uuid" --target "$target" "$@"
 }
 
 cleanup() {
   status=$?
   trap - EXIT
-  if [ -n "$run_pid" ]; then
+  if [ -n "$run_uuid" ]; then
+    "$cladding_bin" stop --run "$run_uuid" >/dev/null 2>&1 || true
+  elif [ -n "$run_pid" ]; then
     kill "$run_pid" 2>/dev/null || true
+  fi
+  if [ -n "$run_pid" ]; then
     wait "$run_pid" 2>/dev/null || true
   fi
   if [ "$status" -ne 0 ]; then
     echo "managed mount validation failed during: $phase" >&2
     printf '::error title=Managed mount validation phase::%s (exit code %s)\n' \
       "$phase" "$status"
-  fi
-  if [ -d "$project_root" ]; then
-    (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down) \
-      >/dev/null 2>&1 || true
   fi
   rm -rf "$temp_root"
   exit "$status"
@@ -137,82 +138,23 @@ mv "$project_root/cladding.json.tmp" "$project_root/cladding.json"
 phase="build project images and initialize CA"
 (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" build)
 
-phase="start persistent runtime and create shared volumes"
-up_log="$temp_root/up.log"
-if (cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up -v) \
-  >"$up_log" 2>&1; then
-  cat "$up_log"
-else
-  up_status=$?
-  cat "$up_log" >&2
-  diagnostics=$(tail -n 30 "$up_log" | tr '\n' ' ' | sed 's/%/%25/g')
-  printf '::error title=Managed mount startup diagnostics::%s\n' "$diagnostics"
-  exit "$up_status"
-fi
-require_volume_count 2
-require_copy_seed_marker_count 1
-persistent_names=$(managed_volume_names)
-
-phase="verify copy seed, permissions, symlink, source isolation, and shared writes"
-exec_in agent sh -ec '
-  expected_uid=$(id -u)
-  expected_gid=$(id -g)
-  test "$(cat /snapshot/.dotfile)" = "original snapshot data"
-  test -L /snapshot/link
-  test "$(cat /snapshot/link)" = "original snapshot data"
-  test "$(stat -c %a /snapshot)" = 750
-  test "$(stat -c %a /snapshot/payload)" = 640
-  test "$(stat -c %a /snapshot/private)" = 600
-  test "$(stat -c %u /snapshot/private)" = "$expected_uid"
-  test "$(stat -c %g /snapshot/private)" = "$expected_gid"
-  test -r /snapshot/private
-  test ! -e /snapshot/host-after-start
-  printf "agent write\n" > /snapshot/from-agent
-  printf "agent tmpfs write\n" > /shared/from-agent
-'
-printf 'changed after startup\n' > "$workspace/snapshot-source/.dotfile"
-printf 'host change after startup\n' > "$workspace/snapshot-source/host-after-start"
-exec_in nw-sandbox sh -ec '
-  test "$(cat /snapshot/.dotfile)" = "original snapshot data"
-  test ! -e /snapshot/host-after-start
-  test "$(cat /snapshot/from-agent)" = "agent write"
-  printf "sandbox write\n" > /snapshot/from-sandbox
-  test "$(cat /shared/from-agent)" = "agent tmpfs write"
-  printf "sandbox tmpfs write\n" > /shared/from-sandbox
-'
-exec_in agent sh -ec '
-  test "$(cat /snapshot/from-sandbox)" = "sandbox write"
-  test "$(cat /shared/from-sandbox)" = "sandbox tmpfs write"
-'
-test "$(cat "$workspace/snapshot-source/.dotfile")" = "changed after startup"
-test ! -e "$workspace/snapshot-source/from-agent"
-test ! -e "$workspace/snapshot-source/from-sandbox"
-test "$(cat "$workspace/snapshot-source/payload")" = "permission fixture"
-
-phase="remove persistent runtime volumes on down"
-(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
-require_volume_count 0
-require_copy_seed_marker_count 0
-
-phase="reseed copy snapshot and clear tmpfs on a new runtime"
-(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" up)
-require_volume_count 2
-require_copy_seed_marker_count 1
-exec_in agent sh -ec '
-  test "$(cat /snapshot/.dotfile)" = "changed after startup"
-  test -f /snapshot/host-after-start
-  test ! -e /shared/from-agent
-'
-(cd "$workspace" && "$cladding_bin" --cladding-dir "$project_root" down)
-require_volume_count 0
-require_copy_seed_marker_count 0
-
 phase="create run-scoped volumes and clean them after successful command"
 rm -f "$workspace/run-ready" "$workspace/run-exit"
 (
   cd "$workspace"
   "$cladding_bin" --cladding-dir "$project_root" run -- sh -ec '
-    test -f /snapshot/host-after-start
+    expected_uid=$(id -u)
+    expected_gid=$(id -g)
+    test "$(cat /snapshot/.dotfile)" = "original snapshot data"
+    test -L /snapshot/link
+    test "$(cat /snapshot/link)" = "original snapshot data"
+    test "$(stat -c %a /snapshot)" = 750
+    test "$(stat -c %a /snapshot/payload)" = 640
+    test "$(stat -c %a /snapshot/private)" = 600
+    test "$(stat -c %u /snapshot/private)" = "$expected_uid"
+    test "$(stat -c %g /snapshot/private)" = "$expected_gid"
+    test -r /snapshot/private
+    test ! -e /snapshot/host-after-start
     test ! -e /shared/from-agent
     printf "one-off write\n" > /snapshot/from-run
     touch run-ready
@@ -236,16 +178,41 @@ if [ ! -f "$workspace/run-ready" ]; then
   echo "one-off command did not reach its readiness signal" >&2
   exit 1
 fi
+run_uuid=$(sed -n 's/^run: //p' "$temp_root/run-success.log" | head -n 1)
+if [ -z "$run_uuid" ]; then
+  echo "one-off run did not report its ready UUID" >&2
+  exit 1
+fi
 require_volume_count 2
-run_names=$(managed_volume_names)
-for name in $run_names; do
-  case " $persistent_names " in
-    *" $name "*) echo "one-off runtime reused persistent volume name: $name" >&2; exit 1 ;;
-  esac
-done
+phase="verify run-scoped copy snapshots and shared temporary mounts"
+printf 'changed after startup\n' > "$workspace/snapshot-source/.dotfile"
+printf 'host change after startup\n' > "$workspace/snapshot-source/host-after-start"
+exec_in agent sh -ec '
+  test "$(cat /snapshot/.dotfile)" = "original snapshot data"
+  test ! -e /snapshot/host-after-start
+  printf "agent write\n" > /snapshot/from-agent
+  printf "agent tmpfs write\n" > /shared/from-agent
+'
+exec_in nw-sandbox sh -ec '
+  test "$(cat /snapshot/.dotfile)" = "original snapshot data"
+  test ! -e /snapshot/host-after-start
+  test "$(cat /snapshot/from-agent)" = "agent write"
+  printf "sandbox write\n" > /snapshot/from-sandbox
+  test "$(cat /shared/from-agent)" = "agent tmpfs write"
+  printf "sandbox tmpfs write\n" > /shared/from-sandbox
+'
+exec_in agent sh -ec '
+  test "$(cat /snapshot/from-sandbox)" = "sandbox write"
+  test "$(cat /shared/from-sandbox)" = "sandbox tmpfs write"
+'
+test "$(cat "$workspace/snapshot-source/.dotfile")" = "changed after startup"
+test ! -e "$workspace/snapshot-source/from-agent"
+test ! -e "$workspace/snapshot-source/from-sandbox"
+test "$(cat "$workspace/snapshot-source/payload")" = "permission fixture"
 touch "$workspace/run-exit"
 wait "$run_pid"
 run_pid=
+run_uuid=
 require_volume_count 0
 
 phase="remove run-scoped volumes when the command fails"

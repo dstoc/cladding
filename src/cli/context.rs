@@ -4,8 +4,6 @@ use cladding::config::{
     load_cladding_config_v2_from_str,
 };
 use cladding::error::{Error, Result};
-use cladding::fs_utils::canonicalize_path;
-use cladding::podman::{ContainerSnapshot, list_container_snapshot};
 use cladding::runtime::{RuntimeMount, RuntimeMountSource, RuntimeSpec};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -179,7 +177,12 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
 fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut current = start;
     loop {
-        if current.join(".git").exists() {
+        let marker = current.join(".git");
+        let is_repository = marker.is_dir() && marker.join("config").is_file()
+            || marker.is_file()
+                && std::fs::read_to_string(&marker)
+                    .is_ok_and(|contents| contents.starts_with("gitdir: "));
+        if is_repository {
             return Some(current.to_path_buf());
         }
         current = current.parent()?;
@@ -237,7 +240,6 @@ pub(super) fn resolve_project_root(
                 eprintln!("hint: run 'cladding init' from the project directory first");
                 Err(Error::message("missing initialized .cladding project"))
             }
-            CommandSpec::Ps => Ok(cwd.join(".cladding")),
             _ => {
                 eprintln!(
                     "error: no .cladding directory found in {} or any parent directory",
@@ -248,72 +250,6 @@ pub(super) fn resolve_project_root(
             }
         },
     }
-}
-
-pub(super) struct ProjectRuntimeStatus {
-    pub(super) current_project_root: String,
-    pub(super) already_running: bool,
-}
-
-fn current_project_root(context: &Context) -> Result<String> {
-    Ok(canonicalize_path(&context.project_root)?
-        .display()
-        .to_string())
-}
-
-pub(super) fn project_runtime_status(
-    context: &Context,
-    config: &ExecutionConfig,
-    verbose: bool,
-    quiet_helpers: bool,
-) -> Result<ProjectRuntimeStatus> {
-    let containers = list_container_snapshot(verbose, quiet_helpers)?;
-    project_runtime_status_from_snapshot(context, config, &containers)
-}
-
-pub(super) fn project_runtime_status_from_snapshot(
-    context: &Context,
-    config: &ExecutionConfig,
-    containers: &ContainerSnapshot,
-) -> Result<ProjectRuntimeStatus> {
-    let current_project_root = current_project_root(context)?;
-
-    let mut conflicting_roots = Vec::new();
-    let mut already_running = false;
-    for project in containers.running_projects() {
-        if project.name != config.name {
-            continue;
-        }
-
-        let normalized_root = canonicalize_path(Path::new(&project.project_root))
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| project.project_root.clone());
-
-        if normalized_root == current_project_root {
-            already_running = true;
-        } else {
-            conflicting_roots.push(project.project_root);
-        }
-    }
-
-    if !conflicting_roots.is_empty() {
-        eprintln!(
-            "error: cladding project '{}' is already running from a different PROJECT_ROOT",
-            config.name
-        );
-        eprintln!("current PROJECT_ROOT: {current_project_root}");
-        for root in conflicting_roots {
-            eprintln!("running PROJECT_ROOT: {root}");
-        }
-        return Err(Error::message(
-            "project already running from different PROJECT_ROOT",
-        ));
-    }
-
-    Ok(ProjectRuntimeStatus {
-        current_project_root,
-        already_running,
-    })
 }
 
 #[cfg(test)]
@@ -424,7 +360,7 @@ mod tests {
         let cwd = temp.join("project/src");
         fs::create_dir_all(&project_root).unwrap();
         fs::create_dir_all(&cwd).unwrap();
-        let command = CommandSpec::Up { verbose: false };
+        let command = CommandSpec::Build;
 
         assert_eq!(
             resolve_project_root(&cwd, None, &command).unwrap(),
@@ -557,6 +493,11 @@ mod tests {
         let checkout = temp.join("checkout");
         let cwd = checkout.join("src/module");
         fs::create_dir_all(checkout.join(".git")).unwrap();
+        fs::write(
+            checkout.join(".git/config"),
+            "[core]\nrepositoryformatversion = 0\n",
+        )
+        .unwrap();
         fs::create_dir_all(&cwd).unwrap();
 
         assert_eq!(resolve_workspace_root(&cwd), checkout);

@@ -49,7 +49,7 @@ Both types mount the live host directory. Writes through a `bind` affect the hos
 
 ### `copy`
 
-`copy` takes a snapshot of the host directory into a Cladding-managed disposable volume. The snapshot includes dotfiles and preserves symlinks and permission bits. Containers can change the snapshot without changing the host source. When one `copy` declaration targets multiple containers, they share that volume and see each other's writes. Later host changes do not appear in the running runtime. Cladding removes the volume on `down` or after `run` ends. Seeding takes time and disk space proportional to the source tree.
+`copy` takes a snapshot of the host directory into a Cladding-managed disposable volume. The snapshot includes dotfiles and preserves symlinks and permission bits. Containers can change the snapshot without changing the host source. When one `copy` declaration targets multiple containers, they share that volume and see each other's writes. Later host changes do not appear in the running runtime. Cladding removes the volume when the owning run ends. Seeding takes time and disk space proportional to the source tree.
 
 Cladding does not support `overlay`. Podman's normal overlay mount gives each container a separate writable layer, so it cannot provide shared writable state. Use `copy` for a shared writable snapshot.
 
@@ -59,7 +59,7 @@ Cladding does not support `overlay`. Podman's normal overlay mount gives each co
 
 ### `volume`
 
-`volume` uses a Podman named volume. Cladding passes the name to Podman unchanged and does not remove this volume during `down` or after `run`.
+`volume` uses a Podman named volume. Cladding passes the name to Podman unchanged and does not remove this volume when a run ends or during orphan recovery.
 
 ## Examples
 

@@ -13,6 +13,8 @@ pub struct RuntimeSpec {
     pub nw_sandbox: Option<RuntimeComponent>,
     pub fs_sandbox: Option<RuntimeComponent>,
     pub custom_mount_sources: Vec<RuntimeMountSourceSnapshot>,
+    pub run_control_socket: Option<PathBuf>,
+    pub run_expected_roles: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

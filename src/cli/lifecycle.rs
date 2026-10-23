@@ -1,6 +1,8 @@
 use super::DEFAULT_COMPONENT_IMAGE;
 use super::check::check_project_readiness;
-use super::context::{Context, project_runtime_status_from_snapshot};
+use super::context::Context;
+use super::control;
+use super::selection::{SelectedRun, same_expected_roles, verified_control_socket_path};
 use anyhow::Context as _;
 use cladding::assets::{materialize_config, write_embedded_tools, write_proxy_startup_script};
 use cladding::config::{
@@ -10,9 +12,8 @@ use cladding::error::{Error, Result};
 use cladding::fs_utils::{is_broken_symlink, path_is_symlink};
 use cladding::identity::invoking_uid;
 use cladding::podman::{
-    RuntimeResourceAttempts, initialize_baffle_ca, list_container_snapshot, list_running_projects,
-    podman_build_image, podman_build_proxy_image, podman_required, runtime_cleanup,
-    runtime_cleanup_failed_start, runtime_cleanup_normal, runtime_cleanup_owned_report,
+    RuntimeResourceAttempts, initialize_baffle_ca, list_container_snapshot, list_discovered_runs,
+    podman_build_image, podman_build_proxy_image, podman_required, runtime_cleanup_owned_report,
     runtime_create, runtime_inventory_from_snapshot,
 };
 use cladding::runtime::RuntimeSpec;
@@ -292,28 +293,7 @@ pub(super) fn cmd_init(context: &Context, name_override: Option<&str>) -> Result
     Ok(())
 }
 
-pub(super) fn cmd_up(context: &Context, verbose: bool) -> Result<()> {
-    let preparation = cladding::runtime_metrics::phase("runtime startup");
-    let config = context.load_config()?;
-    let spec = context.runtime_spec(&config)?;
-    drop(preparation);
-    let mut attempts = RuntimeResourceAttempts::for_spec(&spec);
-    let mut runtime_create_attempted = false;
-    cmd_up_inner(
-        context,
-        RuntimeStart {
-            config: &config,
-            spec: &spec,
-            attempts: &mut attempts,
-        },
-        verbose,
-        false,
-        false,
-        &mut runtime_create_attempted,
-    )
-}
-
-pub(super) fn cmd_up_ephemeral(
+pub(super) fn start_run_runtime(
     context: &Context,
     config: &ExecutionConfig,
     spec: &RuntimeSpec,
@@ -321,104 +301,35 @@ pub(super) fn cmd_up_ephemeral(
     verbose: bool,
 ) -> (Result<()>, bool) {
     let mut runtime_create_attempted = false;
-    let result = cmd_up_inner(
-        context,
-        RuntimeStart {
-            config,
-            spec,
-            attempts,
-        },
-        verbose,
-        true,
-        !verbose,
-        &mut runtime_create_attempted,
-    );
-    (result, runtime_create_attempted)
-}
-
-fn cmd_up_inner(
-    context: &Context,
-    runtime: RuntimeStart<'_>,
-    verbose: bool,
-    fail_if_already_running: bool,
-    quiet_helpers: bool,
-    runtime_create_attempted: &mut bool,
-) -> Result<()> {
-    let direct_startup =
-        (!fail_if_already_running).then(|| cladding::runtime_metrics::phase("runtime startup"));
-    let preparation =
-        fail_if_already_running.then(|| cladding::runtime_metrics::phase("preparation/preflight"));
-    let containers = list_container_snapshot(verbose, quiet_helpers)?;
-    let status = project_runtime_status_from_snapshot(context, runtime.config, &containers)?;
-    let inventory = runtime_inventory_from_snapshot(runtime.spec, &containers);
-
-    if status.already_running && inventory.is_fully_running() {
-        if fail_if_already_running {
+    let result = (|| {
+        let preparation = cladding::runtime_metrics::phase("preparation/preflight");
+        let quiet_helpers = !verbose;
+        let containers = list_container_snapshot(verbose, quiet_helpers)?;
+        let inventory = runtime_inventory_from_snapshot(spec, &containers);
+        if !inventory.is_empty() {
             eprintln!(
-                "error: one-off instance '{}' collides with existing runtime resources",
-                runtime.config.name
+                "error: one-off instance '{}' has incomplete or stopped runtime resources",
+                config.name
             );
-            return Err(Error::message("one-off runtime name collision"));
-        }
-        println!(
-            "already running: {} ({})",
-            runtime.config.name, status.current_project_root
-        );
-        return Ok(());
-    }
-
-    if !inventory.is_empty() {
-        eprintln!(
-            "error: cladding project '{}' has an incomplete or stopped runtime",
-            runtime.config.name
-        );
-        eprintln!("existing runtime resources:");
-        for resource in inventory.resources {
-            eprintln!("  {} {} ({})", resource.kind, resource.name, resource.state);
-        }
-        eprintln!("hint: run 'cladding down' before running 'cladding up' again");
-        return Err(Error::message("incomplete or stopped runtime"));
-    }
-
-    check_project_readiness(
-        context,
-        runtime.config,
-        runtime.spec,
-        verbose,
-        quiet_helpers,
-    )?;
-    if !fail_if_already_running {
-        prepare_runtime_files(&context.runtime_root)?;
-        fs::create_dir_all(context.runtime_root.join("runtime/empty-mask"))
-            .with_context(|| "failed to create runtime empty-mask directory")?;
-    }
-    drop(preparation);
-    let startup =
-        fail_if_already_running.then(|| cladding::runtime_metrics::phase("runtime startup"));
-    runtime.spec.validate_custom_mount_sources()?;
-    *runtime_create_attempted = true;
-    let startup_result = runtime_create(runtime.spec, runtime.attempts, verbose, quiet_helpers);
-    drop(startup);
-    drop(direct_startup);
-    if let Err(startup_error) = startup_result {
-        if !fail_if_already_running {
-            let _cleanup = cladding::runtime_metrics::phase("cleanup");
-            if let Err(cleanup_error) =
-                runtime_cleanup_failed_start(runtime.spec, runtime.attempts, verbose, quiet_helpers)
-            {
-                eprintln!("error: cleanup after failed 'cladding up' failed: {cleanup_error}");
+            for resource in inventory.resources {
+                eprintln!("  {} {} ({})", resource.kind, resource.name, resource.state);
             }
+            return Err(Error::message("incomplete or stopped runtime"));
         }
-        return Err(startup_error);
-    }
+        check_project_readiness(context, config, spec, verbose, quiet_helpers)?;
+        drop(preparation);
 
-    Ok(())
-}
-
-struct RuntimeStart<'a> {
-    config: &'a ExecutionConfig,
-    spec: &'a RuntimeSpec,
-    attempts: &'a mut RuntimeResourceAttempts,
+        let startup = cladding::runtime_metrics::phase("runtime startup");
+        spec.validate_custom_mount_sources()?;
+        runtime_create_attempted = true;
+        let result = runtime_create(spec, attempts, verbose, quiet_helpers);
+        drop(startup);
+        if let Err(startup_error) = result {
+            return Err(startup_error);
+        }
+        Ok(())
+    })();
+    (result, runtime_create_attempted)
 }
 
 pub(super) fn prepare_run_runtime_root(runtime_root: &std::path::Path) -> Result<()> {
@@ -439,14 +350,7 @@ fn prepare_baffle_runtime(project_root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn cmd_down(context: &Context, verbose: bool) -> Result<()> {
-    let _phase = cladding::runtime_metrics::phase("runtime teardown");
-    let config = context.load_config()?;
-    let spec = context.runtime_spec(&config)?;
-    runtime_cleanup_normal(&spec, verbose, false)
-}
-
-pub(super) fn cmd_down_ephemeral(
+pub(super) fn cleanup_run_runtime(
     spec: &RuntimeSpec,
     attempts: &RuntimeResourceAttempts,
     verbose: bool,
@@ -455,43 +359,339 @@ pub(super) fn cmd_down_ephemeral(
     (report.result, report.runtime_root_safe_to_remove)
 }
 
-pub(super) fn cmd_destroy(context: &Context) -> Result<()> {
-    let config = context.load_config()?;
-    let spec = context.runtime_spec(&config)?;
-    let mut cleanup_error = None;
-    record_cleanup_result(&mut cleanup_error, runtime_cleanup(&spec, false, false));
-
-    match cleanup_error {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
-}
-
-pub(super) fn cmd_ps(_context: &Context) -> Result<()> {
+pub(super) fn cmd_ps() -> Result<()> {
     podman_required("podman (required for cladding ps)")?;
-    let projects = list_running_projects(false, false)?;
-    if projects.is_empty() {
-        println!("no running cladding projects");
+    let runs = list_discovered_runs(false, false)?;
+    if runs.is_empty() {
+        println!("no cladding runs");
         return Ok(());
     }
 
-    println!("running cladding projects:");
-    for project in projects {
+    println!("UUID  STATE  PROJECT  COMPONENTS");
+    for run in runs {
+        let observed = run
+            .components
+            .iter()
+            .map(|component| format!("{}:{}", component.role, component.state))
+            .collect::<Vec<_>>()
+            .join(",");
+        let state = if run.malformed.is_some() {
+            "unknown (malformed)".to_string()
+        } else if let Ok(socket) = verified_control_socket_path(&run) {
+            match control::status(&socket, &run.uuid) {
+                Ok(status) => {
+                    let missing = run
+                        .expected_roles
+                        .as_deref()
+                        .map(|expected| {
+                            expected
+                                .split(',')
+                                .filter(|role| {
+                                    !run.components
+                                        .iter()
+                                        .any(|component| component.role == *role)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if !same_expected_roles(run.expected_roles.as_deref(), &status.expected_roles) {
+                        "unknown (supervisor metadata mismatch)".to_string()
+                    } else if !missing.is_empty() {
+                        if status.state == "ready" {
+                            format!("unknown (missing {})", missing.join(","))
+                        } else {
+                            format!("{} (missing {})", status.state, missing.join(","))
+                        }
+                    } else if status.state == "ready"
+                        && run
+                            .components
+                            .iter()
+                            .any(|component| component.state != "running")
+                    {
+                        "unknown (component stopped)".to_string()
+                    } else {
+                        status.state
+                    }
+                }
+                Err(_) if run_lock_is_released(&run) => "orphaned".to_string(),
+                Err(_) => "unknown/unreachable".to_string(),
+            }
+        } else if run.control_socket.is_some() {
+            "unknown (invalid supervisor endpoint)".to_string()
+        } else if run_lock_is_released(&run) {
+            "orphaned".to_string()
+        } else {
+            "unknown/unreachable".to_string()
+        };
         println!(
-            "{}  {}  (containers: {})",
-            project.name, project.project_root, project.container_count
+            "{}  {}  {}  {}",
+            run.uuid,
+            state,
+            run.project_root.as_deref().unwrap_or("unknown"),
+            if observed.is_empty() {
+                "none"
+            } else {
+                &observed
+            }
         );
     }
 
     Ok(())
 }
 
-fn record_cleanup_result(target: &mut Option<Error>, result: Result<()>) {
-    if let Err(err) = result
-        && target.is_none()
+fn run_lock_is_released(run: &cladding::podman::DiscoveredRun) -> bool {
+    let Some(root) = run.project_root.as_deref() else {
+        return false;
+    };
+    let root = std::path::Path::new(root);
+    if !root.is_absolute()
+        || root.file_name().is_none_or(|name| name != ".cladding")
+        || std::fs::canonicalize(root).ok().as_deref() != Some(root)
     {
-        *target = Some(err);
+        return false;
     }
+    let runtime_root = root.join("runtime/runs").join(&run.name);
+    match control::acquire_recovery_lock(&runtime_root) {
+        Ok(lock) => {
+            drop(lock);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+pub(super) fn cmd_stop_selected(selected: &SelectedRun) -> Result<()> {
+    if selected.control.is_none() {
+        return Err(Error::message(
+            "cannot stop the selected run because its supervisor is unreachable",
+        ));
+    }
+    let socket = selected
+        .run
+        .control_socket
+        .as_deref()
+        .ok_or_else(|| Error::message("selected run has no supervisor control endpoint"))?;
+    control::stop(
+        std::path::Path::new(socket),
+        selected.uuid(),
+        std::time::Duration::from_secs(120),
+    )?;
+    println!("stopped run {}", selected.uuid());
+    Ok(())
+}
+
+pub(super) fn cmd_destroy_selected(selected: &SelectedRun) -> Result<()> {
+    if selected
+        .control
+        .as_ref()
+        .is_some_and(|control| control.state != "stopped")
+    {
+        return Err(Error::message(format!(
+            "refusing to destroy run {} while its supervisor is {}",
+            selected.uuid(),
+            selected.control.as_ref().expect("checked state").state
+        )));
+    }
+    let project_root = selected
+        .run
+        .project_root
+        .as_deref()
+        .ok_or_else(|| Error::message("selected run has no project identity"))?;
+    let project_root = std::path::Path::new(project_root);
+    if !project_root.is_absolute()
+        || project_root
+            .file_name()
+            .is_none_or(|name| name != ".cladding")
+    {
+        return Err(Error::message(
+            "refusing recovery because the project identity is invalid",
+        ));
+    }
+    let canonical_root = std::fs::canonicalize(project_root).map_err(|error| {
+        Error::message(format!("failed to verify run project identity: {error}"))
+    })?;
+    if canonical_root != project_root {
+        return Err(Error::message(
+            "refusing recovery because the project identity uses a symlink",
+        ));
+    }
+    let runtime_root = project_root.join("runtime/runs").join(&selected.run.name);
+    let _lifetime_lock = control::acquire_recovery_lock(&runtime_root)?;
+
+    let fresh_runs = list_discovered_runs(false, false)?;
+    let fresh_run = fresh_runs
+        .into_iter()
+        .find(|run| run.uuid == selected.run.uuid)
+        .ok_or_else(|| Error::message("selected run resources are no longer present"))?;
+    verify_run_inventory_unchanged(&selected.run, &fresh_run)?;
+    for component in fresh_run
+        .components
+        .iter()
+        .chain(&fresh_run.helper_containers)
+    {
+        let id = component
+            .id
+            .as_deref()
+            .ok_or_else(|| Error::message("run-owned container has no immutable ID"))?;
+        let status = std::process::Command::new("podman")
+            .args(["container", "rm", "--force", id])
+            .status()
+            .map_err(|error| {
+                Error::message(format!("failed to remove run container {id}: {error}"))
+            })?;
+        cladding::podman::ensure_success(status, "podman container rm")?;
+    }
+    for volume in &fresh_run.volumes {
+        remove_run_owned_volume(
+            volume,
+            &selected.run.name,
+            project_root,
+            &runtime_root,
+            selected
+                .run
+                .control_socket
+                .as_deref()
+                .ok_or_else(|| Error::message("selected run has no supervisor endpoint"))?,
+            selected
+                .run
+                .expected_roles
+                .as_deref()
+                .ok_or_else(|| Error::message("selected run has no expected component metadata"))?,
+        )?;
+    }
+    if let Some(socket) = selected.run.control_socket.as_deref() {
+        control::remove_stale_socket(std::path::Path::new(socket), &runtime_root, selected.uuid())?;
+    }
+    std::fs::remove_dir_all(&runtime_root).map_err(|error| {
+        Error::message(format!(
+            "run containers were removed but private run cleanup failed at {}: {error}",
+            runtime_root.display()
+        ))
+    })?;
+    println!("destroyed orphaned run {}", selected.uuid());
+    Ok(())
+}
+
+fn remove_run_owned_volume(
+    volume_name: &str,
+    run_name: &str,
+    project_root: &std::path::Path,
+    runtime_root: &std::path::Path,
+    control_socket: &str,
+    expected_roles: &str,
+) -> Result<()> {
+    let output = std::process::Command::new("podman")
+        .args(["volume", "inspect", volume_name])
+        .output()
+        .map_err(|error| {
+            Error::message(format!(
+                "failed to inspect run volume {volume_name}: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(Error::message(format!(
+            "failed to inspect run volume {volume_name}"
+        )));
+    }
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        Error::message(format!(
+            "podman returned invalid inspection for volume {volume_name}"
+        ))
+    })?;
+    let item = document
+        .as_array()
+        .and_then(|items| items.first())
+        .or_else(|| document.as_object().map(|_| &document))
+        .ok_or_else(|| {
+            Error::message(format!(
+                "podman returned no inspection for volume {volume_name}"
+            ))
+        })?;
+    let labels = item
+        .get("Labels")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            Error::message(format!("run volume {volume_name} has no ownership labels"))
+        })?;
+    let label = |key: &str| labels.get(key).and_then(serde_json::Value::as_str);
+    let resource = label("cladding_resource").unwrap_or_default();
+    let is_owned_socket = resource == "inter-container-socket"
+        && label("cladding_socket_volume") == Some(volume_name);
+    let runtime_root_text = runtime_root.to_string_lossy();
+    let project_root_text = project_root.to_string_lossy();
+    let is_owned_mount = resource == "managed-mount"
+        && label("cladding_mount_volume") == Some(volume_name)
+        && label("cladding_runtime_root") == Some(runtime_root_text.as_ref());
+    if label("cladding") != Some(run_name)
+        || label("project_root") != Some(project_root_text.as_ref())
+        || label("cladding_run_metadata_version") != Some("1")
+        || label("cladding_run_control_socket") != Some(control_socket)
+        || label("cladding_run_expected_roles") != Some(expected_roles)
+        || !(is_owned_socket || is_owned_mount)
+    {
+        return Err(Error::message(format!(
+            "refusing to remove volume {volume_name} because its ownership labels do not match this run"
+        )));
+    }
+    let status = std::process::Command::new("podman")
+        .args(["volume", "rm", volume_name])
+        .status()
+        .map_err(|error| {
+            Error::message(format!(
+                "failed to remove run volume {volume_name}: {error}"
+            ))
+        })?;
+    cladding::podman::ensure_success(status, "podman volume rm")
+}
+
+fn verify_run_inventory_unchanged(
+    selected: &cladding::podman::DiscoveredRun,
+    current: &cladding::podman::DiscoveredRun,
+) -> Result<()> {
+    if current.malformed.is_some() {
+        return Err(Error::message(
+            "refusing recovery because the current run inventory is malformed",
+        ));
+    }
+    let selected_components_match = selected.components.len() == current.components.len()
+        && selected.components.iter().all(|selected_component| {
+            current
+                .components
+                .iter()
+                .find(|component| component.role == selected_component.role)
+                .and_then(|component| component.id.as_deref())
+                == selected_component.id.as_deref()
+        });
+    let selected_helpers_match = selected.helper_containers.len()
+        == current.helper_containers.len()
+        && selected.helper_containers.iter().all(|selected_helper| {
+            current
+                .helper_containers
+                .iter()
+                .find(|helper| {
+                    helper.role == selected_helper.role && helper.name == selected_helper.name
+                })
+                .and_then(|helper| helper.id.as_deref())
+                == selected_helper.id.as_deref()
+        });
+    let mut selected_volumes = selected.volumes.clone();
+    let mut current_volumes = current.volumes.clone();
+    selected_volumes.sort();
+    current_volumes.sort();
+    if current.uuid != selected.uuid
+        || current.project_root != selected.project_root
+        || current.metadata_version != selected.metadata_version
+        || current.control_socket != selected.control_socket
+        || current.expected_roles != selected.expected_roles
+        || !selected_components_match
+        || !selected_helpers_match
+        || selected_volumes != current_volumes
+    {
+        return Err(Error::message(
+            "refusing recovery because the run inventory changed after selection",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -526,6 +726,56 @@ mod tests {
             proxy: None,
             mounts: Vec::<ResolvedMountConfig>::new(),
         }
+    }
+
+    fn discovered_run_for_recovery() -> cladding::podman::DiscoveredRun {
+        let uuid = "aabbccdd-1111-4222-8333-123456789abc";
+        cladding::podman::DiscoveredRun {
+            uuid: uuid.to_string(),
+            name: format!("cladding-run-{uuid}"),
+            project_root: Some("/tmp/project/.cladding".to_string()),
+            metadata_version: Some("1".to_string()),
+            control_socket: Some(format!(
+                "/tmp/project/.cladding/runtime/runs/cladding-run-{uuid}/control.sock"
+            )),
+            expected_roles: Some("agent,proxy".to_string()),
+            components: ["agent", "proxy"]
+                .into_iter()
+                .map(|role| cladding::podman::RunComponent {
+                    role: role.to_string(),
+                    id: Some(format!("immutable-{role}-id")),
+                    name: format!("cladding-run-{uuid}-{role}-instance"),
+                    state: "exited".to_string(),
+                    cwd_mappings: Some("[]".to_string()),
+                })
+                .collect(),
+            helper_containers: Vec::new(),
+            volumes: vec!["run-managed-volume".to_string()],
+            malformed: None,
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_container_replacement_after_selection() {
+        let selected = discovered_run_for_recovery();
+        let mut current = selected.clone();
+        current.components[0].id = Some("replacement-agent-id".to_string());
+
+        let error = verify_run_inventory_unchanged(&selected, &current).unwrap_err();
+
+        assert!(error.to_string().contains("changed after selection"));
+    }
+
+    #[test]
+    fn recovery_rejects_resource_metadata_and_volume_changes() {
+        let selected = discovered_run_for_recovery();
+        let mut replaced_identity = selected.clone();
+        replaced_identity.project_root = Some("/tmp/other/.cladding".to_string());
+        assert!(verify_run_inventory_unchanged(&selected, &replaced_identity).is_err());
+
+        let mut changed_volumes = selected.clone();
+        changed_volumes.volumes.push("foreign-volume".to_string());
+        assert!(verify_run_inventory_unchanged(&selected, &changed_volumes).is_err());
     }
 
     fn build(context: &str, feature: &str) -> ImageBuildConfig {

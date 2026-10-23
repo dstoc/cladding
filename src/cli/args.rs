@@ -1,4 +1,3 @@
-use cladding::config::ExecutionConfig;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use std::net::IpAddr;
 #[cfg(test)]
@@ -16,6 +15,9 @@ pub(super) struct Cli {
     /// Load config from FILE, or from stdin when FILE is `-`
     #[arg(long, global = true, value_name = "FILE")]
     pub(super) config: Option<PathBuf>,
+    /// Select a run by UUID, internal name, or unique substring
+    #[arg(long, global = true, value_name = "SELECTOR")]
+    pub(super) run: Option<String>,
     #[command(subcommand)]
     pub(super) command: Option<CommandSpec>,
 }
@@ -28,21 +30,11 @@ pub(super) enum CommandSpec {
     Init { name: Option<String> },
     /// Check project requirements, including the Baffle CA
     Check,
-    /// Validate requirements and start the proxy and enabled execution containers
-    Up {
-        /// Show Podman commands before executing them
-        #[arg(short, long)]
-        verbose: bool,
-    },
-    /// Stop the system
-    Down {
-        /// Show Podman commands before executing them
-        #[arg(short, long)]
-        verbose: bool,
-    },
-    /// Force-remove running containers
+    /// Recover an orphaned run after verifying its supervisor ownership is gone
     Destroy,
-    /// Run a command in a temporary runtime for an initialized project, then remove the runtime
+    /// Ask the selected run supervisor to stop and confirm cleanup
+    Stop,
+    /// Start and own a UUID-scoped run in the foreground
     Run {
         /// Show startup and teardown diagnostics
         #[arg(short, long)]
@@ -97,7 +89,7 @@ pub(super) enum CommandSpec {
     },
     /// Reload active file-backed Baffle sessions from their native TOML files
     ReloadProxy,
-    /// Show running cladding projects
+    /// List discovered Cladding runs on the selected Podman connection
     Ps,
     /// Publish an agent TCP port to the host
     Expose(ExposeArgs),
@@ -107,7 +99,20 @@ pub(super) enum CommandSpec {
 
 impl CommandSpec {
     pub(super) fn uses_config(&self) -> bool {
-        !matches!(self, Self::Init { .. } | Self::Ps)
+        matches!(self, Self::Build | Self::Check | Self::Run { .. })
+    }
+
+    pub(super) fn selects_run(&self) -> bool {
+        matches!(
+            self,
+            Self::Destroy
+                | Self::Stop
+                | Self::Exec { .. }
+                | Self::Logs { .. }
+                | Self::ReloadProxy
+                | Self::Expose(_)
+                | Self::Inject(_)
+        )
     }
 }
 
@@ -200,30 +205,6 @@ impl ExecTarget {
             Self::FsSandbox => "fs-sandbox",
         }
     }
-
-    pub(super) fn enabled(self, config: &ExecutionConfig) -> bool {
-        match self {
-            Self::Agent => true,
-            Self::NwSandbox => config.nw_sandbox_enabled(),
-            Self::FsSandbox => config.fs_sandbox_enabled(),
-        }
-    }
-
-    pub(super) fn mount_target(self) -> cladding::config::MountTarget {
-        match self {
-            Self::Agent => cladding::config::MountTarget::Agent,
-            Self::NwSandbox => cladding::config::MountTarget::NwSandbox,
-            Self::FsSandbox => cladding::config::MountTarget::FsSandbox,
-        }
-    }
-
-    pub(super) fn other_sandbox(self) -> Option<Self> {
-        match self {
-            Self::Agent => None,
-            Self::NwSandbox => Some(Self::FsSandbox),
-            Self::FsSandbox => Some(Self::NwSandbox),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -242,14 +223,6 @@ impl LogsTarget {
             Self::Proxy => "proxy",
             Self::NwSandbox => "nw-sandbox",
             Self::FsSandbox => "fs-sandbox",
-        }
-    }
-
-    pub(super) fn config_key(self) -> Option<&'static str> {
-        match self {
-            Self::Agent | Self::Proxy => None,
-            Self::NwSandbox => Some("nw_sandbox"),
-            Self::FsSandbox => Some("fs_sandbox"),
         }
     }
 }
@@ -272,12 +245,11 @@ mod tests {
     fn help_summaries_describe_the_baffle_workflow() {
         let mut command = Cli::command();
         for (name, expected) in [
-            ("run", "temporary runtime"),
+            ("run", "UUID-scoped run"),
             ("exec", "already-running"),
             ("init", "runtime layout"),
             ("build", "Baffle CA"),
             ("check", "Baffle CA"),
-            ("up", "Validate requirements"),
             ("reload-proxy", "Baffle sessions"),
         ] {
             let summary = command
@@ -369,21 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn up_and_down_verbose_flags_parse() {
-        let up = Cli::try_parse_from(["cladding", "up", "-v"]).expect("cli parse");
-        match up.command.expect("command") {
-            CommandSpec::Up { verbose } => assert!(verbose),
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let down = Cli::try_parse_from(["cladding", "down", "--verbose"]).expect("cli parse");
-        match down.command.expect("command") {
-            CommandSpec::Down { verbose } => assert!(verbose),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
     fn shared_directory_and_config_options_parse_before_and_after_command() {
         let before = Cli::try_parse_from([
             "cladding",
@@ -391,7 +348,7 @@ mod tests {
             "/tmp/app/.cladding",
             "--config",
             "./custom.json",
-            "up",
+            "build",
         ])
         .expect("global options before command should parse");
         assert_eq!(
@@ -399,11 +356,11 @@ mod tests {
             Some(Path::new("/tmp/app/.cladding"))
         );
         assert_eq!(before.config.as_deref(), Some(Path::new("./custom.json")));
-        assert!(matches!(before.command, Some(CommandSpec::Up { .. })));
+        assert!(matches!(before.command, Some(CommandSpec::Build)));
 
         let after = Cli::try_parse_from([
             "cladding",
-            "up",
+            "build",
             "--cladding-dir",
             "/tmp/app/.cladding",
             "--config",
@@ -415,6 +372,12 @@ mod tests {
             after.cladding_dir.as_deref(),
             Some(Path::new("/tmp/app/.cladding"))
         );
+    }
+
+    #[test]
+    fn persistent_up_and_down_commands_are_removed() {
+        assert!(Cli::try_parse_from(["cladding", "up"]).is_err());
+        assert!(Cli::try_parse_from(["cladding", "down"]).is_err());
     }
 
     #[test]

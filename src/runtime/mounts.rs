@@ -334,7 +334,7 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn canonical_or_normalized(path: &Path) -> PathBuf {
+pub(super) fn canonical_or_normalized(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| normalize_path(path))
 }
 

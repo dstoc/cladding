@@ -1,4 +1,5 @@
 use super::context::Context;
+use super::control::RunControl;
 use super::{exec, lifecycle};
 use anyhow::Context as _;
 use cladding::error::{Error, Result};
@@ -44,7 +45,7 @@ pub(super) fn cmd_run(
     )?;
     let instance_name = format!("cladding-run-{}", generate_uuid_v4()?);
     if verbose {
-        println!("starting one-off instance: {instance_name}");
+        eprintln!("starting one-off instance: {instance_name}");
     }
 
     let mut config = source_context.load_config().map_err(|err| {
@@ -118,8 +119,24 @@ pub(super) fn cmd_run(
     let config = context
         .resolved_config()
         .expect("one-off run context stores its resolved configuration");
-    let spec = context.runtime_spec(config)?;
-    let mut resource_attempts = cladding::podman::RuntimeResourceAttempts::for_spec(&spec);
+    let mut spec = match context.runtime_spec(config) {
+        Ok(spec) => spec,
+        Err(setup_error) => {
+            drop(preparation);
+            let _cleanup = cladding::runtime_metrics::phase("cleanup");
+            let root_cleanup = remove_private_runtime_root(&runtime_root).map_err(Error::from);
+            let signal = signals.finish();
+            if let Err(cleanup_error) = root_cleanup {
+                report_cleanup_failure(&instance_name, &runtime_root, &cleanup_error);
+            }
+            if let Some(signal) = signal {
+                return Err(signal_status_error(signal));
+            }
+            return Err(Error::message(format!(
+                "one-off instance '{instance_name}' failed to prepare its runtime: {setup_error}"
+            )));
+        }
+    };
 
     if let Err(setup_error) = lifecycle::prepare_run_runtime_root(&runtime_root) {
         drop(preparation);
@@ -145,9 +162,55 @@ pub(super) fn cmd_run(
         )));
     }
 
+    let mut expected_roles = vec!["proxy".to_string(), "agent".to_string()];
+    if spec.nw_sandbox.is_some() {
+        expected_roles.push("nw-sandbox".to_string());
+    }
+    if spec.fs_sandbox.is_some() {
+        expected_roles.push("fs-sandbox".to_string());
+    }
+    let mut control = match RunControl::start(
+        &runtime_root,
+        instance_name.trim_start_matches("cladding-run-"),
+        &expected_roles,
+    ) {
+        Ok(control) => control,
+        Err(setup_error) => {
+            drop(preparation);
+            let _cleanup = cladding::runtime_metrics::phase("cleanup");
+            let root_cleanup = remove_private_runtime_root(&runtime_root).map_err(Error::from);
+            let signal = signals.finish();
+            if let Err(cleanup_error) = root_cleanup {
+                report_cleanup_failure(&instance_name, &runtime_root, &cleanup_error);
+            }
+            if let Some(signal) = signal {
+                return Err(signal_status_error(signal));
+            }
+            return Err(Error::message(format!(
+                "one-off instance '{instance_name}' failed to acquire run ownership: {setup_error}"
+            )));
+        }
+    };
+    if let Err(setup_error) = spec.set_run_control_metadata(control.socket_path(), config) {
+        drop(preparation);
+        let _cleanup = cladding::runtime_metrics::phase("cleanup");
+        let cleanup_error = cleanup_control_only(&runtime_root, &mut control);
+        let signal = signals.finish();
+        if let Err(cleanup_error) = cleanup_error {
+            report_cleanup_failure(&instance_name, &runtime_root, &cleanup_error);
+        }
+        if let Some(signal) = signal {
+            return Err(signal_status_error(signal));
+        }
+        return Err(Error::message(format!(
+            "one-off instance '{instance_name}' failed to prepare run metadata: {setup_error}"
+        )));
+    }
+    let mut resource_attempts = cladding::podman::RuntimeResourceAttempts::for_spec(&spec);
+
     drop(preparation);
     let (startup_result, runtime_create_attempted) =
-        lifecycle::cmd_up_ephemeral(&context, config, &spec, &mut resource_attempts, verbose);
+        lifecycle::start_run_runtime(&context, config, &spec, &mut resource_attempts, verbose);
 
     if let Err(startup_error) = startup_result {
         let _cleanup = cladding::runtime_metrics::phase("cleanup");
@@ -158,9 +221,10 @@ pub(super) fn cmd_run(
                 &runtime_root,
                 &instance_name,
                 verbose,
+                &mut control,
             )
         } else {
-            remove_private_runtime_root(&runtime_root).map_err(Error::from)
+            cleanup_control_only(&runtime_root, &mut control)
         };
         let signal = signals.finish();
         if let Err(cleanup_error) = cleanup_error {
@@ -188,11 +252,18 @@ pub(super) fn cmd_run(
                 &signals,
             ) {
                 Ok(fake_environment) => run_if_not_cancelled(signals.received(), || {
-                    let cancellation_check = || signals.received();
+                    if !control.mark_ready(fake_environment.clone()) {
+                        return Err(signal_status_error(SIGTERM));
+                    }
+                    eprintln!("run: {}", instance_name.trim_start_matches("cladding-run-"));
+                    let cancellation_check = || {
+                        signals
+                            .received()
+                            .or_else(|| control.stop_requested().then_some(SIGTERM))
+                    };
                     let mut effective_env = env_vars.to_vec();
                     effective_env.extend(fake_environment);
                     exec::cmd_run_command(
-                        &context,
                         config,
                         &spec,
                         &effective_env,
@@ -213,6 +284,7 @@ pub(super) fn cmd_run(
             &runtime_root,
             &instance_name,
             verbose,
+            &mut control,
         )
     };
     let signal = signals.finish();
@@ -792,13 +864,16 @@ fn cleanup_ephemeral_runtime(
     runtime_root: &Path,
     instance_name: &str,
     verbose: bool,
+    control: &mut RunControl,
 ) -> Result<()> {
     if verbose {
         eprintln!("cleaning up one-off instance: {instance_name}");
     }
+    control.mark_stopping();
     let (runtime_cleanup, runtime_root_safe_to_remove) =
-        lifecycle::cmd_down_ephemeral(spec, resource_attempts, verbose);
-    let local_cleanup = if runtime_root_safe_to_remove {
+        lifecycle::cleanup_run_runtime(spec, resource_attempts, verbose);
+    let socket_cleanup = control.unlink_socket_for_shutdown();
+    let local_cleanup = if runtime_root_safe_to_remove && socket_cleanup.is_ok() {
         remove_private_runtime_root(runtime_root)
             .with_context(|| {
                 format!(
@@ -810,13 +885,53 @@ fn cleanup_ephemeral_runtime(
     } else {
         Ok(())
     };
-    match (runtime_cleanup, local_cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(err), Ok(())) | (Ok(()), Err(err)) => Err(err),
-        (Err(runtime_err), Err(local_err)) => Err(Error::message(format!(
-            "{runtime_err}\nprivate runtime cleanup also failed: {local_err}"
+    let result = match (runtime_cleanup, socket_cleanup, local_cleanup) {
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
+        (Err(err), Ok(()), Ok(())) | (Ok(()), Err(err), Ok(())) | (Ok(()), Ok(()), Err(err)) => {
+            Err(err)
+        }
+        (Err(runtime_err), socket_result, local_result) => {
+            let mut errors = vec![runtime_err.to_string()];
+            if let Err(error) = socket_result {
+                errors.push(error.to_string());
+            }
+            if let Err(error) = local_result {
+                errors.push(error.to_string());
+            }
+            Err(Error::message(errors.join("\n")))
+        }
+        (Ok(()), Err(socket_err), Err(local_err)) => Err(Error::message(format!(
+            "{socket_err}\nprivate runtime cleanup also failed: {local_err}"
         ))),
-    }
+    };
+    let stop_error = result.as_ref().err().map(ToString::to_string);
+    control.mark_stopped(stop_error);
+    control.finish();
+    result
+}
+
+fn cleanup_control_only(runtime_root: &Path, control: &mut RunControl) -> Result<()> {
+    control.mark_stopping();
+    let socket_cleanup = control.unlink_socket_for_shutdown();
+    let root_cleanup = if socket_cleanup.is_ok() {
+        remove_private_runtime_root(runtime_root)
+            .with_context(|| {
+                format!(
+                    "failed to remove private runtime root {}",
+                    runtime_root.display()
+                )
+            })
+            .map_err(Error::from)
+    } else {
+        Ok(())
+    };
+    let result = match (socket_cleanup, root_cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+    };
+    control.mark_stopped(result.as_ref().err().map(ToString::to_string));
+    control.finish();
+    result
 }
 
 fn remove_private_runtime_root(runtime_root: &Path) -> anyhow::Result<()> {

@@ -249,8 +249,6 @@ fn format_summary(label: &str, total: Duration, data: &Arc<Mutex<MetricsData>>) 
             ("user command", "command"),
             ("cleanup", "cleanup"),
         ],
-        "up" => &[("runtime startup", "startup"), ("cleanup", "cleanup")],
-        "down" => &[("runtime teardown", "teardown")],
         _ => &[],
     };
 

@@ -166,7 +166,7 @@ class BaffleCiAssetsTests(unittest.TestCase):
             validator,
         )
         self.assertIn(
-            'Saved cladding up --verbose output (fixture credentials redacted):',
+            'Saved cladding run startup output (fixture credentials redacted):',
             validator,
         )
         self.assertIn('cat "$temp_root/startup.redacted.log"', validator)
@@ -420,15 +420,20 @@ class BaffleCiAssetsTests(unittest.TestCase):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()
         expose = EXPOSE_VALIDATOR.read_text()
         self.assertIn('"$script_dir/validate_expose.py"', validator)
-        self.assertIn("phase=\"validate cladding expose forwarding and selection\"", validator)
-        self.assertIn('"--cladding-dir"', expose)
-        self.assertIn('"--config"', expose)
-        self.assertIn('default_config.write_text("not a valid Cladding config', expose)
+        self.assertIn(
+            'phase="validate expose forwarding, explicit run selection, and shutdown"',
+            validator,
+        )
+        self.assertIn('"--run"', expose)
+        self.assertNotIn('"--config"', expose)
+        self.assertIn('"not a valid Cladding config\\n"', expose)
         self.assertIn('decoy_cladding_dir / "cladding.json"', expose)
-        self.assertIn('payload = b"cladding expose reaches the existing agent', expose)
+        self.assertIn('cwd=working_directory', expose)
+        self.assertIn('payload = b"cladding expose reaches the selected run agent', expose)
         self.assertIn("self.project_resources() != baseline_resources", expose)
-        self.assertIn("must not create a one-off runtime", expose)
-        self.assertIn("created no runtime resources", expose)
+        self.assertIn("expose changed run containers or volumes while forwarding", expose)
+        self.assertIn("explicit run selection works outside the project", expose)
+        self.assertIn("validate_idle_listener_closes_on_run_shutdown", expose)
 
     def test_shared_topology_validator_exercises_one_off_run_sources_and_cleanup(self):
         validator = RUNTIME_TOPOLOGY_VALIDATOR.read_text()

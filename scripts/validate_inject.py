@@ -204,9 +204,9 @@ class EchoServer(socketserver.ThreadingTCPServer):
 
 
 class InjectValidator:
-    def __init__(self, cladding: str, cladding_dir: str, agent: str) -> None:
+    def __init__(self, cladding: str, run_uuid: str, agent: str) -> None:
         self.cladding = cladding
-        self.cladding_dir = cladding_dir
+        self.run_uuid = run_uuid
         self.agent = agent
         self.phase = "initialize"
         self.inject: subprocess.Popen[str] | None = None
@@ -351,9 +351,9 @@ class InjectValidator:
         self.inject = subprocess.Popen(
             [
                 self.cladding,
-                "--cladding-dir",
-                self.cladding_dir,
                 "inject",
+                "--run",
+                self.run_uuid,
                 f"localhost:{host_port}",
                 str(agent_port),
             ],
@@ -766,10 +766,10 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cladding-bin", required=True)
-    parser.add_argument("--cladding-dir", required=True)
+    parser.add_argument("--run", required=True)
     parser.add_argument("--agent", required=True)
     args = parser.parse_args()
-    validator = InjectValidator(args.cladding_bin, args.cladding_dir, args.agent)
+    validator = InjectValidator(args.cladding_bin, args.run, args.agent)
     try:
         validator.run()
         return 0

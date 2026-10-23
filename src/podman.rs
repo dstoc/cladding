@@ -9,8 +9,8 @@ pub use command::{
     ensure_success, ensure_success_output, forward_output, run_helper_command, trace_command,
 };
 pub use discovery::{
-    ContainerSnapshot, RunningProject, list_container_snapshot, list_running_projects,
-    podman_container_exists, podman_required, runsc_available,
+    ContainerSnapshot, DiscoveredRun, RunComponent, list_container_snapshot, list_discovered_runs,
+    podman_container_exists, podman_required, runsc_available, select_run,
 };
 pub use runtime::{
     RuntimeCleanupReport, RuntimeInventory, RuntimeResource, RuntimeResourceAttempts, container_rm,
