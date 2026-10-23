@@ -182,8 +182,103 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "$ASSET" --clobber
 
+  # Repackages the helper binaries already built by build-helpers. Keep this
+  # separate from upload-binaries so each existing host archive stays intact.
+  package-bridge-assets:
+    needs: [release-please, build-helpers]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      x86_64_executable_sha256: ${{ steps.package.outputs.x86_64_executable_sha256 }}
+      aarch64_executable_sha256: ${{ steps.package.outputs.aarch64_executable_sha256 }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-linux-helpers-x86_64
+          path: ${{ runner.temp }}/helpers/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: cladding-linux-helpers-aarch64
+          path: ${{ runner.temp }}/helpers/aarch64
+      - name: Package and verify cladding-bridge release assets
+        id: package
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          assets_dir="$RUNNER_TEMP/cladding-bridge-release"
+          archive_sums="$assets_dir/cladding-bridge-SHA256SUMS"
+          executable_sums="$assets_dir/cladding-bridge-executable-SHA256SUMS"
+          mkdir -p "$assets_dir"
+          : > "$archive_sums"
+          : > "$executable_sums"
+
+          for arch in x86_64 aarch64; do
+            target="${arch}-unknown-linux-gnu"
+            bridge="$RUNNER_TEMP/helpers/$arch/cladding-bridge"
+            test -f "$bridge"
+            chmod 0755 "$bridge"
+            description=$(file -b "$bridge")
+            printf '%s: %s\n' "$bridge" "$description"
+            case "$arch:$description" in
+              x86_64:"ELF 64-bit"*x86-64*) ;;
+              aarch64:"ELF 64-bit"*aarch64*) ;;
+              *) echo "Expected a Linux $arch cladding-bridge executable" >&2; exit 1 ;;
+            esac
+
+            archive="$assets_dir/cladding-bridge-${RELEASE_TAG}-${target}.tar.gz"
+            (
+              cd "$(dirname "$bridge")"
+              tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - cladding-bridge | gzip -n > "$archive"
+            )
+            test "$(tar -tzf "$archive")" = cladding-bridge
+
+            extracted="$RUNNER_TEMP/verify-cladding-bridge-$arch"
+            mkdir -p "$extracted"
+            tar -xzf "$archive" -C "$extracted"
+            test -f "$extracted/cladding-bridge"
+            cmp "$bridge" "$extracted/cladding-bridge"
+            chmod 0755 "$extracted/cladding-bridge"
+            test -x "$extracted/cladding-bridge"
+            extracted_description=$(file -b "$extracted/cladding-bridge")
+            printf '%s: %s\n' "$archive" "$extracted_description"
+            case "$arch:$extracted_description" in
+              x86_64:"ELF 64-bit"*x86-64*) ;;
+              aarch64:"ELF 64-bit"*aarch64*) ;;
+              *) echo "Archive does not contain a Linux $arch executable" >&2; exit 1 ;;
+            esac
+
+            archive_sha256=$(sha256sum "$archive" | cut -d ' ' -f 1)
+            executable_sha256=$(sha256sum "$extracted/cladding-bridge" | cut -d ' ' -f 1)
+            printf '%s  %s\n' "$archive_sha256" "$(basename "$archive")" >> "$archive_sums"
+            printf '%s  cladding-bridge-%s-%s\n' "$executable_sha256" "$RELEASE_TAG" "$target" >> "$executable_sums"
+            printf '%s_executable_sha256=%s\n' "$arch" "$executable_sha256" >> "$GITHUB_OUTPUT"
+          done
+
+          (cd "$assets_dir" && sha256sum --check cladding-bridge-SHA256SUMS)
+          cat "$archive_sums"
+          cat "$executable_sums"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cladding-bridge-executable-checksums-${{ needs.release-please.outputs.tag_name }}
+          path: ${{ runner.temp }}/cladding-bridge-release/cladding-bridge-executable-SHA256SUMS
+          if-no-files-found: error
+      - name: Upload bridge assets to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/cladding-bridge-release/cladding-bridge-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz" \
+            "$RUNNER_TEMP/cladding-bridge-release/cladding-bridge-${RELEASE_TAG}-aarch64-unknown-linux-gnu.tar.gz" \
+            "$RUNNER_TEMP/cladding-bridge-release/cladding-bridge-SHA256SUMS" \
+            --clobber
+
   publish-release:
-    needs: [release-please, upload-binaries]
+    needs: [release-please, upload-binaries, package-bridge-assets]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
